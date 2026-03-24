@@ -1,6 +1,6 @@
 package group.gnometrading.oms.order;
 
-public class OmsCancelOrder {
+public final class OmsCancelOrder {
 
     private int exchangeId;
     private long securityId;
@@ -9,6 +9,7 @@ public class OmsCancelOrder {
 
     public OmsCancelOrder() {}
 
+    @SuppressWarnings("checkstyle:HiddenField")
     public void set(int exchangeId, long securityId, int strategyId, long clientOid) {
         this.exchangeId = exchangeId;
         this.securityId = securityId;
@@ -23,8 +24,19 @@ public class OmsCancelOrder {
         this.clientOid = 0;
     }
 
-    public int exchangeId() { return exchangeId; }
-    public long securityId() { return securityId; }
-    public int strategyId() { return strategyId; }
-    public long clientOid() { return clientOid; }
+    public int exchangeId() {
+        return exchangeId;
+    }
+
+    public long securityId() {
+        return securityId;
+    }
+
+    public int strategyId() {
+        return strategyId;
+    }
+
+    public long clientOid() {
+        return clientOid;
+    }
 }

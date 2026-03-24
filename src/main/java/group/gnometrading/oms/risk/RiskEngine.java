@@ -4,7 +4,7 @@ import group.gnometrading.oms.order.OmsOrder;
 import group.gnometrading.oms.position.PositionTracker;
 import group.gnometrading.oms.state.OrderStateManager;
 
-public class RiskEngine {
+public final class RiskEngine {
 
     private static final RiskCheckResult APPROVED = new RiskCheckResult.Approved();
 

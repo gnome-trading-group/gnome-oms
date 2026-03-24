@@ -4,10 +4,9 @@ import group.gnometrading.collections.IntHashMap;
 import group.gnometrading.collections.LongHashMap;
 import group.gnometrading.pools.SingleThreadedObjectPool;
 import group.gnometrading.schemas.Side;
-
 import java.util.function.Consumer;
 
-public class DefaultPositionTracker implements PositionTracker {
+public final class DefaultPositionTracker implements PositionTracker {
 
     // Firm-level positions: (exchangeId, securityId) -> Position
     private final IntHashMap<LongHashMap<Position>> positions;
@@ -50,7 +49,8 @@ public class DefaultPositionTracker implements PositionTracker {
     // --- Per-strategy ---
 
     @Override
-    public void applyStrategyFill(int strategyId, int exchangeId, long securityId, Side side, long qty, long price, double fee) {
+    public void applyStrategyFill(
+            int strategyId, int exchangeId, long securityId, Side side, long qty, long price, double fee) {
         // Update firm-level
         Position firmPosition = getOrCreatePosition(positions, exchangeId, securityId);
         firmPosition.applyFill(side, qty, price, fee);

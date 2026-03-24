@@ -1,10 +1,10 @@
 package group.gnometrading.oms.order;
 
-import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.OrderType;
+import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.TimeInForce;
 
-public class OmsOrder {
+public final class OmsOrder {
 
     private int exchangeId;
     private long securityId;
@@ -18,8 +18,17 @@ public class OmsOrder {
 
     public OmsOrder() {}
 
-    public void set(int exchangeId, long securityId, int strategyId, long clientOid,
-                    Side side, long price, long size, OrderType orderType, TimeInForce timeInForce) {
+    @SuppressWarnings("checkstyle:HiddenField")
+    public void set(
+            int exchangeId,
+            long securityId,
+            int strategyId,
+            long clientOid,
+            Side side,
+            long price,
+            long size,
+            OrderType orderType,
+            TimeInForce timeInForce) {
         this.exchangeId = exchangeId;
         this.securityId = securityId;
         this.strategyId = strategyId;
@@ -43,13 +52,39 @@ public class OmsOrder {
         this.timeInForce = null;
     }
 
-    public int exchangeId() { return exchangeId; }
-    public long securityId() { return securityId; }
-    public int strategyId() { return strategyId; }
-    public long clientOid() { return clientOid; }
-    public Side side() { return side; }
-    public long price() { return price; }
-    public long size() { return size; }
-    public OrderType orderType() { return orderType; }
-    public TimeInForce timeInForce() { return timeInForce; }
+    public int exchangeId() {
+        return exchangeId;
+    }
+
+    public long securityId() {
+        return securityId;
+    }
+
+    public int strategyId() {
+        return strategyId;
+    }
+
+    public long clientOid() {
+        return clientOid;
+    }
+
+    public Side side() {
+        return side;
+    }
+
+    public long price() {
+        return price;
+    }
+
+    public long size() {
+        return size;
+    }
+
+    public OrderType orderType() {
+        return orderType;
+    }
+
+    public TimeInForce timeInForce() {
+        return timeInForce;
+    }
 }

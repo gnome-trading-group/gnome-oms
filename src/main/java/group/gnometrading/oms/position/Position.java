@@ -2,7 +2,7 @@ package group.gnometrading.oms.position;
 
 import group.gnometrading.schemas.Side;
 
-public class Position {
+public final class Position {
 
     private int exchangeId;
     private long securityId;
@@ -17,9 +17,9 @@ public class Position {
         reset();
     }
 
-    public void init(int exchangeId, long securityId) {
-        this.exchangeId = exchangeId;
-        this.securityId = securityId;
+    public void init(int newExchangeId, long newSecurityId) {
+        this.exchangeId = newExchangeId;
+        this.securityId = newSecurityId;
     }
 
     public void reset() {
@@ -79,9 +79,7 @@ public class Position {
         }
     }
 
-    /**
-     * Confirmed net quantity + inflight buy - inflight sell.
-     */
+    /** Confirmed net quantity + inflight buy - inflight sell. */
     public long getEffectiveQuantity() {
         return netQuantity + leavesBuyQty - leavesSellQty;
     }

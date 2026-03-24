@@ -7,7 +7,7 @@ import group.gnometrading.schemas.OrderType;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.TimeInForce;
 
-public class TrackedOrder {
+public final class TrackedOrder {
 
     // Copied from OmsOrder at init time
     private int exchangeId;
@@ -84,22 +84,59 @@ public class TrackedOrder {
             case CANCEL -> state = OrderState.CANCELED;
             case REJECT -> state = OrderState.REJECTED;
             case EXPIRE -> state = OrderState.EXPIRED;
-            default -> { /* CANCEL_REJECT: no state change */ }
+            default -> {
+                /* CANCEL_REJECT: no state change */
+            }
         }
     }
 
-    public OrderState getState() { return state; }
-    public int getExchangeId() { return exchangeId; }
-    public long getSecurityId() { return securityId; }
-    public int getStrategyId() { return strategyId; }
-    public long getClientOid() { return clientOid; }
-    public Side getSide() { return side; }
-    public long getPrice() { return price; }
-    public long getSize() { return size; }
-    public OrderType getOrderType() { return orderType; }
-    public TimeInForce getTimeInForce() { return timeInForce; }
-    public long getFilledQty() { return filledQty; }
-    public long getLeavesQty() { return leavesQty; }
+    public OrderState getState() {
+        return state;
+    }
+
+    public int getExchangeId() {
+        return exchangeId;
+    }
+
+    public long getSecurityId() {
+        return securityId;
+    }
+
+    public int getStrategyId() {
+        return strategyId;
+    }
+
+    public long getClientOid() {
+        return clientOid;
+    }
+
+    public Side getSide() {
+        return side;
+    }
+
+    public long getPrice() {
+        return price;
+    }
+
+    public long getSize() {
+        return size;
+    }
+
+    public OrderType getOrderType() {
+        return orderType;
+    }
+
+    public TimeInForce getTimeInForce() {
+        return timeInForce;
+    }
+
+    public long getFilledQty() {
+        return filledQty;
+    }
+
+    public long getLeavesQty() {
+        return leavesQty;
+    }
 
     public long getAvgFillPrice() {
         return filledQty == 0 ? 0 : totalCost / filledQty;

@@ -4,7 +4,7 @@ import group.gnometrading.oms.order.OmsCancelOrder;
 import group.gnometrading.oms.order.OmsOrder;
 import group.gnometrading.oms.order.OmsReplaceOrder;
 
-public class OmsAction {
+public final class OmsAction {
 
     public enum Type {
         NEW_ORDER,
@@ -19,10 +19,21 @@ public class OmsAction {
 
     public OmsAction() {}
 
-    public Type type() { return type; }
-    public OmsOrder order() { return order; }
-    public OmsCancelOrder cancel() { return cancel; }
-    public OmsReplaceOrder replace() { return replace; }
+    public Type type() {
+        return type;
+    }
+
+    public OmsOrder order() {
+        return order;
+    }
+
+    public OmsCancelOrder cancel() {
+        return cancel;
+    }
+
+    public OmsReplaceOrder replace() {
+        return replace;
+    }
 
     public OmsOrder asNewOrder() {
         this.type = Type.NEW_ORDER;

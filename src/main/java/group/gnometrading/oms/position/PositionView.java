@@ -5,8 +5,8 @@ import java.util.function.Consumer;
 /**
  * Read-only view of position state for a single strategy.
  *
- * In live trading, backed by a local copy updated from a fill event ring buffer.
- * In backtesting, backed directly by the OMS PositionTracker (same thread).
+ * <p>In live trading, backed by a local copy updated from a fill event ring buffer. In backtesting,
+ * backed directly by the OMS PositionTracker (same thread).
  */
 public interface PositionView {
 

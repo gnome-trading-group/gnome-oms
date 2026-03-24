@@ -2,7 +2,6 @@ package group.gnometrading.oms.state;
 
 import group.gnometrading.oms.order.OmsExecutionReport;
 import group.gnometrading.oms.order.OmsOrder;
-
 import java.util.function.Consumer;
 
 public interface OrderStateManager {

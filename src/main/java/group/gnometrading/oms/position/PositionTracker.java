@@ -1,7 +1,6 @@
 package group.gnometrading.oms.position;
 
 import group.gnometrading.schemas.Side;
-
 import java.util.function.Consumer;
 
 public interface PositionTracker {
@@ -14,7 +13,8 @@ public interface PositionTracker {
 
     // --- Per-strategy ---
 
-    void applyStrategyFill(int strategyId, int exchangeId, long securityId, Side side, long qty, long price, double fee);
+    void applyStrategyFill(
+            int strategyId, int exchangeId, long securityId, Side side, long qty, long price, double fee);
 
     Position getStrategyPosition(int strategyId, int exchangeId, long securityId);
 

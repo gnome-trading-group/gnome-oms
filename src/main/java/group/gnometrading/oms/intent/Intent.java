@@ -6,18 +6,16 @@ import group.gnometrading.schemas.Side;
 /**
  * Flat union intent — single fixed-size struct for ring buffer slots.
  *
- * Supports quoting (passive resting orders) and taking (aggressive IOC orders)
- * simultaneously. Set fields to zero/null to disable a section.
+ * <p>Supports quoting (passive resting orders) and taking (aggressive IOC orders) simultaneously.
+ * Set fields to zero/null to disable a section.
  *
- * Quote fields: bidPrice, bidSize, askPrice, askSize
- *   - bidSize/askSize > 0 means desired resting order on that side
- *   - bidSize/askSize == 0 means cancel any existing order on that side
+ * <p>Quote fields: bidPrice, bidSize, askPrice, askSize - bidSize/askSize > 0 means desired resting
+ * order on that side - bidSize/askSize == 0 means cancel any existing order on that side
  *
- * Take fields: takeSide, takeSize, takeOrderType, takeLimitPrice
- *   - takeSize > 0 means emit an aggressive IOC order this tick
- *   - takeSize == 0 means no aggressive action
+ * <p>Take fields: takeSide, takeSize, takeOrderType, takeLimitPrice - takeSize > 0 means emit an
+ * aggressive IOC order this tick - takeSize == 0 means no aggressive action
  */
-public class Intent {
+public final class Intent {
 
     private int exchangeId;
     private long securityId;
@@ -37,9 +35,9 @@ public class Intent {
 
     public Intent() {}
 
-    public void setQuote(int exchangeId, long securityId, int strategyId,
-                         long bidPrice, long bidSize,
-                         long askPrice, long askSize) {
+    @SuppressWarnings("checkstyle:HiddenField")
+    public void setQuote(
+            int exchangeId, long securityId, int strategyId, long bidPrice, long bidSize, long askPrice, long askSize) {
         this.exchangeId = exchangeId;
         this.securityId = securityId;
         this.strategyId = strategyId;
@@ -53,9 +51,15 @@ public class Intent {
         this.takeLimitPrice = 0;
     }
 
-    public void setTake(int exchangeId, long securityId, int strategyId,
-                        Side side, long size,
-                        OrderType orderType, long limitPrice) {
+    @SuppressWarnings("checkstyle:HiddenField")
+    public void setTake(
+            int exchangeId,
+            long securityId,
+            int strategyId,
+            Side side,
+            long size,
+            OrderType orderType,
+            long limitPrice) {
         this.exchangeId = exchangeId;
         this.securityId = securityId;
         this.strategyId = strategyId;
@@ -69,11 +73,19 @@ public class Intent {
         this.takeLimitPrice = limitPrice;
     }
 
-    public void setQuoteAndTake(int exchangeId, long securityId, int strategyId,
-                                long bidPrice, long bidSize,
-                                long askPrice, long askSize,
-                                Side takeSide, long takeSize,
-                                OrderType takeOrderType, long takeLimitPrice) {
+    @SuppressWarnings("checkstyle:HiddenField")
+    public void setQuoteAndTake(
+            int exchangeId,
+            long securityId,
+            int strategyId,
+            long bidPrice,
+            long bidSize,
+            long askPrice,
+            long askSize,
+            Side takeSide,
+            long takeSize,
+            OrderType takeOrderType,
+            long takeLimitPrice) {
         this.exchangeId = exchangeId;
         this.securityId = securityId;
         this.strategyId = strategyId;
@@ -101,18 +113,55 @@ public class Intent {
         this.takeLimitPrice = 0;
     }
 
-    public boolean hasQuote() { return bidSize > 0 || askSize > 0; }
-    public boolean hasTake() { return takeSize > 0; }
+    public boolean hasQuote() {
+        return bidSize > 0 || askSize > 0;
+    }
 
-    public int getExchangeId() { return exchangeId; }
-    public long getSecurityId() { return securityId; }
-    public int getStrategyId() { return strategyId; }
-    public long getBidPrice() { return bidPrice; }
-    public long getBidSize() { return bidSize; }
-    public long getAskPrice() { return askPrice; }
-    public long getAskSize() { return askSize; }
-    public Side getTakeSide() { return takeSide; }
-    public long getTakeSize() { return takeSize; }
-    public OrderType getTakeOrderType() { return takeOrderType; }
-    public long getTakeLimitPrice() { return takeLimitPrice; }
+    public boolean hasTake() {
+        return takeSize > 0;
+    }
+
+    public int getExchangeId() {
+        return exchangeId;
+    }
+
+    public long getSecurityId() {
+        return securityId;
+    }
+
+    public int getStrategyId() {
+        return strategyId;
+    }
+
+    public long getBidPrice() {
+        return bidPrice;
+    }
+
+    public long getBidSize() {
+        return bidSize;
+    }
+
+    public long getAskPrice() {
+        return askPrice;
+    }
+
+    public long getAskSize() {
+        return askSize;
+    }
+
+    public Side getTakeSide() {
+        return takeSide;
+    }
+
+    public long getTakeSize() {
+        return takeSize;
+    }
+
+    public OrderType getTakeOrderType() {
+        return takeOrderType;
+    }
+
+    public long getTakeLimitPrice() {
+        return takeLimitPrice;
+    }
 }

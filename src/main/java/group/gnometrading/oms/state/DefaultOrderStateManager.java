@@ -5,10 +5,9 @@ import group.gnometrading.oms.order.OmsExecutionReport;
 import group.gnometrading.oms.order.OmsOrder;
 import group.gnometrading.pools.PoolNode;
 import group.gnometrading.pools.SingleThreadedObjectPool;
-
 import java.util.function.Consumer;
 
-public class DefaultOrderStateManager implements OrderStateManager {
+public final class DefaultOrderStateManager implements OrderStateManager {
 
     private final LongHashMap<TrackedOrder> orders;
     private final LongHashMap<PoolNode<TrackedOrder>> orderNodes;
@@ -84,7 +83,8 @@ public class DefaultOrderStateManager implements OrderStateManager {
     }
 
     @Override
-    public void forEachOpenStrategyOrderFor(int strategyId, int exchangeId, long securityId, Consumer<TrackedOrder> consumer) {
+    public void forEachOpenStrategyOrderFor(
+            int strategyId, int exchangeId, long securityId, Consumer<TrackedOrder> consumer) {
         for (long clientOid : orders.keys()) {
             TrackedOrder order = orders.get(clientOid);
             if (!order.getState().isTerminal()

@@ -3,7 +3,7 @@ package group.gnometrading.oms.order;
 import group.gnometrading.schemas.ExecType;
 import group.gnometrading.schemas.OrderStatus;
 
-public class OmsExecutionReport {
+public final class OmsExecutionReport {
 
     private long clientOid;
     private int strategyId;
@@ -21,10 +21,21 @@ public class OmsExecutionReport {
 
     public OmsExecutionReport() {}
 
-    public void set(long clientOid, int strategyId, ExecType execType, OrderStatus orderStatus,
-                    long filledQty, long fillPrice, long totalFilledQty, long leavesQty,
-                    double fee, int exchangeId, long securityId,
-                    long timestampEvent, long timestampRecv) {
+    @SuppressWarnings("checkstyle:HiddenField")
+    public void set(
+            long clientOid,
+            int strategyId,
+            ExecType execType,
+            OrderStatus orderStatus,
+            long filledQty,
+            long fillPrice,
+            long totalFilledQty,
+            long leavesQty,
+            double fee,
+            int exchangeId,
+            long securityId,
+            long timestampEvent,
+            long timestampRecv) {
         this.clientOid = clientOid;
         this.strategyId = strategyId;
         this.execType = execType;
@@ -56,17 +67,55 @@ public class OmsExecutionReport {
         this.timestampRecv = 0;
     }
 
-    public long clientOid() { return clientOid; }
-    public int strategyId() { return strategyId; }
-    public ExecType execType() { return execType; }
-    public OrderStatus orderStatus() { return orderStatus; }
-    public long filledQty() { return filledQty; }
-    public long fillPrice() { return fillPrice; }
-    public long totalFilledQty() { return totalFilledQty; }
-    public long leavesQty() { return leavesQty; }
-    public double fee() { return fee; }
-    public int exchangeId() { return exchangeId; }
-    public long securityId() { return securityId; }
-    public long timestampEvent() { return timestampEvent; }
-    public long timestampRecv() { return timestampRecv; }
+    public long clientOid() {
+        return clientOid;
+    }
+
+    public int strategyId() {
+        return strategyId;
+    }
+
+    public ExecType execType() {
+        return execType;
+    }
+
+    public OrderStatus orderStatus() {
+        return orderStatus;
+    }
+
+    public long filledQty() {
+        return filledQty;
+    }
+
+    public long fillPrice() {
+        return fillPrice;
+    }
+
+    public long totalFilledQty() {
+        return totalFilledQty;
+    }
+
+    public long leavesQty() {
+        return leavesQty;
+    }
+
+    public double fee() {
+        return fee;
+    }
+
+    public int exchangeId() {
+        return exchangeId;
+    }
+
+    public long securityId() {
+        return securityId;
+    }
+
+    public long timestampEvent() {
+        return timestampEvent;
+    }
+
+    public long timestampRecv() {
+        return timestampRecv;
+    }
 }

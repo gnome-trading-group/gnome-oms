@@ -4,7 +4,7 @@ import group.gnometrading.oms.order.OmsOrder;
 import group.gnometrading.oms.position.PositionTracker;
 import group.gnometrading.oms.state.OrderStateManager;
 
-public class MaxNotionalValuePolicy implements RiskPolicy {
+public final class MaxNotionalValuePolicy implements RiskPolicy {
 
     private final long maxNotionalValue;
 
@@ -17,9 +17,7 @@ public class MaxNotionalValuePolicy implements RiskPolicy {
         long notional = order.price() * order.size();
         if (notional > maxNotionalValue) {
             return new RiskCheckResult.Rejected(
-                    "MaxNotionalValue",
-                    String.format("Order notional %d exceeds max %d", notional, maxNotionalValue)
-            );
+                    "MaxNotionalValue", String.format("Order notional %d exceeds max %d", notional, maxNotionalValue));
         }
         return new RiskCheckResult.Approved();
     }

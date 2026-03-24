@@ -1,6 +1,6 @@
 package group.gnometrading.oms.order;
 
-public class OmsReplaceOrder {
+public final class OmsReplaceOrder {
 
     private int exchangeId;
     private long securityId;
@@ -12,8 +12,15 @@ public class OmsReplaceOrder {
 
     public OmsReplaceOrder() {}
 
-    public void set(int exchangeId, long securityId, int strategyId,
-                    long originalClientOid, long newClientOid, long price, long size) {
+    @SuppressWarnings("checkstyle:HiddenField")
+    public void set(
+            int exchangeId,
+            long securityId,
+            int strategyId,
+            long originalClientOid,
+            long newClientOid,
+            long price,
+            long size) {
         this.exchangeId = exchangeId;
         this.securityId = securityId;
         this.strategyId = strategyId;
@@ -33,11 +40,31 @@ public class OmsReplaceOrder {
         this.size = 0;
     }
 
-    public int exchangeId() { return exchangeId; }
-    public long securityId() { return securityId; }
-    public int strategyId() { return strategyId; }
-    public long originalClientOid() { return originalClientOid; }
-    public long newClientOid() { return newClientOid; }
-    public long price() { return price; }
-    public long size() { return size; }
+    public int exchangeId() {
+        return exchangeId;
+    }
+
+    public long securityId() {
+        return securityId;
+    }
+
+    public int strategyId() {
+        return strategyId;
+    }
+
+    public long originalClientOid() {
+        return originalClientOid;
+    }
+
+    public long newClientOid() {
+        return newClientOid;
+    }
+
+    public long price() {
+        return price;
+    }
+
+    public long size() {
+        return size;
+    }
 }
