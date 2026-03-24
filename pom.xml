@@ -26,14 +26,6 @@
         </repository>
     </distributionManagement>
 
-    <repositories>
-        <repository>
-            <id>github</id>
-            <name>Internal Projects</name>
-            <url>https://maven.pkg.github.com/gnome-trading-group/*</url>
-        </repository>
-    </repositories>
-
     <dependencies>
         <dependency>
             <groupId>group.gnometrading</groupId>
