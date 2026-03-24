@@ -8,24 +8,4 @@
             <password>${env.GITHUB_TOKEN}</password>
         </server>
     </servers>
-    <profiles>
-        <profile>
-            <id>github</id>
-            <repositories>
-                <repository>
-                    <id>github</id>
-                    <url>https://maven.pkg.github.com/gnome-trading-group/*</url>
-                </repository>
-            </repositories>
-            <pluginRepositories>
-                <pluginRepository>
-                    <id>github</id>
-                    <url>https://maven.pkg.github.com/gnome-trading-group/*</url>
-                </pluginRepository>
-            </pluginRepositories>
-        </profile>
-    </profiles>
-    <activeProfiles>
-        <activeProfile>github</activeProfile>
-    </activeProfiles>
 </settings>
