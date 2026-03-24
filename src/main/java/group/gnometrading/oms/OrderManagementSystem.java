@@ -1,11 +1,13 @@
 package group.gnometrading.oms;
 
+import group.gnometrading.collections.IntHashMap;
 import group.gnometrading.oms.intent.ClientOidGenerator;
 import group.gnometrading.oms.intent.Intent;
 import group.gnometrading.oms.intent.IntentResolver;
 import group.gnometrading.oms.intent.OmsAction;
 import group.gnometrading.oms.order.OmsExecutionReport;
 import group.gnometrading.oms.order.OmsOrder;
+import group.gnometrading.oms.order.OmsReplaceOrder;
 import group.gnometrading.oms.position.DefaultPositionTracker;
 import group.gnometrading.oms.position.Position;
 import group.gnometrading.oms.position.PositionTracker;
@@ -26,45 +28,76 @@ public class OrderManagementSystem {
   private final OrderStateManager orderStateManager;
   private final PositionTracker positionTracker;
   private final RiskEngine riskEngine;
-  private final IntentResolver intentResolver;
+  private final ClientOidGenerator oidGenerator;
+  private final long defaultTickSize;
+  private final IntHashMap<IntentResolver> resolvers;
+  private final OmsOrder riskCheckOrder = new OmsOrder();
 
-  public OrderManagementSystem(RiskEngine riskEngine, ClientOidGenerator oidGenerator) {
-    this(new DefaultOrderStateManager(), new DefaultPositionTracker(), riskEngine, oidGenerator);
+  private Consumer<OmsAction> actionConsumer;
+
+  public OrderManagementSystem(RiskEngine riskEngine, ClientOidGenerator oidGenerator,
+      long defaultTickSize) {
+    this(new DefaultOrderStateManager(), new DefaultPositionTracker(), riskEngine, oidGenerator,
+        defaultTickSize);
   }
 
   public OrderManagementSystem(
       OrderStateManager orderStateManager,
       PositionTracker positionTracker,
       RiskEngine riskEngine,
-      ClientOidGenerator oidGenerator) {
+      ClientOidGenerator oidGenerator,
+      long defaultTickSize) {
     this.orderStateManager = orderStateManager;
     this.positionTracker = positionTracker;
     this.riskEngine = riskEngine;
-    this.intentResolver = new IntentResolver(orderStateManager, oidGenerator);
+    this.oidGenerator = oidGenerator;
+    this.defaultTickSize = defaultTickSize;
+    this.resolvers = new IntHashMap<>(4);
+  }
+
+  public void setActionConsumer(Consumer<OmsAction> actionConsumer) {
+    this.actionConsumer = actionConsumer;
   }
 
   // --- Intent processing ---
 
-  public void processIntent(Intent intent, Consumer<OmsAction> approvedActionConsumer) {
-    intentResolver.resolve(intent, action -> {
-      if (action instanceof OmsAction.NewOrder newOrder) {
-        RiskCheckResult result = validateOrder(newOrder.order());
-        if (result instanceof RiskCheckResult.Approved) {
-          onOrderAccepted(newOrder.order());
-          approvedActionConsumer.accept(action);
-        } else if (result instanceof RiskCheckResult.Rejected rejected) {
-          logger.warning("Order " + newOrder.order().clientOid() + " rejected by "
-              + rejected.policyName() + ": " + rejected.reason());
-        }
-      } else if (action instanceof OmsAction.Cancel) {
-        approvedActionConsumer.accept(action);
-      }
-    });
+  public void processIntent(Intent intent) {
+    IntentResolver resolver = getOrCreateResolver(intent.getStrategyId());
+    resolver.resolve(intent, this::onResolvedAction);
   }
 
-  public void processIntents(Intent[] intents, int count, Consumer<OmsAction> approvedActionConsumer) {
-    for (int i = 0; i < count; i++) {
-      processIntent(intents[i], approvedActionConsumer);
+  private void onResolvedAction(OmsAction action) {
+    switch (action.type()) {
+      case NEW_ORDER -> {
+        OmsOrder order = action.order();
+        RiskCheckResult result = validateOrder(order);
+        if (result instanceof RiskCheckResult.Approved) {
+          onOrderAccepted(order);
+          actionConsumer.accept(action);
+        } else if (result instanceof RiskCheckResult.Rejected rejected) {
+          logger.warning("Order " + order.clientOid() + " rejected by "
+              + rejected.policyName() + ": " + rejected.reason());
+        }
+      }
+      case REPLACE -> {
+        OmsReplaceOrder rep = action.replace();
+        TrackedOrder original = orderStateManager.getOrder(rep.originalClientOid());
+        if (original != null) {
+          riskCheckOrder.set(
+              rep.exchangeId(), rep.securityId(), rep.strategyId(), rep.newClientOid(),
+              original.getSide(), rep.price(), rep.size(),
+              original.getOrderType(), original.getTimeInForce());
+          RiskCheckResult result = validateOrder(riskCheckOrder);
+          if (result instanceof RiskCheckResult.Approved) {
+            onOrderAccepted(riskCheckOrder);
+            actionConsumer.accept(action);
+          } else if (result instanceof RiskCheckResult.Rejected rejected) {
+            logger.warning("Replace " + rep.newClientOid() + " rejected by "
+                + rejected.policyName() + ": " + rejected.reason());
+          }
+        }
+      }
+      case CANCEL -> actionConsumer.accept(action);
     }
   }
 
@@ -76,23 +109,68 @@ public class OrderManagementSystem {
 
   public void onOrderAccepted(OmsOrder order) {
     orderStateManager.trackOrder(order);
+    positionTracker.addStrategyLeaves(
+        order.strategyId(),
+        order.exchangeId(),
+        order.securityId(),
+        order.side(),
+        order.size());
   }
 
   public void processExecutionReport(OmsExecutionReport report) {
-    TrackedOrder tracked = orderStateManager.applyExecutionReport(report);
+    TrackedOrder tracked = orderStateManager.getOrder(report.clientOid());
+    if (tracked == null) {
+      return;
+    }
 
-    if (tracked != null && (report.execType() == ExecType.FILL || report.execType() == ExecType.PARTIAL_FILL)) {
-      positionTracker.applyFill(
+    // Capture leaves qty before applying the report (for inflight removal on
+    // terminal events)
+    long leavesQtyBefore = tracked.getLeavesQty();
+    int strategyId = tracked.getStrategyId();
+
+    orderStateManager.applyExecutionReport(report);
+
+    ExecType exec = report.execType();
+
+    if (exec == ExecType.FILL || exec == ExecType.PARTIAL_FILL) {
+      // Remove filled qty from inflight
+      positionTracker.removeStrategyLeaves(
+          strategyId,
+          report.exchangeId(),
+          report.securityId(),
+          tracked.getSide(),
+          report.filledQty());
+
+      // Apply fill to both firm-level and per-strategy positions
+      positionTracker.applyStrategyFill(
+          strategyId,
           report.exchangeId(),
           report.securityId(),
           tracked.getSide(),
           report.filledQty(),
           report.fillPrice(),
           report.fee());
+    } else if (exec == ExecType.CANCEL || exec == ExecType.REJECT || exec == ExecType.EXPIRE) {
+      // Remove remaining leaves qty from inflight
+      if (leavesQtyBefore > 0) {
+        positionTracker.removeStrategyLeaves(
+            strategyId,
+            report.exchangeId(),
+            report.securityId(),
+            tracked.getSide(),
+            leavesQtyBefore);
+      }
+    }
+
+    // Release terminal orders back to the pool after all reads are done
+    if (tracked.getState().isTerminal()) {
+      orderStateManager.releaseOrder(tracked);
     }
   }
 
   // --- Query methods ---
+
+  // --- Firm-level position queries ---
 
   public Position getPosition(int exchangeId, long securityId) {
     return positionTracker.getPosition(exchangeId, securityId);
@@ -102,7 +180,22 @@ public class OrderManagementSystem {
     positionTracker.forEachPosition(consumer);
   }
 
-  public TrackedOrder getOrder(String clientOid) {
+  // --- Per-strategy position queries ---
+
+  public Position getStrategyPosition(int strategyId, int exchangeId, long securityId) {
+    return positionTracker.getStrategyPosition(strategyId, exchangeId, securityId);
+  }
+
+  public void forEachStrategyPosition(int strategyId, Consumer<Position> consumer) {
+    positionTracker.forEachStrategyPosition(strategyId, consumer);
+  }
+
+  public long getEffectiveQuantity(int strategyId, int exchangeId, long securityId) {
+    Position pos = positionTracker.getStrategyPosition(strategyId, exchangeId, securityId);
+    return pos != null ? pos.getEffectiveQuantity() : 0;
+  }
+
+  public TrackedOrder getOrder(long clientOid) {
     return orderStateManager.getOrder(clientOid);
   }
 
@@ -127,6 +220,19 @@ public class OrderManagementSystem {
   }
 
   public IntentResolver getIntentResolver() {
-    return intentResolver;
+    return getOrCreateResolver(0);
+  }
+
+  public IntentResolver getIntentResolver(int strategyId) {
+    return getOrCreateResolver(strategyId);
+  }
+
+  private IntentResolver getOrCreateResolver(int strategyId) {
+    IntentResolver resolver = resolvers.get(strategyId);
+    if (resolver == null) {
+      resolver = new IntentResolver(orderStateManager, oidGenerator, defaultTickSize, strategyId);
+      resolvers.put(strategyId, resolver);
+    }
+    return resolver;
   }
 }

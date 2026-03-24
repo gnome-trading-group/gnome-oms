@@ -11,11 +11,15 @@ public interface OrderStateManager {
 
     TrackedOrder applyExecutionReport(OmsExecutionReport report);
 
-    TrackedOrder getOrder(String clientOid);
+    TrackedOrder getOrder(long clientOid);
+
+    void releaseOrder(TrackedOrder order);
 
     void forEachOpenOrder(Consumer<TrackedOrder> consumer);
 
     void forEachOpenOrderFor(int exchangeId, long securityId, Consumer<TrackedOrder> consumer);
+
+    void forEachOpenStrategyOrderFor(int strategyId, int exchangeId, long securityId, Consumer<TrackedOrder> consumer);
 
     void forEachOrder(Consumer<TrackedOrder> consumer);
 }

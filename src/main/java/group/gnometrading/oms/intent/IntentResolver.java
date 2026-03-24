@@ -1,7 +1,6 @@
 package group.gnometrading.oms.intent;
 
-import group.gnometrading.oms.order.OmsCancelOrder;
-import group.gnometrading.oms.order.OmsOrder;
+import group.gnometrading.collections.LongHashMap;
 import group.gnometrading.oms.state.OrderStateManager;
 import group.gnometrading.oms.state.TrackedOrder;
 import group.gnometrading.schemas.OrderType;
@@ -14,94 +13,118 @@ public class IntentResolver {
 
     private final OrderStateManager orderStateManager;
     private final ClientOidGenerator oidGenerator;
+    private final LongHashMap<Long> tickSizes;
+    private final long defaultTickSize;
+    private final int strategyId;
+    private final OmsAction action = new OmsAction();
 
     private TrackedOrder currentBid;
     private TrackedOrder currentAsk;
 
-    public IntentResolver(OrderStateManager orderStateManager, ClientOidGenerator oidGenerator) {
+    public IntentResolver(OrderStateManager orderStateManager, ClientOidGenerator oidGenerator,
+                          long defaultTickSize) {
+        this(orderStateManager, oidGenerator, new LongHashMap<>(4), defaultTickSize, 0);
+    }
+
+    public IntentResolver(OrderStateManager orderStateManager, ClientOidGenerator oidGenerator,
+                          long defaultTickSize, int strategyId) {
+        this(orderStateManager, oidGenerator, new LongHashMap<>(4), defaultTickSize, strategyId);
+    }
+
+    public IntentResolver(OrderStateManager orderStateManager, ClientOidGenerator oidGenerator,
+                          LongHashMap<Long> tickSizes, long defaultTickSize, int strategyId) {
         this.orderStateManager = orderStateManager;
         this.oidGenerator = oidGenerator;
+        this.tickSizes = tickSizes;
+        this.defaultTickSize = defaultTickSize;
+        this.strategyId = strategyId;
+    }
+
+    public void setTickSize(long securityId, long tickSize) {
+        tickSizes.put(securityId, tickSize);
     }
 
     public void resolve(Intent intent, Consumer<OmsAction> actionConsumer) {
-        // Resolve quote section (passive orders)
-        if (intent.hasQuote()) {
-            resolveQuote(intent, actionConsumer);
-        }
+        resolveQuote(intent, actionConsumer);
 
-        // Resolve take section (aggressive order)
         if (intent.hasTake()) {
             resolveTake(intent, actionConsumer);
         }
     }
 
-    public void resolveAll(Intent[] intents, int count, Consumer<OmsAction> actionConsumer) {
-        for (int i = 0; i < count; i++) {
-            resolve(intents[i], actionConsumer);
-        }
-    }
-
     private void resolveTake(Intent intent, Consumer<OmsAction> actionConsumer) {
         long price = intent.getTakeOrderType() == OrderType.MARKET ? 0 : intent.getTakeLimitPrice();
-        actionConsumer.accept(new OmsAction.NewOrder(
-                new OmsOrder(
-                        intent.getExchangeId(),
-                        intent.getSecurityId(),
-                        oidGenerator.next(),
-                        intent.getTakeSide(),
-                        price,
-                        intent.getTakeSize(),
-                        intent.getTakeOrderType(),
-                        TimeInForce.IMMEDIATE_OR_CANCELED
-                )
-        ));
+        action.asNewOrder().set(
+                intent.getExchangeId(),
+                intent.getSecurityId(),
+                intent.getStrategyId(),
+                oidGenerator.next(),
+                intent.getTakeSide(),
+                price,
+                intent.getTakeSize(),
+                intent.getTakeOrderType(),
+                TimeInForce.IMMEDIATE_OR_CANCELED);
+        actionConsumer.accept(action);
     }
 
     private void resolveQuote(Intent intent, Consumer<OmsAction> actionConsumer) {
         currentBid = null;
         currentAsk = null;
 
-        orderStateManager.forEachOpenOrderFor(
-                intent.getExchangeId(), intent.getSecurityId(),
+        orderStateManager.forEachOpenStrategyOrderFor(
+                strategyId, intent.getExchangeId(), intent.getSecurityId(),
                 order -> {
                     if (order.getSide() == Side.Bid) currentBid = order;
                     else if (order.getSide() == Side.Ask) currentAsk = order;
                 }
         );
 
-        resolveSide(intent.getExchangeId(), intent.getSecurityId(),
-                Side.Bid, intent.getBidPrice(), intent.getBidSize(),
+        long tickSize = getTickSize(intent.getSecurityId());
+
+        resolveSide(intent.getExchangeId(), intent.getSecurityId(), intent.getStrategyId(),
+                Side.Bid, snapBid(intent.getBidPrice(), tickSize), intent.getBidSize(),
                 currentBid, actionConsumer);
 
-        resolveSide(intent.getExchangeId(), intent.getSecurityId(),
-                Side.Ask, intent.getAskPrice(), intent.getAskSize(),
+        resolveSide(intent.getExchangeId(), intent.getSecurityId(), intent.getStrategyId(),
+                Side.Ask, snapAsk(intent.getAskPrice(), tickSize), intent.getAskSize(),
                 currentAsk, actionConsumer);
     }
 
-    private void resolveSide(int exchangeId, long securityId,
-                             Side side, long desiredPrice, long desiredSize,
+    private void resolveSide(int exchangeId, long securityId, int strategyId,
+                             Side side, long snappedPrice, long desiredSize,
                              TrackedOrder current, Consumer<OmsAction> consumer) {
         boolean hasOrder = current != null;
         boolean wantsOrder = desiredSize > 0;
 
         if (hasOrder && !wantsOrder) {
-            consumer.accept(new OmsAction.Cancel(
-                    new OmsCancelOrder(exchangeId, securityId, current.getClientOid())));
+            action.asCancel().set(exchangeId, securityId, strategyId, current.getClientOid());
+            consumer.accept(action);
         } else if (!hasOrder && wantsOrder) {
-            consumer.accept(new OmsAction.NewOrder(
-                    new OmsOrder(exchangeId, securityId, oidGenerator.next(),
-                            side, desiredPrice, desiredSize,
-                            OrderType.LIMIT, TimeInForce.GOOD_TILL_CANCELED)));
+            action.asNewOrder().set(exchangeId, securityId, strategyId, oidGenerator.next(),
+                    side, snappedPrice, desiredSize,
+                    OrderType.LIMIT, TimeInForce.GOOD_TILL_CANCELED);
+            consumer.accept(action);
         } else if (hasOrder && wantsOrder) {
-            OmsOrder orig = current.getOriginalOrder();
-            if (orig.price() != desiredPrice || orig.size() != desiredSize) {
-                consumer.accept(new OmsAction.Cancel(
-                        new OmsCancelOrder(exchangeId, securityId, current.getClientOid())));
-                consumer.accept(new OmsAction.NewOrder(
-                        new OmsOrder(exchangeId, securityId, oidGenerator.next(),
-                                side, desiredPrice, desiredSize,
-                                OrderType.LIMIT, TimeInForce.GOOD_TILL_CANCELED)));
+            if (current.getPrice() != snappedPrice || current.getSize() != desiredSize) {
+                action.asReplace().set(exchangeId, securityId, strategyId,
+                        current.getClientOid(), oidGenerator.next(),
+                        snappedPrice, desiredSize);
+                consumer.accept(action);
             }
+            // else: same grid price and size — no action
         }
+    }
+
+    private long getTickSize(long securityId) {
+        Long ts = tickSizes.get(securityId);
+        return ts != null ? ts : defaultTickSize;
+    }
+
+    private static long snapBid(long price, long tickSize) {
+        return (price / tickSize) * tickSize;
+    }
+
+    private static long snapAsk(long price, long tickSize) {
+        return ((price + tickSize - 1) / tickSize) * tickSize;
     }
 }

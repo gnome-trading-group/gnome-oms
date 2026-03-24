@@ -21,6 +21,7 @@ public class Intent {
 
     private int exchangeId;
     private long securityId;
+    private int strategyId;
 
     // Quote section
     private long bidPrice;
@@ -36,11 +37,12 @@ public class Intent {
 
     public Intent() {}
 
-    public void setQuote(int exchangeId, long securityId,
+    public void setQuote(int exchangeId, long securityId, int strategyId,
                          long bidPrice, long bidSize,
                          long askPrice, long askSize) {
         this.exchangeId = exchangeId;
         this.securityId = securityId;
+        this.strategyId = strategyId;
         this.bidPrice = bidPrice;
         this.bidSize = bidSize;
         this.askPrice = askPrice;
@@ -51,11 +53,12 @@ public class Intent {
         this.takeLimitPrice = 0;
     }
 
-    public void setTake(int exchangeId, long securityId,
+    public void setTake(int exchangeId, long securityId, int strategyId,
                         Side side, long size,
                         OrderType orderType, long limitPrice) {
         this.exchangeId = exchangeId;
         this.securityId = securityId;
+        this.strategyId = strategyId;
         this.bidPrice = 0;
         this.bidSize = 0;
         this.askPrice = 0;
@@ -66,13 +69,14 @@ public class Intent {
         this.takeLimitPrice = limitPrice;
     }
 
-    public void setQuoteAndTake(int exchangeId, long securityId,
+    public void setQuoteAndTake(int exchangeId, long securityId, int strategyId,
                                 long bidPrice, long bidSize,
                                 long askPrice, long askSize,
                                 Side takeSide, long takeSize,
                                 OrderType takeOrderType, long takeLimitPrice) {
         this.exchangeId = exchangeId;
         this.securityId = securityId;
+        this.strategyId = strategyId;
         this.bidPrice = bidPrice;
         this.bidSize = bidSize;
         this.askPrice = askPrice;
@@ -86,6 +90,7 @@ public class Intent {
     public void reset() {
         this.exchangeId = 0;
         this.securityId = 0;
+        this.strategyId = 0;
         this.bidPrice = 0;
         this.bidSize = 0;
         this.askPrice = 0;
@@ -101,6 +106,7 @@ public class Intent {
 
     public int getExchangeId() { return exchangeId; }
     public long getSecurityId() { return securityId; }
+    public int getStrategyId() { return strategyId; }
     public long getBidPrice() { return bidPrice; }
     public long getBidSize() { return bidSize; }
     public long getAskPrice() { return askPrice; }

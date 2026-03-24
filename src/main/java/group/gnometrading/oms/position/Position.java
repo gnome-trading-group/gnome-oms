@@ -10,6 +10,8 @@ public class Position {
     private long avgEntryPrice;
     private double realizedPnl;
     private double totalFees;
+    private long leavesBuyQty;
+    private long leavesSellQty;
 
     public Position() {
         reset();
@@ -27,6 +29,8 @@ public class Position {
         this.avgEntryPrice = 0;
         this.realizedPnl = 0.0;
         this.totalFees = 0.0;
+        this.leavesBuyQty = 0;
+        this.leavesSellQty = 0;
     }
 
     public void applyFill(Side side, long qty, long price, double fee) {
@@ -59,6 +63,29 @@ public class Position {
         }
     }
 
+    public void addLeaves(Side side, long qty) {
+        if (side == Side.Bid) {
+            leavesBuyQty += qty;
+        } else {
+            leavesSellQty += qty;
+        }
+    }
+
+    public void removeLeaves(Side side, long qty) {
+        if (side == Side.Bid) {
+            leavesBuyQty = Math.max(0, leavesBuyQty - qty);
+        } else {
+            leavesSellQty = Math.max(0, leavesSellQty - qty);
+        }
+    }
+
+    /**
+     * Confirmed net quantity + inflight buy - inflight sell.
+     */
+    public long getEffectiveQuantity() {
+        return netQuantity + leavesBuyQty - leavesSellQty;
+    }
+
     public int getExchangeId() {
         return exchangeId;
     }
@@ -81,5 +108,13 @@ public class Position {
 
     public double getTotalFees() {
         return totalFees;
+    }
+
+    public long getLeavesBuyQty() {
+        return leavesBuyQty;
+    }
+
+    public long getLeavesSellQty() {
+        return leavesSellQty;
     }
 }
