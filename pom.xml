@@ -6,16 +6,16 @@
         <groupId>group.gnometrading</groupId>
         <artifactId>gnome-parent</artifactId>
         <version>1.0.1</version>
-        <relativePath/>
+        <relativePath />
     </parent>
 
     <artifactId>gnome-oms</artifactId>
-    <version>1.0.0-SNAPSHOT</version>
+    <version>1.0.0</version>
 
     <scm>
         <connection>scm:git:git@github.com:gnome-trading-group/gnome-oms.git</connection>
         <developerConnection>scm:git:git@github.com:gnome-trading-group/gnome-oms.git</developerConnection>
-        <tag>HEAD</tag>
+        <tag>gnome-oms-1.0.0</tag>
     </scm>
 
     <distributionManagement>
