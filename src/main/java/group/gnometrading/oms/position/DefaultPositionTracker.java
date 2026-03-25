@@ -8,6 +8,9 @@ import java.util.function.Consumer;
 
 public final class DefaultPositionTracker implements PositionTracker {
 
+    private static final int DEFAULT_INITIAL_CAPACITY = 16;
+    private static final int DEFAULT_POOL_CAPACITY = 50;
+
     // Firm-level positions: (exchangeId, securityId) -> Position
     private final IntHashMap<LongHashMap<Position>> positions;
 
@@ -19,7 +22,7 @@ public final class DefaultPositionTracker implements PositionTracker {
     private final SingleThreadedObjectPool<IntHashMap<LongHashMap<Position>>> strategyInnerMapPool;
 
     public DefaultPositionTracker() {
-        this(16, 50);
+        this(DEFAULT_INITIAL_CAPACITY, DEFAULT_POOL_CAPACITY);
     }
 
     public DefaultPositionTracker(int initialCapacity, int poolCapacity) {

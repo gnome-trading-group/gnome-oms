@@ -9,12 +9,15 @@ import java.util.function.Consumer;
 
 public final class DefaultOrderStateManager implements OrderStateManager {
 
+    private static final int DEFAULT_INITIAL_CAPACITY = 128;
+    private static final int DEFAULT_POOL_CAPACITY = 100;
+
     private final LongHashMap<TrackedOrder> orders;
     private final LongHashMap<PoolNode<TrackedOrder>> orderNodes;
     private final SingleThreadedObjectPool<TrackedOrder> orderPool;
 
     public DefaultOrderStateManager() {
-        this(128, 100);
+        this(DEFAULT_INITIAL_CAPACITY, DEFAULT_POOL_CAPACITY);
     }
 
     public DefaultOrderStateManager(int initialCapacity, int poolCapacity) {
