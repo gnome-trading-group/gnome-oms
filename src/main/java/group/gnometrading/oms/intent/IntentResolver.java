@@ -122,9 +122,11 @@ public final class IntentResolver {
         boolean wantsOrder = desiredSize > 0;
 
         if (hasOrder && !wantsOrder) {
+            // Cancel — strategy no longer wants an order on this side
             action.asCancel().set(exchangeId, securityId, sideStrategyId, current.getClientOid());
             consumer.accept(action);
         } else if (!hasOrder && wantsOrder) {
+            // New order — no existing order, strategy wants one
             action.asNewOrder()
                     .set(
                             exchangeId,
@@ -139,15 +141,10 @@ public final class IntentResolver {
             consumer.accept(action);
         } else if (hasOrder && wantsOrder) {
             if (current.getPrice() != snappedPrice || current.getSize() != desiredSize) {
-                action.asReplace()
-                        .set(
-                                exchangeId,
-                                securityId,
-                                sideStrategyId,
-                                current.getClientOid(),
-                                oidGenerator.next(),
-                                snappedPrice,
-                                desiredSize);
+                // Price/size changed — cancel only. New order submitted next tick
+                // when the cancel is confirmed and no open order exists.
+                // This prevents two orders being live simultaneously on the same side.
+                action.asCancel().set(exchangeId, securityId, sideStrategyId, current.getClientOid());
                 consumer.accept(action);
             }
             // else: same grid price and size — no action

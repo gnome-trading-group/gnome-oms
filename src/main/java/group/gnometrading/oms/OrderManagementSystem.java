@@ -5,6 +5,7 @@ import group.gnometrading.oms.intent.ClientOidGenerator;
 import group.gnometrading.oms.intent.Intent;
 import group.gnometrading.oms.intent.IntentResolver;
 import group.gnometrading.oms.intent.OmsAction;
+import group.gnometrading.oms.order.OmsCancelOrder;
 import group.gnometrading.oms.order.OmsExecutionReport;
 import group.gnometrading.oms.order.OmsOrder;
 import group.gnometrading.oms.order.OmsReplaceOrder;
