@@ -90,6 +90,12 @@ public final class TrackedOrder {
         }
     }
 
+    public void amend(long newPrice, long newSize) {
+        this.price = newPrice;
+        this.size = newSize;
+        this.leavesQty = newSize;
+    }
+
     public OrderState getState() {
         return state;
     }

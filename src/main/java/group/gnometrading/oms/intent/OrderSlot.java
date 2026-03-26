@@ -69,6 +69,11 @@ public final class OrderSlot {
         return activeSize;
     }
 
+    public void onAmendAcked(long newPrice, long newSize) {
+        this.activePrice = newPrice;
+        this.activeSize = newSize;
+    }
+
     public void onTerminal() {
         this.state = State.EMPTY;
         this.activeClientOid = 0;
