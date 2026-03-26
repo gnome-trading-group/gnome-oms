@@ -65,50 +65,52 @@ public final class OrderManagementSystem {
 
     private void onResolvedAction(OmsAction action) {
         switch (action.type()) {
-            case NEW_ORDER -> {
-                OmsOrder order = action.order();
-                RiskCheckResult result = validateOrder(order);
-                if (result instanceof RiskCheckResult.Approved) {
-                    onOrderAccepted(order);
-                    actionConsumer.accept(action);
-                } else if (result instanceof RiskCheckResult.Rejected rejected) {
-                    logger.warning("Order "
-                            + order.clientOid()
-                            + " rejected by "
-                            + rejected.policyName()
-                            + ": "
-                            + rejected.reason());
-                }
-            }
-            case REPLACE -> {
-                OmsReplaceOrder rep = action.replace();
-                TrackedOrder original = orderStateManager.getOrder(rep.originalClientOid());
-                if (original != null) {
-                    riskCheckOrder.set(
-                            rep.exchangeId(),
-                            rep.securityId(),
-                            rep.strategyId(),
-                            rep.newClientOid(),
-                            original.getSide(),
-                            rep.price(),
-                            rep.size(),
-                            original.getOrderType(),
-                            original.getTimeInForce());
-                    RiskCheckResult result = validateOrder(riskCheckOrder);
-                    if (result instanceof RiskCheckResult.Approved) {
-                        onOrderAccepted(riskCheckOrder);
-                        actionConsumer.accept(action);
-                    } else if (result instanceof RiskCheckResult.Rejected rejected) {
-                        logger.warning("Replace "
-                                + rep.newClientOid()
-                                + " rejected by "
-                                + rejected.policyName()
-                                + ": "
-                                + rejected.reason());
-                    }
-                }
-            }
+            case NEW_ORDER -> handleNewOrder(action);
+            case REPLACE -> handleReplace(action);
             case CANCEL -> actionConsumer.accept(action);
+        }
+    }
+
+    private void handleNewOrder(OmsAction action) {
+        OmsOrder order = action.order();
+        RiskCheckResult result = validateOrder(order);
+        if (result instanceof RiskCheckResult.Approved) {
+            onOrderAccepted(order);
+            actionConsumer.accept(action);
+        } else if (result instanceof RiskCheckResult.Rejected rejected) {
+            logger.warning(
+                    "Order " + order.clientOid() + " rejected by " + rejected.policyName() + ": " + rejected.reason());
+        }
+    }
+
+    private void handleReplace(OmsAction action) {
+        OmsReplaceOrder rep = action.replace();
+        TrackedOrder original = orderStateManager.getOrder(rep.originalClientOid());
+        if (original == null) {
+            return;
+        }
+        riskCheckOrder.set(
+                rep.exchangeId(),
+                rep.securityId(),
+                rep.strategyId(),
+                rep.originalClientOid(),
+                original.getSide(),
+                rep.price(),
+                rep.size(),
+                original.getOrderType(),
+                original.getTimeInForce());
+        RiskCheckResult result = validateOrder(riskCheckOrder);
+        if (result instanceof RiskCheckResult.Approved) {
+            long oldLeaves = original.getLeavesQty();
+            positionTracker.removeStrategyLeaves(
+                    rep.strategyId(), rep.exchangeId(), rep.securityId(), original.getSide(), oldLeaves);
+            positionTracker.addStrategyLeaves(
+                    rep.strategyId(), rep.exchangeId(), rep.securityId(), original.getSide(), rep.size());
+            original.amend(rep.price(), rep.size());
+            actionConsumer.accept(action);
+        } else if (result instanceof RiskCheckResult.Rejected rejected) {
+            logger.warning("Replace " + rep.originalClientOid() + " rejected by " + rejected.policyName() + ": "
+                    + rejected.reason());
         }
     }
 
@@ -130,21 +132,24 @@ public final class OrderManagementSystem {
             return;
         }
 
-        // Capture leaves qty before applying the report (for inflight removal on
-        // terminal events)
         long leavesQtyBefore = tracked.getLeavesQty();
         int strategyId = tracked.getStrategyId();
 
         orderStateManager.applyExecutionReport(report);
+        updatePositionTracking(report, tracked, strategyId, leavesQtyBefore);
+        forwardToResolver(report, tracked, strategyId);
 
+        if (tracked.getState().isTerminal()) {
+            orderStateManager.releaseOrder(tracked);
+        }
+    }
+
+    private void updatePositionTracking(
+            OmsExecutionReport report, TrackedOrder tracked, int strategyId, long leavesQtyBefore) {
         ExecType exec = report.execType();
-
         if (exec == ExecType.FILL || exec == ExecType.PARTIAL_FILL) {
-            // Remove filled qty from inflight
             positionTracker.removeStrategyLeaves(
                     strategyId, report.exchangeId(), report.securityId(), tracked.getSide(), report.filledQty());
-
-            // Apply fill to both firm-level and per-strategy positions
             positionTracker.applyStrategyFill(
                     strategyId,
                     report.exchangeId(),
@@ -154,36 +159,20 @@ public final class OrderManagementSystem {
                     report.fillPrice(),
                     report.fee());
         } else if (exec == ExecType.CANCEL || exec == ExecType.REJECT || exec == ExecType.EXPIRE) {
-            // Remove remaining leaves qty from inflight
             if (leavesQtyBefore > 0) {
                 positionTracker.removeStrategyLeaves(
                         strategyId, report.exchangeId(), report.securityId(), tracked.getSide(), leavesQtyBefore);
             }
         }
+    }
 
-        // Forward to IntentResolver for slot state management
-        // This may emit new actions (e.g., queued intent fires after cancel ack)
+    private void forwardToResolver(OmsExecutionReport report, TrackedOrder tracked, int strategyId) {
         IntentResolver resolver = resolvers.get(strategyId);
-        if (resolver != null && actionConsumer != null) {
-            resolver.onExecutionReport(report.exchangeId(), report.securityId(), report, tracked.getSide(), action -> {
-                // Process any new orders emitted by the resolver (e.g., queued intent)
-                if (action.type() == OmsAction.Type.NEW_ORDER) {
-                    OmsOrder order = action.order();
-                    RiskCheckResult result = validateOrder(order);
-                    if (result instanceof RiskCheckResult.Approved) {
-                        onOrderAccepted(order);
-                        actionConsumer.accept(action);
-                    }
-                } else {
-                    actionConsumer.accept(action);
-                }
-            });
+        if (resolver == null || actionConsumer == null) {
+            return;
         }
-
-        // Release terminal orders back to the pool after all reads are done
-        if (tracked.getState().isTerminal()) {
-            orderStateManager.releaseOrder(tracked);
-        }
+        resolver.onExecutionReport(
+                report.exchangeId(), report.securityId(), report, tracked.getSide(), this::onResolvedAction);
     }
 
     // --- Query methods ---

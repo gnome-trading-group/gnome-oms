@@ -168,11 +168,19 @@ public final class IntentResolver {
                     slot.onCancelSubmitted();
                     slot.clearQueuedIntent();
                 } else if (slot.getActivePrice() != snappedPrice || slot.getActiveSize() != desiredSize) {
-                    // Price/size changed — cancel and queue the new intent
-                    action.asCancel().set(exchangeId, securityId, sideStrategyId, slot.getActiveClientOid());
+                    // Price/size changed — atomic amend, slot stays LIVE
+                    action.asReplace()
+                            .set(
+                                    exchangeId,
+                                    securityId,
+                                    sideStrategyId,
+                                    slot.getActiveClientOid(),
+                                    oidGenerator.next(),
+                                    snappedPrice,
+                                    desiredSize);
                     consumer.accept(action);
-                    slot.onCancelSubmitted();
-                    slot.queueIntent(snappedPrice, desiredSize);
+                    // Optimistically update slot — order stays live with new params
+                    slot.onAmendAcked(snappedPrice, desiredSize);
                 }
                 // else: same price and size — no action
             }
