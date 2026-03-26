@@ -161,6 +161,25 @@ public final class OrderManagementSystem {
             }
         }
 
+        // Forward to IntentResolver for slot state management
+        // This may emit new actions (e.g., queued intent fires after cancel ack)
+        IntentResolver resolver = resolvers.get(strategyId);
+        if (resolver != null && actionConsumer != null) {
+            resolver.onExecutionReport(report.exchangeId(), report.securityId(), report, tracked.getSide(), action -> {
+                // Process any new orders emitted by the resolver (e.g., queued intent)
+                if (action.type() == OmsAction.Type.NEW_ORDER) {
+                    OmsOrder order = action.order();
+                    RiskCheckResult result = validateOrder(order);
+                    if (result instanceof RiskCheckResult.Approved) {
+                        onOrderAccepted(order);
+                        actionConsumer.accept(action);
+                    }
+                } else {
+                    actionConsumer.accept(action);
+                }
+            });
+        }
+
         // Release terminal orders back to the pool after all reads are done
         if (tracked.getState().isTerminal()) {
             orderStateManager.releaseOrder(tracked);
@@ -229,7 +248,7 @@ public final class OrderManagementSystem {
     private IntentResolver getOrCreateResolver(int strategyId) {
         IntentResolver resolver = resolvers.get(strategyId);
         if (resolver == null) {
-            resolver = new IntentResolver(orderStateManager, oidGenerator, defaultTickSize, strategyId);
+            resolver = new IntentResolver(oidGenerator, defaultTickSize, strategyId);
             resolvers.put(strategyId, resolver);
         }
         return resolver;
