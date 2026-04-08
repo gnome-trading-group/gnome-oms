@@ -5,7 +5,8 @@ package group.gnometrading.oms.intent;
  * Ensures only one order is live or pending at a time on each side.
  *
  * <p>State machine:
- * EMPTY → PENDING_NEW → LIVE → PENDING_CANCEL → EMPTY
+ * EMPTY → PENDING_NEW → LIVE → PENDING_MODIFY → LIVE
+ *                            → PENDING_CANCEL → EMPTY
  */
 public final class OrderSlot {
 
@@ -13,6 +14,7 @@ public final class OrderSlot {
         EMPTY,
         PENDING_NEW,
         LIVE,
+        PENDING_MODIFY,
         PENDING_CANCEL
     }
 
@@ -21,7 +23,10 @@ public final class OrderSlot {
     private long activePrice;
     private long activeSize;
 
-    // Queued intent: what the strategy wants next, stored while PENDING_CANCEL
+    private long pendingModifyPrice;
+    private long pendingModifySize;
+
+    // Queued intent: what the strategy wants next, stored while a pending state is in-flight
     private long queuedPrice;
     private long queuedSize;
     private boolean hasQueuedIntent;
@@ -69,9 +74,28 @@ public final class OrderSlot {
         return activeSize;
     }
 
-    public void onAmendAcked(long newPrice, long newSize) {
-        this.activePrice = newPrice;
-        this.activeSize = newSize;
+    public void onModifySubmitted(long pendingPrice, long pendingSize) {
+        this.state = State.PENDING_MODIFY;
+        this.pendingModifyPrice = pendingPrice;
+        this.pendingModifySize = pendingSize;
+    }
+
+    public void onModifyConfirmed() {
+        this.state = State.LIVE;
+        this.activePrice = this.pendingModifyPrice;
+        this.activeSize = this.pendingModifySize;
+        this.pendingModifyPrice = 0;
+        this.pendingModifySize = 0;
+    }
+
+    public void onModifyRejected() {
+        this.state = State.LIVE;
+        this.pendingModifyPrice = 0;
+        this.pendingModifySize = 0;
+    }
+
+    public void onCancelRejected() {
+        this.state = State.LIVE;
     }
 
     public void onTerminal() {
@@ -79,6 +103,8 @@ public final class OrderSlot {
         this.activeClientOid = 0;
         this.activePrice = 0;
         this.activeSize = 0;
+        this.pendingModifyPrice = 0;
+        this.pendingModifySize = 0;
     }
 
     public void queueIntent(long price, long size) {

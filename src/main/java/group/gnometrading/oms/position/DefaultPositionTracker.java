@@ -1,140 +1,131 @@
 package group.gnometrading.oms.position;
 
 import group.gnometrading.collections.IntHashMap;
-import group.gnometrading.collections.LongHashMap;
 import group.gnometrading.pools.SingleThreadedObjectPool;
 import group.gnometrading.schemas.Side;
-import java.util.function.Consumer;
 
 public final class DefaultPositionTracker implements PositionTracker {
 
     private static final int DEFAULT_INITIAL_CAPACITY = 16;
     private static final int DEFAULT_POOL_CAPACITY = 50;
 
-    // Firm-level positions: (exchangeId, securityId) -> Position
-    private final IntHashMap<LongHashMap<Position>> positions;
+    // Firm-level positions: listingId -> Position
+    private final IntHashMap<Position> positions;
 
-    // Per-strategy positions: (strategyId, exchangeId, securityId) -> Position
-    private final IntHashMap<IntHashMap<LongHashMap<Position>>> strategyPositions;
+    // Per-strategy positions: strategyId -> (listingId -> Position)
+    private final IntHashMap<IntHashMap<Position>> strategyPositions;
 
     private final SingleThreadedObjectPool<Position> positionPool;
-    private final SingleThreadedObjectPool<LongHashMap<Position>> innerMapPool;
-    private final SingleThreadedObjectPool<IntHashMap<LongHashMap<Position>>> strategyInnerMapPool;
+    private final SingleThreadedObjectPool<IntHashMap<Position>> strategyInnerMapPool;
+
+    private final SharedPositionBuffer sharedBuffer;
 
     public DefaultPositionTracker() {
-        this(DEFAULT_INITIAL_CAPACITY, DEFAULT_POOL_CAPACITY);
+        this(null, DEFAULT_INITIAL_CAPACITY, DEFAULT_POOL_CAPACITY);
     }
 
-    public DefaultPositionTracker(int initialCapacity, int poolCapacity) {
+    public DefaultPositionTracker(SharedPositionBuffer sharedBuffer) {
+        this(sharedBuffer, DEFAULT_INITIAL_CAPACITY, DEFAULT_POOL_CAPACITY);
+    }
+
+    public DefaultPositionTracker(SharedPositionBuffer sharedBuffer, int initialCapacity, int poolCapacity) {
+        this.sharedBuffer = sharedBuffer;
         this.positions = new IntHashMap<>(initialCapacity);
         this.strategyPositions = new IntHashMap<>(4);
         this.positionPool = new SingleThreadedObjectPool<>(Position::new, poolCapacity);
-        this.innerMapPool = new SingleThreadedObjectPool<>(LongHashMap::new, poolCapacity);
         this.strategyInnerMapPool = new SingleThreadedObjectPool<>(IntHashMap::new, poolCapacity);
     }
 
-    // --- Firm-level (aggregate) ---
+    /**
+     * Pre-registers a (strategyId, listingId) pair and assigns it a slot in the shared buffer.
+     * Must be called at startup before the OMS and strategy threads begin.
+     *
+     * @return the assigned slot index, for use in constructing {@link LivePositionView}
+     */
+    public int registerSlot(int strategyId, int listingId) {
+        IntHashMap<Position> strategyMap = getOrCreateStrategyMap(strategyId);
+        Position position = getOrCreatePosition(strategyMap, listingId);
+        int slot = sharedBuffer.register();
+        position.sharedSlot = slot;
+        return slot;
+    }
+
+    // --- PositionView (read-only, firm-level) ---
 
     @Override
-    public Position getPosition(int exchangeId, long securityId) {
-        LongHashMap<Position> inner = positions.get(exchangeId);
-        if (inner == null) {
-            return null;
-        }
-        return inner.get(securityId);
+    public Position getPosition(int listingId) {
+        return positions.get(listingId);
     }
 
     @Override
-    public void forEachPosition(Consumer<Position> consumer) {
-        forEachInMap(positions, consumer);
+    public long getEffectiveQuantity(int listingId) {
+        Position pos = positions.get(listingId);
+        return pos != null ? pos.getEffectiveQuantity() : 0;
     }
 
-    // --- Per-strategy ---
+    // --- PositionTracker (per-strategy, read+write) ---
 
     @Override
-    public void applyStrategyFill(
-            int strategyId, int exchangeId, long securityId, Side side, long qty, long price, double fee) {
-        // Update firm-level
-        Position firmPosition = getOrCreatePosition(positions, exchangeId, securityId);
+    public void applyStrategyFill(int strategyId, int listingId, Side side, long qty, long price, long fee) {
+        Position firmPosition = getOrCreatePosition(positions, listingId);
         firmPosition.applyFill(side, qty, price, fee);
 
-        // Update per-strategy
-        IntHashMap<LongHashMap<Position>> strategyMap = getOrCreateStrategyMap(strategyId);
-        Position stratPosition = getOrCreatePosition(strategyMap, exchangeId, securityId);
+        IntHashMap<Position> strategyMap = getOrCreateStrategyMap(strategyId);
+        Position stratPosition = getOrCreatePosition(strategyMap, listingId);
         stratPosition.applyFill(side, qty, price, fee);
+        syncToSharedBuffer(stratPosition);
     }
 
     @Override
-    public Position getStrategyPosition(int strategyId, int exchangeId, long securityId) {
-        IntHashMap<LongHashMap<Position>> strategyMap = strategyPositions.get(strategyId);
+    public Position getStrategyPosition(int strategyId, int listingId) {
+        IntHashMap<Position> strategyMap = strategyPositions.get(strategyId);
         if (strategyMap == null) {
             return null;
         }
-        LongHashMap<Position> inner = strategyMap.get(exchangeId);
-        if (inner == null) {
-            return null;
-        }
-        return inner.get(securityId);
+        return strategyMap.get(listingId);
     }
 
     @Override
-    public void forEachStrategyPosition(int strategyId, Consumer<Position> consumer) {
-        IntHashMap<LongHashMap<Position>> strategyMap = strategyPositions.get(strategyId);
-        if (strategyMap != null) {
-            forEachInMap(strategyMap, consumer);
-        }
-    }
-
-    // --- Inflight tracking (delegates to per-strategy Position) ---
-
-    @Override
-    public void addStrategyLeaves(int strategyId, int exchangeId, long securityId, Side side, long qty) {
-        IntHashMap<LongHashMap<Position>> strategyMap = getOrCreateStrategyMap(strategyId);
-        Position position = getOrCreatePosition(strategyMap, exchangeId, securityId);
+    public void addStrategyLeaves(int strategyId, int listingId, Side side, long qty) {
+        IntHashMap<Position> strategyMap = getOrCreateStrategyMap(strategyId);
+        Position position = getOrCreatePosition(strategyMap, listingId);
         position.addLeaves(side, qty);
+        syncToSharedBuffer(position);
     }
 
     @Override
-    public void removeStrategyLeaves(int strategyId, int exchangeId, long securityId, Side side, long qty) {
-        Position position = getStrategyPosition(strategyId, exchangeId, securityId);
+    public void removeStrategyLeaves(int strategyId, int listingId, Side side, long qty) {
+        Position position = getStrategyPosition(strategyId, listingId);
         if (position != null) {
             position.removeLeaves(side, qty);
+            syncToSharedBuffer(position);
         }
     }
 
     // --- Internal helpers ---
 
-    private Position getOrCreatePosition(IntHashMap<LongHashMap<Position>> map, int exchangeId, long securityId) {
-        LongHashMap<Position> inner = map.get(exchangeId);
-        if (inner == null) {
-            inner = innerMapPool.acquire().getItem();
-            map.put(exchangeId, inner);
+    private void syncToSharedBuffer(Position position) {
+        if (sharedBuffer != null && position.sharedSlot >= 0) {
+            sharedBuffer.write(position.sharedSlot, position);
         }
+    }
 
-        Position position = inner.get(securityId);
+    private Position getOrCreatePosition(IntHashMap<Position> map, int listingId) {
+        Position position = map.get(listingId);
         if (position == null) {
             position = positionPool.acquire().getItem();
-            position.init(exchangeId, securityId);
-            inner.put(securityId, position);
+            position.init(listingId);
+            map.put(listingId, position);
         }
         return position;
     }
 
-    private IntHashMap<LongHashMap<Position>> getOrCreateStrategyMap(int strategyId) {
-        IntHashMap<LongHashMap<Position>> strategyMap = strategyPositions.get(strategyId);
+    private IntHashMap<Position> getOrCreateStrategyMap(int strategyId) {
+        IntHashMap<Position> strategyMap = strategyPositions.get(strategyId);
         if (strategyMap == null) {
             strategyMap = strategyInnerMapPool.acquire().getItem();
             strategyPositions.put(strategyId, strategyMap);
         }
         return strategyMap;
-    }
-
-    private void forEachInMap(IntHashMap<LongHashMap<Position>> map, Consumer<Position> consumer) {
-        for (int exchangeId : map.keys()) {
-            LongHashMap<Position> inner = map.get(exchangeId);
-            for (long securityId : inner.keys()) {
-                consumer.accept(inner.get(securityId));
-            }
-        }
     }
 }

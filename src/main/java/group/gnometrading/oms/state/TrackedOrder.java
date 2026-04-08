@@ -1,19 +1,20 @@
 package group.gnometrading.oms.state;
 
-import group.gnometrading.oms.order.OmsExecutionReport;
-import group.gnometrading.oms.order.OmsOrder;
+import group.gnometrading.schemas.ClientOidCodec;
 import group.gnometrading.schemas.ExecType;
+import group.gnometrading.schemas.Order;
+import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.schemas.OrderType;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.TimeInForce;
 
 public final class TrackedOrder {
 
-    // Copied from OmsOrder at init time
+    // Copied from Order at init time
     private int exchangeId;
     private long securityId;
     private int strategyId;
-    private long clientOid;
+    private long clientOidCounter;
     private Side side;
     private long price;
     private long size;
@@ -30,19 +31,19 @@ public final class TrackedOrder {
         reset();
     }
 
-    public void init(OmsOrder order) {
-        this.exchangeId = order.exchangeId();
-        this.securityId = order.securityId();
-        this.strategyId = order.strategyId();
-        this.clientOid = order.clientOid();
-        this.side = order.side();
-        this.price = order.price();
-        this.size = order.size();
-        this.orderType = order.orderType();
-        this.timeInForce = order.timeInForce();
+    public void init(Order order) {
+        this.exchangeId = order.decoder.exchangeId();
+        this.securityId = order.decoder.securityId();
+        this.clientOidCounter = ClientOidCodec.decodeCounter(order.buffer, order.decoder.clientOidEncodingOffset());
+        this.strategyId = ClientOidCodec.decodeStrategyId(order.buffer, order.decoder.clientOidEncodingOffset());
+        this.side = order.decoder.side();
+        this.price = order.decoder.price();
+        this.size = order.decoder.size();
+        this.orderType = order.decoder.orderType();
+        this.timeInForce = order.decoder.timeInForce();
         this.state = OrderState.PENDING_NEW;
         this.filledQty = 0;
-        this.leavesQty = order.size();
+        this.leavesQty = order.decoder.size();
         this.totalCost = 0;
     }
 
@@ -50,7 +51,7 @@ public final class TrackedOrder {
         this.exchangeId = 0;
         this.securityId = 0;
         this.strategyId = 0;
-        this.clientOid = 0;
+        this.clientOidCounter = 0;
         this.side = null;
         this.price = 0;
         this.size = 0;
@@ -62,23 +63,23 @@ public final class TrackedOrder {
         this.totalCost = 0;
     }
 
-    public void applyExecutionReport(OmsExecutionReport report) {
-        ExecType exec = report.execType();
+    public void applyExecutionReport(OrderExecutionReport report) {
+        ExecType exec = report.decoder.execType();
         switch (exec) {
             case NEW -> {
                 state = OrderState.NEW;
-                leavesQty = report.leavesQty();
+                leavesQty = report.decoder.leavesQty();
             }
             case PARTIAL_FILL -> {
                 state = OrderState.PARTIALLY_FILLED;
-                totalCost += report.fillPrice() * report.filledQty();
-                filledQty = report.totalFilledQty();
-                leavesQty = report.leavesQty();
+                totalCost += report.decoder.fillPrice() * report.decoder.filledQty();
+                filledQty = report.decoder.cumulativeQty();
+                leavesQty = report.decoder.leavesQty();
             }
             case FILL -> {
                 state = OrderState.FILLED;
-                totalCost += report.fillPrice() * report.filledQty();
-                filledQty = report.totalFilledQty();
+                totalCost += report.decoder.fillPrice() * report.decoder.filledQty();
+                filledQty = report.decoder.cumulativeQty();
                 leavesQty = 0;
             }
             case CANCEL -> state = OrderState.CANCELED;
@@ -90,7 +91,7 @@ public final class TrackedOrder {
         }
     }
 
-    public void amend(long newPrice, long newSize) {
+    public void modify(long newPrice, long newSize) {
         this.price = newPrice;
         this.size = newSize;
         this.leavesQty = newSize;
@@ -112,8 +113,8 @@ public final class TrackedOrder {
         return strategyId;
     }
 
-    public long getClientOid() {
-        return clientOid;
+    public long getClientOidCounter() {
+        return clientOidCounter;
     }
 
     public Side getSide() {

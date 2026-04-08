@@ -1,10 +1,11 @@
 package group.gnometrading.oms.state;
 
 import group.gnometrading.collections.LongHashMap;
-import group.gnometrading.oms.order.OmsExecutionReport;
-import group.gnometrading.oms.order.OmsOrder;
 import group.gnometrading.pools.PoolNode;
 import group.gnometrading.pools.SingleThreadedObjectPool;
+import group.gnometrading.schemas.ClientOidCodec;
+import group.gnometrading.schemas.Order;
+import group.gnometrading.schemas.OrderExecutionReport;
 import java.util.function.Consumer;
 
 public final class DefaultOrderStateManager implements OrderStateManager {
@@ -27,82 +28,51 @@ public final class DefaultOrderStateManager implements OrderStateManager {
     }
 
     @Override
-    public TrackedOrder trackOrder(OmsOrder order) {
+    public TrackedOrder trackOrder(Order order) {
         PoolNode<TrackedOrder> node = orderPool.acquire();
         TrackedOrder tracked = node.getItem();
         tracked.init(order);
-        orders.put(order.clientOid(), tracked);
-        orderNodes.put(order.clientOid(), node);
+        long counter = tracked.getClientOidCounter();
+        orders.put(counter, tracked);
+        orderNodes.put(counter, node);
         return tracked;
     }
 
     @Override
-    public TrackedOrder applyExecutionReport(OmsExecutionReport report) {
-        TrackedOrder tracked = orders.get(report.clientOid());
+    public TrackedOrder applyExecutionReport(OrderExecutionReport report) {
+        long counter = ClientOidCodec.decodeCounter(report.buffer, report.decoder.clientOidEncodingOffset());
+        TrackedOrder tracked = orders.get(counter);
         if (tracked != null) {
             tracked.applyExecutionReport(report);
             if (tracked.getState().isTerminal()) {
-                orders.remove(report.clientOid());
+                orders.remove(counter);
             }
         }
         return tracked;
     }
 
     @Override
-    public TrackedOrder getOrder(long clientOid) {
-        return orders.get(clientOid);
+    public TrackedOrder getOrder(long clientOidCounter) {
+        return orders.get(clientOidCounter);
+    }
+
+    @Override
+    public void forEachOrder(final Consumer<TrackedOrder> consumer) {
+        for (final Long key : orders.keys()) {
+            final TrackedOrder tracked = orders.get(key);
+            if (tracked != null) {
+                consumer.accept(tracked);
+            }
+        }
     }
 
     @Override
     public void releaseOrder(TrackedOrder order) {
-        long clientOid = order.getClientOid();
-        PoolNode<TrackedOrder> node = orderNodes.remove(clientOid);
+        long counter = order.getClientOidCounter();
+        PoolNode<TrackedOrder> node = orderNodes.remove(counter);
         if (node != null) {
             order.reset();
             orderPool.release(node);
-        }
-    }
-
-    @Override
-    public void forEachOpenOrder(Consumer<TrackedOrder> consumer) {
-        for (long clientOid : orders.keys()) {
-            TrackedOrder order = orders.get(clientOid);
-            if (!order.getState().isTerminal()) {
-                consumer.accept(order);
-            }
-        }
-    }
-
-    @Override
-    public void forEachOpenOrderFor(int exchangeId, long securityId, Consumer<TrackedOrder> consumer) {
-        for (long clientOid : orders.keys()) {
-            TrackedOrder order = orders.get(clientOid);
-            if (!order.getState().isTerminal()
-                    && order.getExchangeId() == exchangeId
-                    && order.getSecurityId() == securityId) {
-                consumer.accept(order);
-            }
-        }
-    }
-
-    @Override
-    public void forEachOpenStrategyOrderFor(
-            int strategyId, int exchangeId, long securityId, Consumer<TrackedOrder> consumer) {
-        for (long clientOid : orders.keys()) {
-            TrackedOrder order = orders.get(clientOid);
-            if (!order.getState().isTerminal()
-                    && order.getExchangeId() == exchangeId
-                    && order.getSecurityId() == securityId
-                    && order.getStrategyId() == strategyId) {
-                consumer.accept(order);
-            }
-        }
-    }
-
-    @Override
-    public void forEachOrder(Consumer<TrackedOrder> consumer) {
-        for (long clientOid : orders.keys()) {
-            consumer.accept(orders.get(clientOid));
         }
     }
 }

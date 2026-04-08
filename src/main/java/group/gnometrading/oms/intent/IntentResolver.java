@@ -1,74 +1,73 @@
 package group.gnometrading.oms.intent;
 
+import group.gnometrading.SecurityMaster;
 import group.gnometrading.collections.LongHashMap;
-import group.gnometrading.oms.order.OmsExecutionReport;
+import group.gnometrading.oms.action.ActionSink;
+import group.gnometrading.schemas.CancelOrder;
+import group.gnometrading.schemas.ClientOidCodec;
 import group.gnometrading.schemas.ExecType;
+import group.gnometrading.schemas.Intent;
+import group.gnometrading.schemas.IntentDecoder;
+import group.gnometrading.schemas.ModifyOrder;
+import group.gnometrading.schemas.Order;
+import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.schemas.OrderType;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.TimeInForce;
-import java.util.function.Consumer;
-import java.util.logging.Logger;
+import group.gnometrading.sm.Listing;
 
 public final class IntentResolver {
 
-    private static final Logger logger = Logger.getLogger(IntentResolver.class.getName());
-
     private final ClientOidGenerator oidGenerator;
-    private final LongHashMap<Long> tickSizes;
-    private final long defaultTickSize;
+    private final SecurityMaster securityMaster;
     private final int strategyId;
-    private final OmsAction action = new OmsAction();
+    private final byte[] clientOidBuf = new byte[ClientOidCodec.CLIENT_OID_LENGTH];
+
+    private final Order pendingOrder = new Order();
+    private final CancelOrder pendingCancel = new CancelOrder();
+    private final ModifyOrder pendingModify = new ModifyOrder();
 
     // Slots keyed by securityId — one bid and one ask slot per instrument
     private final LongHashMap<OrderSlot> bidSlots = new LongHashMap<>(4);
     private final LongHashMap<OrderSlot> askSlots = new LongHashMap<>(4);
 
-    public IntentResolver(ClientOidGenerator oidGenerator, long defaultTickSize) {
-        this(oidGenerator, new LongHashMap<>(4), defaultTickSize, 0);
-    }
-
-    public IntentResolver(ClientOidGenerator oidGenerator, long defaultTickSize, int strategyId) {
-        this(oidGenerator, new LongHashMap<>(4), defaultTickSize, strategyId);
-    }
-
-    public IntentResolver(
-            ClientOidGenerator oidGenerator, LongHashMap<Long> tickSizes, long defaultTickSize, int strategyId) {
+    public IntentResolver(ClientOidGenerator oidGenerator, SecurityMaster securityMaster, int strategyId) {
         this.oidGenerator = oidGenerator;
-        this.tickSizes = tickSizes;
-        this.defaultTickSize = defaultTickSize;
+        this.securityMaster = securityMaster;
         this.strategyId = strategyId;
     }
 
-    public void setTickSize(long securityId, long tickSize) {
-        tickSizes.put(securityId, tickSize);
-    }
+    public void resolve(Intent intent, ActionSink handler) {
+        int exchangeId = intent.decoder.exchangeId();
+        long securityId = intent.decoder.securityId();
+        long tickSize = getTickSize(exchangeId, securityId);
 
-    public void resolve(Intent intent, Consumer<OmsAction> actionConsumer) {
-        long securityId = intent.getSecurityId();
-        long tickSize = getTickSize(securityId);
+        long bidSize = intent.decoder.bidSize() == IntentDecoder.bidSizeNullValue() ? 0 : intent.decoder.bidSize();
+        long askSize = intent.decoder.askSize() == IntentDecoder.askSizeNullValue() ? 0 : intent.decoder.askSize();
+        long bidPrice = intent.decoder.bidPrice() == IntentDecoder.bidPriceNullValue() ? 0 : intent.decoder.bidPrice();
+        long askPrice = intent.decoder.askPrice() == IntentDecoder.askPriceNullValue() ? 0 : intent.decoder.askPrice();
 
         resolveSide(
-                intent.getExchangeId(),
+                exchangeId,
                 securityId,
-                intent.getStrategyId(),
                 Side.Bid,
-                snapBid(intent.getBidPrice(), tickSize),
-                intent.getBidSize(),
+                snapBid(bidPrice, tickSize),
+                bidSize,
                 getOrCreateSlot(bidSlots, securityId),
-                actionConsumer);
+                handler);
 
         resolveSide(
-                intent.getExchangeId(),
+                exchangeId,
                 securityId,
-                intent.getStrategyId(),
                 Side.Ask,
-                snapAsk(intent.getAskPrice(), tickSize),
-                intent.getAskSize(),
+                snapAsk(askPrice, tickSize),
+                askSize,
                 getOrCreateSlot(askSlots, securityId),
-                actionConsumer);
+                handler);
 
-        if (intent.hasTake()) {
-            resolveTake(intent, actionConsumer);
+        long takeSize = intent.decoder.takeSize() == IntentDecoder.takeSizeNullValue() ? 0 : intent.decoder.takeSize();
+        if (takeSize > 0) {
+            resolveTake(intent, takeSize, handler);
         }
     }
 
@@ -77,28 +76,32 @@ public final class IntentResolver {
      * May emit a new order action if a queued intent fires after cancel confirmation.
      */
     public void onExecutionReport(
-            int exchangeId, long securityId, OmsExecutionReport report, Side side, Consumer<OmsAction> actionConsumer) {
+            int exchangeId, long securityId, OrderExecutionReport report, Side side, ActionSink handler) {
         LongHashMap<OrderSlot> slots = side == Side.Bid ? bidSlots : askSlots;
         OrderSlot slot = slots.get(securityId);
         if (slot == null) {
             return;
         }
 
-        if (report.clientOid() != slot.getActiveClientOid()) {
+        long reportCounter = ClientOidCodec.decodeCounter(report.buffer, report.decoder.clientOidEncodingOffset());
+        if (reportCounter != slot.getActiveClientOid()) {
             return;
         }
 
-        ExecType exec = report.execType();
+        ExecType exec = report.decoder.execType();
         switch (exec) {
             case NEW -> {
-                slot.onNewAcked();
-                // If strategy changed intent while we were pending new, cancel and resubmit
+                if (slot.getState() == OrderSlot.State.PENDING_MODIFY) {
+                    slot.onModifyConfirmed();
+                } else {
+                    slot.onNewAcked();
+                }
                 if (slot.hasQueuedIntent()) {
                     long qPrice = slot.getQueuedPrice();
                     long qSize = slot.getQueuedSize();
                     if (qSize == 0 || qPrice != slot.getActivePrice() || qSize != slot.getActiveSize()) {
-                        action.asCancel().set(exchangeId, securityId, strategyId, slot.getActiveClientOid());
-                        actionConsumer.accept(action);
+                        emitCancel(exchangeId, securityId, slot);
+                        handler.onCancel(pendingCancel);
                         slot.onCancelSubmitted();
                         if (qSize == 0) {
                             slot.clearQueuedIntent();
@@ -111,26 +114,34 @@ public final class IntentResolver {
             case FILL -> {
                 slot.onTerminal();
                 slot.clearQueuedIntent();
-                // Fully filled — slot is empty, no queued intent fires
-                // (the fill changed position; strategy will re-evaluate next tick)
             }
             case PARTIAL_FILL -> {
                 // Order still live, no state change
             }
             case CANCEL, REJECT, EXPIRE -> {
                 slot.onTerminal();
-                // If strategy queued an intent while we were pending cancel, fire it now
                 if (slot.hasQueuedIntent() && slot.getQueuedSize() > 0) {
                     long price = slot.getQueuedPrice();
                     long size = slot.getQueuedSize();
                     slot.clearQueuedIntent();
-                    submitNew(exchangeId, securityId, strategyId, side, price, size, slot, actionConsumer);
+                    submitNew(exchangeId, securityId, side, price, size, slot, handler);
                 } else {
                     slot.clearQueuedIntent();
                 }
             }
             default -> {
-                // CANCEL_REJECT: no state change
+                // CANCEL_REJECT: order remains live, revert pending state
+                if (slot.getState() == OrderSlot.State.PENDING_MODIFY) {
+                    slot.onModifyRejected();
+                    if (slot.hasQueuedIntent()) {
+                        processQueuedIntentOnLive(exchangeId, securityId, slot, handler);
+                    }
+                } else if (slot.getState() == OrderSlot.State.PENDING_CANCEL) {
+                    slot.onCancelRejected();
+                    if (slot.hasQueuedIntent()) {
+                        processQueuedIntentOnLive(exchangeId, securityId, slot, handler);
+                    }
+                }
             }
         }
     }
@@ -138,22 +149,20 @@ public final class IntentResolver {
     private void resolveSide(
             int exchangeId,
             long securityId,
-            int sideStrategyId,
             Side side,
             long snappedPrice,
             long desiredSize,
             OrderSlot slot,
-            Consumer<OmsAction> consumer) {
+            ActionSink handler) {
         boolean wantsOrder = desiredSize > 0;
 
         switch (slot.getState()) {
             case EMPTY -> {
                 if (wantsOrder) {
-                    submitNew(exchangeId, securityId, sideStrategyId, side, snappedPrice, desiredSize, slot, consumer);
+                    submitNew(exchangeId, securityId, side, snappedPrice, desiredSize, slot, handler);
                 }
             }
             case PENDING_NEW -> {
-                // Waiting for NEW ack — queue the intent if it differs
                 if (wantsOrder) {
                     slot.queueIntent(snappedPrice, desiredSize);
                 } else {
@@ -162,30 +171,17 @@ public final class IntentResolver {
             }
             case LIVE -> {
                 if (!wantsOrder) {
-                    // Cancel — strategy no longer wants an order on this side
-                    action.asCancel().set(exchangeId, securityId, sideStrategyId, slot.getActiveClientOid());
-                    consumer.accept(action);
+                    emitCancel(exchangeId, securityId, slot);
+                    handler.onCancel(pendingCancel);
                     slot.onCancelSubmitted();
                     slot.clearQueuedIntent();
                 } else if (slot.getActivePrice() != snappedPrice || slot.getActiveSize() != desiredSize) {
-                    // Price/size changed — atomic amend, slot stays LIVE
-                    action.asReplace()
-                            .set(
-                                    exchangeId,
-                                    securityId,
-                                    sideStrategyId,
-                                    slot.getActiveClientOid(),
-                                    oidGenerator.next(),
-                                    snappedPrice,
-                                    desiredSize);
-                    consumer.accept(action);
-                    // Optimistically update slot — order stays live with new params
-                    slot.onAmendAcked(snappedPrice, desiredSize);
+                    emitModify(exchangeId, securityId, slot, snappedPrice, desiredSize);
+                    handler.onModify(pendingModify);
+                    slot.onModifySubmitted(snappedPrice, desiredSize);
                 }
-                // else: same price and size — no action
             }
-            case PENDING_CANCEL -> {
-                // Already canceling — just update the queued intent
+            case PENDING_MODIFY, PENDING_CANCEL -> {
                 if (wantsOrder) {
                     slot.queueIntent(snappedPrice, desiredSize);
                 } else {
@@ -195,45 +191,87 @@ public final class IntentResolver {
         }
     }
 
+    private void processQueuedIntentOnLive(int exchangeId, long securityId, OrderSlot slot, ActionSink handler) {
+        long qPrice = slot.getQueuedPrice();
+        long qSize = slot.getQueuedSize();
+        slot.clearQueuedIntent();
+        if (qSize == 0) {
+            emitCancel(exchangeId, securityId, slot);
+            handler.onCancel(pendingCancel);
+            slot.onCancelSubmitted();
+        } else if (qPrice != slot.getActivePrice() || qSize != slot.getActiveSize()) {
+            emitModify(exchangeId, securityId, slot, qPrice, qSize);
+            handler.onModify(pendingModify);
+            slot.onModifySubmitted(qPrice, qSize);
+        }
+    }
+
+    private void emitCancel(int exchangeId, long securityId, OrderSlot slot) {
+        ClientOidCodec.encode(clientOidBuf, slot.getActiveClientOid(), strategyId);
+        pendingCancel
+                .encoder
+                .exchangeId((short) exchangeId)
+                .securityId((int) securityId)
+                .orderId(0)
+                .putClientOid(clientOidBuf, 0, ClientOidCodec.CLIENT_OID_LENGTH);
+    }
+
+    private void emitModify(int exchangeId, long securityId, OrderSlot slot, long price, long size) {
+        ClientOidCodec.encode(clientOidBuf, slot.getActiveClientOid(), strategyId);
+        pendingModify
+                .encoder
+                .exchangeId((short) exchangeId)
+                .securityId((int) securityId)
+                .orderId(0)
+                .putClientOid(clientOidBuf, 0, ClientOidCodec.CLIENT_OID_LENGTH)
+                .price(price)
+                .size((int) size)
+                .orderType(OrderType.LIMIT)
+                .timeInForce(TimeInForce.GOOD_TILL_CANCELED);
+    }
+
     private void submitNew(
-            int exchangeId,
-            long securityId,
-            int sideStrategyId,
-            Side side,
-            long price,
-            long size,
-            OrderSlot slot,
-            Consumer<OmsAction> consumer) {
+            int exchangeId, long securityId, Side side, long price, long size, OrderSlot slot, ActionSink handler) {
         long oid = oidGenerator.next();
-        action.asNewOrder()
-                .set(
-                        exchangeId,
-                        securityId,
-                        sideStrategyId,
-                        oid,
-                        side,
-                        price,
-                        size,
-                        OrderType.LIMIT,
-                        TimeInForce.GOOD_TILL_CANCELED);
-        consumer.accept(action);
+        ClientOidCodec.encode(clientOidBuf, oid, strategyId);
+        pendingOrder
+                .encoder
+                .exchangeId((short) exchangeId)
+                .securityId((int) securityId)
+                .putClientOid(clientOidBuf, 0, ClientOidCodec.CLIENT_OID_LENGTH)
+                .price(price)
+                .size((int) size)
+                .side(side)
+                .orderType(OrderType.LIMIT)
+                .timeInForce(TimeInForce.GOOD_TILL_CANCELED);
+        pendingOrder.encoder.flags().clear();
+        handler.onNewOrder(pendingOrder);
         slot.onNewSubmitted(oid, price, size);
     }
 
-    private void resolveTake(Intent intent, Consumer<OmsAction> actionConsumer) {
-        long price = intent.getTakeOrderType() == OrderType.MARKET ? 0 : intent.getTakeLimitPrice();
-        action.asNewOrder()
-                .set(
-                        intent.getExchangeId(),
-                        intent.getSecurityId(),
-                        intent.getStrategyId(),
-                        oidGenerator.next(),
-                        intent.getTakeSide(),
-                        price,
-                        intent.getTakeSize(),
-                        intent.getTakeOrderType(),
-                        TimeInForce.IMMEDIATE_OR_CANCELED);
-        actionConsumer.accept(action);
+    private void resolveTake(Intent intent, long takeSize, ActionSink handler) {
+        int exchangeId = intent.decoder.exchangeId();
+        long securityId = intent.decoder.securityId();
+        Side takeSide = intent.decoder.takeSide();
+        OrderType orderType = intent.decoder.takeOrderType() == OrderType.NULL_VAL
+                ? OrderType.MARKET
+                : intent.decoder.takeOrderType();
+        long price = orderType == OrderType.MARKET ? 0 : intent.decoder.takeLimitPrice();
+
+        long oid = oidGenerator.next();
+        ClientOidCodec.encode(clientOidBuf, oid, strategyId);
+        pendingOrder
+                .encoder
+                .exchangeId((short) exchangeId)
+                .securityId((int) securityId)
+                .putClientOid(clientOidBuf, 0, ClientOidCodec.CLIENT_OID_LENGTH)
+                .price(price)
+                .size((int) takeSize)
+                .side(takeSide)
+                .orderType(orderType)
+                .timeInForce(TimeInForce.IMMEDIATE_OR_CANCELED);
+        pendingOrder.encoder.flags().clear();
+        handler.onNewOrder(pendingOrder);
     }
 
     private OrderSlot getOrCreateSlot(LongHashMap<OrderSlot> slots, long securityId) {
@@ -245,9 +283,9 @@ public final class IntentResolver {
         return slot;
     }
 
-    private long getTickSize(long securityId) {
-        Long ts = tickSizes.get(securityId);
-        return ts != null ? ts : defaultTickSize;
+    private long getTickSize(int exchangeId, long securityId) {
+        Listing listing = securityMaster.getListing(exchangeId, (int) securityId);
+        return securityMaster.getListingSpec(listing.listingId()).tickSize();
     }
 
     private static long snapBid(long price, long tickSize) {

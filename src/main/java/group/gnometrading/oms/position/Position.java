@@ -4,36 +4,27 @@ import group.gnometrading.schemas.Side;
 
 public final class Position {
 
-    private int exchangeId;
-    private long securityId;
-    private long netQuantity;
-    private long avgEntryPrice;
-    private double realizedPnl;
-    private double totalFees;
-    private long leavesBuyQty;
-    private long leavesSellQty;
+    public int listingId;
+    public long netQuantity;
+    public long avgEntryPrice;
+    public double realizedPnl;
+    public long totalFees;
+    public long leavesBuyQty;
+    public long leavesSellQty;
+    int sharedSlot = -1;
 
-    public Position() {
-        reset();
-    }
-
-    public void init(int newExchangeId, long newSecurityId) {
-        this.exchangeId = newExchangeId;
-        this.securityId = newSecurityId;
-    }
-
-    public void reset() {
-        this.exchangeId = 0;
-        this.securityId = 0;
+    public void init(int id) {
+        this.listingId = id;
         this.netQuantity = 0;
         this.avgEntryPrice = 0;
         this.realizedPnl = 0.0;
-        this.totalFees = 0.0;
+        this.totalFees = 0;
         this.leavesBuyQty = 0;
         this.leavesSellQty = 0;
+        this.sharedSlot = -1;
     }
 
-    public void applyFill(Side side, long qty, long price, double fee) {
+    public void applyFill(Side side, long qty, long price, long fee) {
         long signedQty = (side == Side.Bid) ? qty : -qty;
         totalFees += fee;
 
@@ -79,40 +70,17 @@ public final class Position {
         }
     }
 
+    void setFromBuffer(long netQty, long avgEntry, double pnl, long fees, long leavesBuy, long leavesSell) {
+        this.netQuantity = netQty;
+        this.avgEntryPrice = avgEntry;
+        this.realizedPnl = pnl;
+        this.totalFees = fees;
+        this.leavesBuyQty = leavesBuy;
+        this.leavesSellQty = leavesSell;
+    }
+
     /** Confirmed net quantity + inflight buy - inflight sell. */
     public long getEffectiveQuantity() {
         return netQuantity + leavesBuyQty - leavesSellQty;
-    }
-
-    public int getExchangeId() {
-        return exchangeId;
-    }
-
-    public long getSecurityId() {
-        return securityId;
-    }
-
-    public long getNetQuantity() {
-        return netQuantity;
-    }
-
-    public long getAvgEntryPrice() {
-        return avgEntryPrice;
-    }
-
-    public double getRealizedPnl() {
-        return realizedPnl;
-    }
-
-    public double getTotalFees() {
-        return totalFees;
-    }
-
-    public long getLeavesBuyQty() {
-        return leavesBuyQty;
-    }
-
-    public long getLeavesSellQty() {
-        return leavesSellQty;
     }
 }
