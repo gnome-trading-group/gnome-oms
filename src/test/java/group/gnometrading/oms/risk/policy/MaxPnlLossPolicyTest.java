@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import group.gnometrading.oms.position.DefaultPositionTracker;
 import group.gnometrading.oms.position.Position;
+import group.gnometrading.oms.position.SharedPositionBuffer;
 import group.gnometrading.oms.state.OrderStateManager;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.strings.ViewString;
@@ -27,10 +28,10 @@ class MaxPnlLossPolicyTest {
 
     @BeforeEach
     void setUp() {
-        positions = new DefaultPositionTracker();
+        positions = new DefaultPositionTracker(new SharedPositionBuffer(8));
     }
 
-    private Position createPosition(double realizedPnl) {
+    private Position createPosition(long realizedPnl) {
         positions.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 1, 100, 0);
         final Position pos = positions.getStrategyPosition(STRATEGY_ID, LISTING_ID);
         pos.realizedPnl = realizedPnl;
@@ -39,42 +40,42 @@ class MaxPnlLossPolicyTest {
 
     @Test
     void testNotViolatedWhenNoPosition() {
-        final MaxPnlLossPolicy policy = new MaxPnlLossPolicy(100.0);
+        final MaxPnlLossPolicy policy = new MaxPnlLossPolicy(100L);
         assertFalse(policy.isViolated(STRATEGY_ID, LISTING_ID, positions, orders));
     }
 
     @Test
     void testNotViolatedWhenPnlAboveNegativeMaxLoss() {
-        createPosition(-50.0);
-        final MaxPnlLossPolicy policy = new MaxPnlLossPolicy(100.0);
+        createPosition(-50L);
+        final MaxPnlLossPolicy policy = new MaxPnlLossPolicy(100L);
         assertFalse(policy.isViolated(STRATEGY_ID, LISTING_ID, positions, orders));
     }
 
     @Test
     void testNotViolatedWhenPnlExactlyAtNegativeMaxLoss() {
-        createPosition(-100.0);
-        final MaxPnlLossPolicy policy = new MaxPnlLossPolicy(100.0);
-        // -100.0 < -100.0 is false — not violated
+        createPosition(-100L);
+        final MaxPnlLossPolicy policy = new MaxPnlLossPolicy(100L);
+        // -100 < -100 is false — not violated
         assertFalse(policy.isViolated(STRATEGY_ID, LISTING_ID, positions, orders));
     }
 
     @Test
     void testViolatedWhenPnlBelowNegativeMaxLoss() {
-        createPosition(-100.01);
-        final MaxPnlLossPolicy policy = new MaxPnlLossPolicy(100.0);
+        createPosition(-101L);
+        final MaxPnlLossPolicy policy = new MaxPnlLossPolicy(100L);
         assertTrue(policy.isViolated(STRATEGY_ID, LISTING_ID, positions, orders));
     }
 
     @Test
     void testNotViolatedWhenPnlPositive() {
-        createPosition(50.0);
-        final MaxPnlLossPolicy policy = new MaxPnlLossPolicy(100.0);
+        createPosition(50L);
+        final MaxPnlLossPolicy policy = new MaxPnlLossPolicy(100L);
         assertFalse(policy.isViolated(STRATEGY_ID, LISTING_ID, positions, orders));
     }
 
     @Test
     void testReconfigureUpdatesMaxLoss() {
-        createPosition(-51.0);
+        createPosition(-51L);
         final MaxPnlLossPolicy policy = new MaxPnlLossPolicy();
         policy.reconfigure(new ViewString("{\"maxLoss\": 50}"));
         assertTrue(policy.isViolated(STRATEGY_ID, LISTING_ID, positions, orders));

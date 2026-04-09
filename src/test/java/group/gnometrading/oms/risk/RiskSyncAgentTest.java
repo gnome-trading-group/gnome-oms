@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.when;
 
 import group.gnometrading.oms.position.DefaultPositionTracker;
+import group.gnometrading.oms.position.SharedPositionBuffer;
 import group.gnometrading.oms.state.OrderStateManager;
 import group.gnometrading.risk.PolicyScope;
 import group.gnometrading.risk.RiskMaster;
@@ -46,7 +47,7 @@ class RiskSyncAgentTest {
     void setUp() {
         riskEngine = new RiskEngine();
         agent = new RiskSyncAgent(riskMaster, riskEngine, clock, INTERVAL);
-        positions = new DefaultPositionTracker();
+        positions = new DefaultPositionTracker(new SharedPositionBuffer(8));
         order = new Order();
         order.encoder.side(Side.Bid).size(1).price(100);
 
@@ -103,7 +104,7 @@ class RiskSyncAgentTest {
         triggerSync();
 
         positions.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 1, 100, 0);
-        positions.getStrategyPosition(STRATEGY_ID, LISTING_ID).realizedPnl = -51.0;
+        positions.getStrategyPosition(STRATEGY_ID, LISTING_ID).realizedPnl = -51L;
 
         assertTrue(riskEngine.checkMarketPolicies(STRATEGY_ID, LISTING_ID, positions, orders));
     }
@@ -170,7 +171,7 @@ class RiskSyncAgentTest {
         triggerSync();
 
         positions.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 1, 100, 0);
-        positions.getStrategyPosition(STRATEGY_ID, LISTING_ID).realizedPnl = -51.0;
+        positions.getStrategyPosition(STRATEGY_ID, LISTING_ID).realizedPnl = -51L;
 
         assertTrue(riskEngine.checkMarketPolicies(STRATEGY_ID, LISTING_ID, positions, orders));
         assertFalse(riskEngine.checkMarketPolicies(STRATEGY_ID + 1, LISTING_ID, positions, orders));
@@ -182,7 +183,7 @@ class RiskSyncAgentTest {
         triggerSync();
 
         positions.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 1, 100, 0);
-        positions.getStrategyPosition(STRATEGY_ID, LISTING_ID).realizedPnl = -51.0;
+        positions.getStrategyPosition(STRATEGY_ID, LISTING_ID).realizedPnl = -51L;
 
         assertTrue(riskEngine.checkMarketPolicies(STRATEGY_ID, LISTING_ID, positions, orders));
         assertFalse(riskEngine.checkMarketPolicies(STRATEGY_ID, LISTING_ID + 1, positions, orders));

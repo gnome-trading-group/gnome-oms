@@ -4,7 +4,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import group.gnometrading.oms.position.DefaultPositionTracker;
-import group.gnometrading.oms.risk.policy.KillSwitchPolicy;
+import group.gnometrading.oms.position.SharedPositionBuffer;
+import group.gnometrading.oms.risk.policy.AutoDenyPolicy;
 import group.gnometrading.oms.risk.policy.MaxOrderSizePolicy;
 import group.gnometrading.oms.risk.policy.MaxPnlLossPolicy;
 import group.gnometrading.oms.state.OrderStateManager;
@@ -27,7 +28,7 @@ class RiskEngineTest {
 
     @BeforeEach
     void setUp() {
-        positions = new DefaultPositionTracker();
+        positions = new DefaultPositionTracker(new SharedPositionBuffer(8));
         order = new Order();
         order.encoder.side(Side.Bid).size(1).price(100);
     }
@@ -87,7 +88,7 @@ class RiskEngineTest {
 
     @Test
     void testCheckReturnsFalseWhenGlobalOrderPolicyViolated() {
-        final OrderPolicyGroup globalOrder = buildOrderGroup(new KillSwitchPolicy());
+        final OrderPolicyGroup globalOrder = buildOrderGroup(new AutoDenyPolicy());
         final MarketPolicyGroup globalMarket = new MarketPolicyGroup(RiskEngineSnapshot.MAX_POLICIES_PER_GROUP);
         final RiskEngine engine = new RiskEngine(globalOrder, globalMarket);
         assertFalse(engine.check(order, positions, orders, 0, 0));
@@ -107,7 +108,7 @@ class RiskEngineTest {
         // Two policies: MaxOrderSizePolicy passes, KillSwitch fails — AND logic
         final OrderPolicyGroup globalOrder = new OrderPolicyGroup(RiskEngineSnapshot.MAX_POLICIES_PER_GROUP);
         globalOrder.policies[0] = new MaxOrderSizePolicy(1000);
-        globalOrder.policies[1] = new KillSwitchPolicy();
+        globalOrder.policies[1] = new AutoDenyPolicy();
         globalOrder.count = 2;
 
         final MarketPolicyGroup globalMarket = new MarketPolicyGroup(RiskEngineSnapshot.MAX_POLICIES_PER_GROUP);
@@ -122,7 +123,7 @@ class RiskEngineTest {
 
         final RiskEngineSnapshot snapshot = new RiskEngineSnapshot();
         final OrderPolicyGroup stratGroup = new OrderPolicyGroup(RiskEngineSnapshot.MAX_POLICIES_PER_GROUP);
-        stratGroup.policies[0] = new KillSwitchPolicy();
+        stratGroup.policies[0] = new AutoDenyPolicy();
         stratGroup.count = 1;
         snapshot.strategyOrderGroups.put(7, stratGroup);
         engine.publishSnapshot(snapshot);
@@ -137,7 +138,7 @@ class RiskEngineTest {
 
         final RiskEngineSnapshot snapshot = new RiskEngineSnapshot();
         final OrderPolicyGroup listingGroup = new OrderPolicyGroup(RiskEngineSnapshot.MAX_POLICIES_PER_GROUP);
-        listingGroup.policies[0] = new KillSwitchPolicy();
+        listingGroup.policies[0] = new AutoDenyPolicy();
         listingGroup.count = 1;
         snapshot.listingOrderGroups.put(200, listingGroup);
         engine.publishSnapshot(snapshot);
@@ -157,11 +158,11 @@ class RiskEngineTest {
     @Test
     void testCheckMarketPoliciesReturnsTrueWhenGlobalMarketPolicyViolated() {
         final OrderPolicyGroup globalOrder = new OrderPolicyGroup(RiskEngineSnapshot.MAX_POLICIES_PER_GROUP);
-        final MarketPolicyGroup globalMarket = buildMarketGroup(new MaxPnlLossPolicy(100.0));
+        final MarketPolicyGroup globalMarket = buildMarketGroup(new MaxPnlLossPolicy(100L));
         final RiskEngine engine = new RiskEngine(globalOrder, globalMarket);
 
         positions.applyStrategyFill(1, 100, Side.Bid, 1, 100, 0);
-        positions.getStrategyPosition(1, 100).realizedPnl = -200.0;
+        positions.getStrategyPosition(1, 100).realizedPnl = -200L;
 
         assertTrue(engine.checkMarketPolicies(1, 100, positions, orders));
     }
@@ -169,11 +170,11 @@ class RiskEngineTest {
     @Test
     void testCheckMarketPoliciesReturnsFalseWhenNoPolicyViolated() {
         final OrderPolicyGroup globalOrder = new OrderPolicyGroup(RiskEngineSnapshot.MAX_POLICIES_PER_GROUP);
-        final MarketPolicyGroup globalMarket = buildMarketGroup(new MaxPnlLossPolicy(1000.0));
+        final MarketPolicyGroup globalMarket = buildMarketGroup(new MaxPnlLossPolicy(1000L));
         final RiskEngine engine = new RiskEngine(globalOrder, globalMarket);
 
         positions.applyStrategyFill(1, 100, Side.Bid, 1, 100, 0);
-        positions.getStrategyPosition(1, 100).realizedPnl = -50.0;
+        positions.getStrategyPosition(1, 100).realizedPnl = -50L;
 
         assertFalse(engine.checkMarketPolicies(1, 100, positions, orders));
     }
@@ -186,7 +187,7 @@ class RiskEngineTest {
         assertTrue(engine.check(order, positions, orders, 0, 0)); // empty snapshot — passes
 
         final RiskEngineSnapshot snapshot = new RiskEngineSnapshot();
-        snapshot.globalOrderGroup.policies[0] = new KillSwitchPolicy();
+        snapshot.globalOrderGroup.policies[0] = new AutoDenyPolicy();
         snapshot.globalOrderGroup.count = 1;
         engine.publishSnapshot(snapshot);
 

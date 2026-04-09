@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import group.gnometrading.oms.position.DefaultPositionTracker;
+import group.gnometrading.oms.position.SharedPositionBuffer;
 import group.gnometrading.oms.state.OrderStateManager;
 import group.gnometrading.schemas.Order;
 import group.gnometrading.schemas.Side;
@@ -28,7 +29,7 @@ class MaxPositionPolicyTest {
 
     @BeforeEach
     void setUp() {
-        positions = new DefaultPositionTracker();
+        positions = new DefaultPositionTracker(new SharedPositionBuffer(8));
         order = new Order();
     }
 

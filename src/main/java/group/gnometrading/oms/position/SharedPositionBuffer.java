@@ -14,8 +14,8 @@ import org.agrona.concurrent.UnsafeBuffer;
  * <pre>
  *   [0]  version       (long) — odd = writer active, even = stable
  *   [8]  netQuantity   (long)
- *   [16] avgEntryPrice (long)
- *   [24] realizedPnl   (long) — Double.doubleToRawLongBits
+ *   [16] totalCost     (long)
+ *   [24] realizedPnl   (long)
  *   [32] totalFees     (long)
  *   [40] leavesBuyQty  (long)
  *   [48] leavesSellQty (long)
@@ -27,17 +27,23 @@ public final class SharedPositionBuffer {
     private static final int SLOT_SIZE = 64;
     private static final int VERSION_OFFSET = 0;
     private static final int NET_QTY_OFFSET = 8;
-    private static final int AVG_ENTRY_OFFSET = 16;
+    private static final int TOTAL_COST_OFFSET = 16;
     private static final int REALIZED_PNL_OFFSET = 24;
     private static final int TOTAL_FEES_OFFSET = 32;
     private static final int LEAVES_BUY_OFFSET = 40;
     private static final int LEAVES_SELL_OFFSET = 48;
 
     private final UnsafeBuffer buffer;
+    private final int maxSlots;
     private int nextSlot = 0;
 
     public SharedPositionBuffer(int maxSlots) {
+        this.maxSlots = maxSlots;
         this.buffer = ByteBufferUtils.createAlignedUnsafeBuffer(maxSlots * SLOT_SIZE);
+    }
+
+    public int capacity() {
+        return maxSlots;
     }
 
     /**
@@ -56,8 +62,8 @@ public final class SharedPositionBuffer {
         long version = buffer.getLong(base + VERSION_OFFSET);
         buffer.putLongVolatile(base + VERSION_OFFSET, version + 1); // odd = writing
         buffer.putLong(base + NET_QTY_OFFSET, pos.netQuantity);
-        buffer.putLong(base + AVG_ENTRY_OFFSET, pos.avgEntryPrice);
-        buffer.putLong(base + REALIZED_PNL_OFFSET, Double.doubleToRawLongBits(pos.realizedPnl));
+        buffer.putLong(base + TOTAL_COST_OFFSET, pos.totalCost);
+        buffer.putLong(base + REALIZED_PNL_OFFSET, pos.realizedPnl);
         buffer.putLong(base + TOTAL_FEES_OFFSET, pos.totalFees);
         buffer.putLong(base + LEAVES_BUY_OFFSET, pos.leavesBuyQty);
         buffer.putLong(base + LEAVES_SELL_OFFSET, pos.leavesSellQty);
@@ -76,8 +82,8 @@ public final class SharedPositionBuffer {
             return false;
         }
         long netQty = buffer.getLong(base + NET_QTY_OFFSET);
-        long avgEntry = buffer.getLong(base + AVG_ENTRY_OFFSET);
-        long realizedPnlBits = buffer.getLong(base + REALIZED_PNL_OFFSET);
+        long totalCost = buffer.getLong(base + TOTAL_COST_OFFSET);
+        long realizedPnl = buffer.getLong(base + REALIZED_PNL_OFFSET);
         long totalFees = buffer.getLong(base + TOTAL_FEES_OFFSET);
         long leavesBuy = buffer.getLong(base + LEAVES_BUY_OFFSET);
         long leavesSell = buffer.getLong(base + LEAVES_SELL_OFFSET);
@@ -85,8 +91,7 @@ public final class SharedPositionBuffer {
         if (v1 != v2) {
             return false;
         }
-        dest.setFromBuffer(
-                netQty, avgEntry, Double.longBitsToDouble(realizedPnlBits), totalFees, leavesBuy, leavesSell);
+        dest.setFromBuffer(netQty, totalCost, realizedPnl, totalFees, leavesBuy, leavesSell);
         return true;
     }
 

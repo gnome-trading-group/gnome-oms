@@ -74,8 +74,6 @@ public final class OmsAgent implements GnomeAgent, SequencedEventHandler, Action
         }
     }
 
-    // --- ActionSink: write approved actions to the outbound ring buffer ---
-
     @Override
     public void onNewOrder(Order order) {
         outboundBuffer.publishRaw(order.buffer, order.messageHeaderDecoder.templateId(), order.totalMessageSize());

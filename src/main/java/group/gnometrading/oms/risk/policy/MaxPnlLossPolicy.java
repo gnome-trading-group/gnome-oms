@@ -9,17 +9,17 @@ import group.gnometrading.strings.GnomeString;
 
 public final class MaxPnlLossPolicy extends AbstractConfigurablePolicy implements MarketRiskPolicy {
 
-    private double maxLoss;
+    private long maxLoss;
 
     public MaxPnlLossPolicy() {}
 
-    public MaxPnlLossPolicy(final double maxLoss) {
+    public MaxPnlLossPolicy(final long maxLoss) {
         this.maxLoss = maxLoss;
     }
 
     @Override
     public void reconfigure(final GnomeString parametersJson) {
-        this.maxLoss = PolicyParameters.parseDouble(jsonDecoder, wrapParameters(parametersJson), "maxLoss");
+        this.maxLoss = PolicyParameters.parseLong(jsonDecoder, wrapParameters(parametersJson), "maxLoss");
     }
 
     @Override

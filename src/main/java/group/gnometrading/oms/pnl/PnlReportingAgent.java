@@ -2,83 +2,84 @@ package group.gnometrading.oms.pnl;
 
 import group.gnometrading.RegistryConnection;
 import group.gnometrading.codecs.json.JsonEncoder;
+import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.oms.position.Position;
+import group.gnometrading.oms.position.PositionTracker;
+import group.gnometrading.oms.position.StrategyPositionConsumer;
 import group.gnometrading.strings.GnomeString;
 import group.gnometrading.strings.ViewString;
+import group.gnometrading.utils.Schedule;
 import java.nio.ByteBuffer;
 import java.time.Duration;
+import org.agrona.concurrent.EpochClock;
 
 /**
- * Enqueues position snapshots and periodically flushes them to the registry.
- * GC-free on the hot path: pre-allocated snapshot structs, ByteBuffer JSON builder.
- * One small allocation (Arrays.copyOf) occurs per flush inside RegistryConnection.
+ * Periodically snapshots all per-strategy positions from {@link PositionTracker} and flushes
+ * them to the registry. Runs on its own thread via {@link group.gnometrading.concurrent.GnomeAgentRunner}.
+ *
+ * <p>Reads positions via {@link PositionTracker#forEachStrategyPosition}, which is backed by
+ * {@link group.gnometrading.oms.position.SharedPositionBuffer} for thread-safe cross-thread reads.
  */
-public final class PnlReporter {
+public final class PnlReportingAgent implements GnomeAgent, StrategyPositionConsumer {
 
     private static final String PNL_SNAPSHOTS_PATH = "/api/pnl/snapshots";
-    private static final int DEFAULT_CAPACITY = 32;
     private static final int BYTES_PER_SNAPSHOT = 256;
-    private static final int REALIZED_PNL_SCALE = 6;
-
+    private final PositionTracker positionTracker;
     private final RegistryConnection registryConnection;
+    private final Schedule flushSchedule;
     private final GnomeString path;
-    private final long flushIntervalMs;
     private final PnlSnapshot[] snapshots;
     private final ByteBuffer bodyBuffer;
     private final JsonEncoder jsonEncoder;
 
     private int pendingCount;
-    private long lastFlushMs;
 
-    public PnlReporter(final RegistryConnection registryConnection, final Duration flushInterval) {
-        this(registryConnection, flushInterval, DEFAULT_CAPACITY);
-    }
-
-    public PnlReporter(final RegistryConnection registryConnection, final Duration flushInterval, final int capacity) {
+    public PnlReportingAgent(
+            final PositionTracker positionTracker,
+            final RegistryConnection registryConnection,
+            final EpochClock clock,
+            final Duration flushInterval,
+            final int maxSlots) {
+        this.positionTracker = positionTracker;
         this.registryConnection = registryConnection;
-        this.flushIntervalMs = flushInterval.toMillis();
+        this.flushSchedule = new Schedule(clock, flushInterval.toMillis(), this::snapshotAndFlush);
         this.path = new ViewString(PNL_SNAPSHOTS_PATH);
-        this.snapshots = new PnlSnapshot[capacity];
-        for (int i = 0; i < capacity; i++) {
+        this.snapshots = new PnlSnapshot[maxSlots];
+        for (int i = 0; i < maxSlots; i++) {
             this.snapshots[i] = new PnlSnapshot();
         }
-        this.bodyBuffer = ByteBuffer.allocate(capacity * BYTES_PER_SNAPSHOT);
+        this.bodyBuffer = ByteBuffer.allocate(maxSlots * BYTES_PER_SNAPSHOT);
         this.jsonEncoder = new JsonEncoder();
-        this.pendingCount = 0;
-        this.lastFlushMs = 0;
     }
 
-    public void enqueue(final int strategyId, final int listingId, final Position position) {
-        if (pendingCount >= snapshots.length) {
-            flush();
-        }
-        final PnlSnapshot snapshot = snapshots[pendingCount++];
-        snapshot.strategyId = strategyId;
-        snapshot.listingId = listingId;
-        snapshot.netQuantity = position.netQuantity;
-        snapshot.avgEntryPrice = position.avgEntryPrice;
-        snapshot.realizedPnl = position.realizedPnl;
-        snapshot.totalFees = position.totalFees;
-        snapshot.leavesBuyQty = position.leavesBuyQty;
-        snapshot.leavesSellQty = position.leavesSellQty;
+    @Override
+    public void onStart() {
+        flushSchedule.start();
     }
 
-    public void maybeFlush(final long nowEpochMs) {
-        if (pendingCount > 0 && nowEpochMs - lastFlushMs >= flushIntervalMs) {
-            flush();
-        }
+    @Override
+    public int doWork() {
+        flushSchedule.check();
+        return 0;
     }
 
-    public void flush() {
+    @Override
+    public void accept(final int strategyId, final int listingId, final Position position) {
+        snapshots[pendingCount++].set(strategyId, listingId, position);
+    }
+
+    private void snapshotAndFlush() {
+        pendingCount = 0;
+        positionTracker.forEachStrategyPosition(this);
+
         if (pendingCount == 0) {
             return;
         }
+
         bodyBuffer.clear();
         jsonEncoder.wrap(bodyBuffer);
         buildJson();
         registryConnection.post(path, bodyBuffer.array(), bodyBuffer.position());
-        pendingCount = 0;
-        lastFlushMs = System.currentTimeMillis();
     }
 
     private void buildJson() {
@@ -103,7 +104,7 @@ public final class PnlReporter {
                 .writeComma()
                 .writeObjectEntry("avgEntryPrice", snapshot.avgEntryPrice)
                 .writeComma()
-                .writeObjectEntry("realizedPnl", snapshot.realizedPnl, REALIZED_PNL_SCALE)
+                .writeObjectEntry("realizedPnl", snapshot.realizedPnl)
                 .writeComma()
                 .writeObjectEntry("totalFees", snapshot.totalFees)
                 .writeComma()

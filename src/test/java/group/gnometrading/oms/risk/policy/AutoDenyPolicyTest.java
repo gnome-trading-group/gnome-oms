@@ -12,7 +12,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 @ExtendWith(MockitoExtension.class)
-class KillSwitchPolicyTest {
+class AutoDenyPolicyTest {
 
     @Mock
     private PositionTracker positions;
@@ -20,7 +20,7 @@ class KillSwitchPolicyTest {
     @Mock
     private OrderStateManager orders;
 
-    private final KillSwitchPolicy policy = new KillSwitchPolicy();
+    private final AutoDenyPolicy policy = new AutoDenyPolicy();
     private final Order order = new Order();
 
     @Test

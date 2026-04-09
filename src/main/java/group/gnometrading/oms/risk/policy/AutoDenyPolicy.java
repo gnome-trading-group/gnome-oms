@@ -6,7 +6,7 @@ import group.gnometrading.oms.state.OrderStateManager;
 import group.gnometrading.schemas.Order;
 import group.gnometrading.strings.GnomeString;
 
-public final class KillSwitchPolicy implements OrderRiskPolicy {
+public final class AutoDenyPolicy implements OrderRiskPolicy {
 
     @Override
     public boolean isViolated(

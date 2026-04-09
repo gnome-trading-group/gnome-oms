@@ -4,7 +4,6 @@ import group.gnometrading.SecurityMaster;
 import group.gnometrading.collections.LongHashMap;
 import group.gnometrading.oms.action.ActionSink;
 import group.gnometrading.schemas.CancelOrder;
-import group.gnometrading.schemas.ClientOidCodec;
 import group.gnometrading.schemas.ExecType;
 import group.gnometrading.schemas.Intent;
 import group.gnometrading.schemas.IntentDecoder;
@@ -15,14 +14,13 @@ import group.gnometrading.schemas.OrderType;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.TimeInForce;
 import group.gnometrading.sm.Listing;
+import java.util.function.LongSupplier;
 
 public final class IntentResolver {
 
-    private final ClientOidGenerator oidGenerator;
+    private final LongSupplier oidSupplier;
     private final SecurityMaster securityMaster;
     private final int strategyId;
-    private final byte[] clientOidBuf = new byte[ClientOidCodec.CLIENT_OID_LENGTH];
-
     private final Order pendingOrder = new Order();
     private final CancelOrder pendingCancel = new CancelOrder();
     private final ModifyOrder pendingModify = new ModifyOrder();
@@ -31,8 +29,8 @@ public final class IntentResolver {
     private final LongHashMap<OrderSlot> bidSlots = new LongHashMap<>(4);
     private final LongHashMap<OrderSlot> askSlots = new LongHashMap<>(4);
 
-    public IntentResolver(ClientOidGenerator oidGenerator, SecurityMaster securityMaster, int strategyId) {
-        this.oidGenerator = oidGenerator;
+    public IntentResolver(LongSupplier oidSupplier, SecurityMaster securityMaster, int strategyId) {
+        this.oidSupplier = oidSupplier;
         this.securityMaster = securityMaster;
         this.strategyId = strategyId;
     }
@@ -83,7 +81,7 @@ public final class IntentResolver {
             return;
         }
 
-        long reportCounter = ClientOidCodec.decodeCounter(report.buffer, report.decoder.clientOidEncodingOffset());
+        long reportCounter = report.getClientOidCounter();
         if (reportCounter != slot.getActiveClientOid()) {
             return;
         }
@@ -207,23 +205,21 @@ public final class IntentResolver {
     }
 
     private void emitCancel(int exchangeId, long securityId, OrderSlot slot) {
-        ClientOidCodec.encode(clientOidBuf, slot.getActiveClientOid(), strategyId);
+        pendingCancel.encodeClientOid(slot.getActiveClientOid(), strategyId);
         pendingCancel
                 .encoder
                 .exchangeId((short) exchangeId)
                 .securityId((int) securityId)
-                .orderId(0)
-                .putClientOid(clientOidBuf, 0, ClientOidCodec.CLIENT_OID_LENGTH);
+                .orderId(0);
     }
 
     private void emitModify(int exchangeId, long securityId, OrderSlot slot, long price, long size) {
-        ClientOidCodec.encode(clientOidBuf, slot.getActiveClientOid(), strategyId);
+        pendingModify.encodeClientOid(slot.getActiveClientOid(), strategyId);
         pendingModify
                 .encoder
                 .exchangeId((short) exchangeId)
                 .securityId((int) securityId)
                 .orderId(0)
-                .putClientOid(clientOidBuf, 0, ClientOidCodec.CLIENT_OID_LENGTH)
                 .price(price)
                 .size((int) size)
                 .orderType(OrderType.LIMIT)
@@ -232,13 +228,12 @@ public final class IntentResolver {
 
     private void submitNew(
             int exchangeId, long securityId, Side side, long price, long size, OrderSlot slot, ActionSink handler) {
-        long oid = oidGenerator.next();
-        ClientOidCodec.encode(clientOidBuf, oid, strategyId);
+        long oid = oidSupplier.getAsLong();
+        pendingOrder.encodeClientOid(oid, strategyId);
         pendingOrder
                 .encoder
                 .exchangeId((short) exchangeId)
                 .securityId((int) securityId)
-                .putClientOid(clientOidBuf, 0, ClientOidCodec.CLIENT_OID_LENGTH)
                 .price(price)
                 .size((int) size)
                 .side(side)
@@ -258,13 +253,12 @@ public final class IntentResolver {
                 : intent.decoder.takeOrderType();
         long price = orderType == OrderType.MARKET ? 0 : intent.decoder.takeLimitPrice();
 
-        long oid = oidGenerator.next();
-        ClientOidCodec.encode(clientOidBuf, oid, strategyId);
+        long oid = oidSupplier.getAsLong();
+        pendingOrder.encodeClientOid(oid, strategyId);
         pendingOrder
                 .encoder
                 .exchangeId((short) exchangeId)
                 .securityId((int) securityId)
-                .putClientOid(clientOidBuf, 0, ClientOidCodec.CLIENT_OID_LENGTH)
                 .price(price)
                 .size((int) takeSize)
                 .side(takeSide)

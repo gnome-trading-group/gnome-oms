@@ -1,6 +1,5 @@
 package group.gnometrading.oms.state;
 
-import group.gnometrading.schemas.ClientOidCodec;
 import group.gnometrading.schemas.ExecType;
 import group.gnometrading.schemas.Order;
 import group.gnometrading.schemas.OrderExecutionReport;
@@ -22,6 +21,7 @@ public final class TrackedOrder {
     private TimeInForce timeInForce;
 
     // Order state
+    private boolean active;
     private OrderState state;
     private long filledQty;
     private long leavesQty;
@@ -32,10 +32,11 @@ public final class TrackedOrder {
     }
 
     public void init(Order order) {
+        this.active = true;
         this.exchangeId = order.decoder.exchangeId();
         this.securityId = order.decoder.securityId();
-        this.clientOidCounter = ClientOidCodec.decodeCounter(order.buffer, order.decoder.clientOidEncodingOffset());
-        this.strategyId = ClientOidCodec.decodeStrategyId(order.buffer, order.decoder.clientOidEncodingOffset());
+        this.clientOidCounter = order.getClientOidCounter();
+        this.strategyId = order.getClientOidStrategyId();
         this.side = order.decoder.side();
         this.price = order.decoder.price();
         this.size = order.decoder.size();
@@ -48,6 +49,7 @@ public final class TrackedOrder {
     }
 
     public void reset() {
+        this.active = false;
         this.exchangeId = 0;
         this.securityId = 0;
         this.strategyId = 0;
@@ -72,21 +74,21 @@ public final class TrackedOrder {
             }
             case PARTIAL_FILL -> {
                 state = OrderState.PARTIALLY_FILLED;
-                totalCost += report.decoder.fillPrice() * report.decoder.filledQty();
+                totalCost += report.decoder.fillPrice() * report.decoder.filledQty() + report.decoder.fee();
                 filledQty = report.decoder.cumulativeQty();
                 leavesQty = report.decoder.leavesQty();
             }
             case FILL -> {
                 state = OrderState.FILLED;
-                totalCost += report.decoder.fillPrice() * report.decoder.filledQty();
+                totalCost += report.decoder.fillPrice() * report.decoder.filledQty() + report.decoder.fee();
                 filledQty = report.decoder.cumulativeQty();
                 leavesQty = 0;
             }
             case CANCEL -> state = OrderState.CANCELED;
             case REJECT -> state = OrderState.REJECTED;
             case EXPIRE -> state = OrderState.EXPIRED;
-            default -> {
-                /* CANCEL_REJECT: no state change */
+            case CANCEL_REJECT, NULL_VAL -> {
+                /* no state change */
             }
         }
     }
@@ -143,6 +145,10 @@ public final class TrackedOrder {
 
     public long getLeavesQty() {
         return leavesQty;
+    }
+
+    public boolean isActive() {
+        return active;
     }
 
     public long getAvgFillPrice() {

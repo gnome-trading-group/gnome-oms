@@ -1,13 +1,12 @@
 package group.gnometrading.oms.position;
 
 import group.gnometrading.collections.IntHashMap;
-import group.gnometrading.pools.SingleThreadedObjectPool;
 import group.gnometrading.schemas.Side;
+import java.util.function.Consumer;
 
 public final class DefaultPositionTracker implements PositionTracker {
 
     private static final int DEFAULT_INITIAL_CAPACITY = 16;
-    private static final int DEFAULT_POOL_CAPACITY = 50;
 
     // Firm-level positions: listingId -> Position
     private final IntHashMap<Position> positions;
@@ -15,55 +14,37 @@ public final class DefaultPositionTracker implements PositionTracker {
     // Per-strategy positions: strategyId -> (listingId -> Position)
     private final IntHashMap<IntHashMap<Position>> strategyPositions;
 
-    private final SingleThreadedObjectPool<Position> positionPool;
-    private final SingleThreadedObjectPool<IntHashMap<Position>> strategyInnerMapPool;
-
     private final SharedPositionBuffer sharedBuffer;
-
-    public DefaultPositionTracker() {
-        this(null, DEFAULT_INITIAL_CAPACITY, DEFAULT_POOL_CAPACITY);
-    }
+    private final SlotRegistry slotRegistry;
+    private final Position iterFlyweight = new Position();
 
     public DefaultPositionTracker(SharedPositionBuffer sharedBuffer) {
-        this(sharedBuffer, DEFAULT_INITIAL_CAPACITY, DEFAULT_POOL_CAPACITY);
+        this(sharedBuffer, DEFAULT_INITIAL_CAPACITY);
     }
 
-    public DefaultPositionTracker(SharedPositionBuffer sharedBuffer, int initialCapacity, int poolCapacity) {
+    public DefaultPositionTracker(SharedPositionBuffer sharedBuffer, int initialCapacity) {
         this.sharedBuffer = sharedBuffer;
+        this.slotRegistry = new SlotRegistry(sharedBuffer.capacity());
         this.positions = new IntHashMap<>(initialCapacity);
         this.strategyPositions = new IntHashMap<>(4);
-        this.positionPool = new SingleThreadedObjectPool<>(Position::new, poolCapacity);
-        this.strategyInnerMapPool = new SingleThreadedObjectPool<>(IntHashMap::new, poolCapacity);
     }
 
     /**
      * Pre-registers a (strategyId, listingId) pair and assigns it a slot in the shared buffer.
      * Must be called at startup before the OMS and strategy threads begin.
-     *
-     * @return the assigned slot index, for use in constructing {@link LivePositionView}
      */
-    public int registerSlot(int strategyId, int listingId) {
+    public void registerSlot(int strategyId, int listingId) {
         IntHashMap<Position> strategyMap = getOrCreateStrategyMap(strategyId);
         Position position = getOrCreatePosition(strategyMap, listingId);
         int slot = sharedBuffer.register();
         position.sharedSlot = slot;
-        return slot;
+        slotRegistry.register(slot, strategyId, listingId);
     }
-
-    // --- PositionView (read-only, firm-level) ---
 
     @Override
     public Position getPosition(int listingId) {
         return positions.get(listingId);
     }
-
-    @Override
-    public long getEffectiveQuantity(int listingId) {
-        Position pos = positions.get(listingId);
-        return pos != null ? pos.getEffectiveQuantity() : 0;
-    }
-
-    // --- PositionTracker (per-strategy, read+write) ---
 
     @Override
     public void applyStrategyFill(int strategyId, int listingId, Side side, long qty, long price, long fee) {
@@ -87,22 +68,51 @@ public final class DefaultPositionTracker implements PositionTracker {
 
     @Override
     public void addStrategyLeaves(int strategyId, int listingId, Side side, long qty) {
+        getOrCreatePosition(positions, listingId).addLeaves(side, qty);
+
         IntHashMap<Position> strategyMap = getOrCreateStrategyMap(strategyId);
-        Position position = getOrCreatePosition(strategyMap, listingId);
-        position.addLeaves(side, qty);
-        syncToSharedBuffer(position);
+        Position stratPosition = getOrCreatePosition(strategyMap, listingId);
+        stratPosition.addLeaves(side, qty);
+        syncToSharedBuffer(stratPosition);
     }
 
     @Override
     public void removeStrategyLeaves(int strategyId, int listingId, Side side, long qty) {
-        Position position = getStrategyPosition(strategyId, listingId);
-        if (position != null) {
-            position.removeLeaves(side, qty);
-            syncToSharedBuffer(position);
+        Position firmPosition = positions.get(listingId);
+        if (firmPosition != null) {
+            firmPosition.removeLeaves(side, qty);
+        }
+
+        Position stratPosition = getStrategyPosition(strategyId, listingId);
+        if (stratPosition != null) {
+            stratPosition.removeLeaves(side, qty);
+            syncToSharedBuffer(stratPosition);
         }
     }
 
-    // --- Internal helpers ---
+    @Override
+    public void forEachPosition(Consumer<Position> consumer) {
+        positions.forEachValue(consumer);
+    }
+
+    @Override
+    public void forEachStrategyPosition(StrategyPositionConsumer consumer) {
+        for (int slot = 0; slot < slotRegistry.count(); slot++) {
+            sharedBuffer.readSpinning(slot, iterFlyweight);
+            consumer.accept(slotRegistry.strategyId(slot), slotRegistry.listingId(slot), iterFlyweight);
+        }
+    }
+
+    @Override
+    public PositionView createPositionView(int strategyId) {
+        IntHashMap<Integer> slotByListingId = new IntHashMap<>();
+        for (int slot = 0; slot < slotRegistry.count(); slot++) {
+            if (slotRegistry.strategyId(slot) == strategyId) {
+                slotByListingId.put(slotRegistry.listingId(slot), slot);
+            }
+        }
+        return new LivePositionView(sharedBuffer, slotByListingId);
+    }
 
     private void syncToSharedBuffer(Position position) {
         if (sharedBuffer != null && position.sharedSlot >= 0) {
@@ -113,7 +123,7 @@ public final class DefaultPositionTracker implements PositionTracker {
     private Position getOrCreatePosition(IntHashMap<Position> map, int listingId) {
         Position position = map.get(listingId);
         if (position == null) {
-            position = positionPool.acquire().getItem();
+            position = new Position();
             position.init(listingId);
             map.put(listingId, position);
         }
@@ -123,7 +133,7 @@ public final class DefaultPositionTracker implements PositionTracker {
     private IntHashMap<Position> getOrCreateStrategyMap(int strategyId) {
         IntHashMap<Position> strategyMap = strategyPositions.get(strategyId);
         if (strategyMap == null) {
-            strategyMap = strategyInnerMapPool.acquire().getItem();
+            strategyMap = new IntHashMap<>();
             strategyPositions.put(strategyId, strategyMap);
         }
         return strategyMap;

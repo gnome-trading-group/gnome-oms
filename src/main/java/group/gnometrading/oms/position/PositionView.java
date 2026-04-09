@@ -9,6 +9,4 @@ package group.gnometrading.oms.position;
 public interface PositionView {
 
     Position getPosition(int listingId);
-
-    long getEffectiveQuantity(int listingId);
 }

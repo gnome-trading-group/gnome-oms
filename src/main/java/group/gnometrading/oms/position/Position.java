@@ -6,8 +6,8 @@ public final class Position {
 
     public int listingId;
     public long netQuantity;
-    public long avgEntryPrice;
-    public double realizedPnl;
+    public long totalCost;
+    public long realizedPnl;
     public long totalFees;
     public long leavesBuyQty;
     public long leavesSellQty;
@@ -16,8 +16,8 @@ public final class Position {
     public void init(int id) {
         this.listingId = id;
         this.netQuantity = 0;
-        this.avgEntryPrice = 0;
-        this.realizedPnl = 0.0;
+        this.totalCost = 0;
+        this.realizedPnl = 0;
         this.totalFees = 0;
         this.leavesBuyQty = 0;
         this.leavesSellQty = 0;
@@ -30,28 +30,36 @@ public final class Position {
 
         if (netQuantity == 0) {
             netQuantity = signedQty;
-            avgEntryPrice = price;
+            totalCost = price * qty;
         } else if (Long.signum(netQuantity) == Long.signum(signedQty)) {
-            long totalCost = avgEntryPrice * Math.abs(netQuantity) + price * qty;
+            totalCost += price * qty;
             netQuantity += signedQty;
-            avgEntryPrice = totalCost / Math.abs(netQuantity);
         } else {
-            long prevQty = netQuantity;
             long closeQty = Math.min(Math.abs(netQuantity), qty);
+            long avgEntry = getAvgEntryPrice();
 
             if (netQuantity > 0) {
-                realizedPnl += closeQty * (price - avgEntryPrice);
+                realizedPnl += closeQty * (price - avgEntry);
             } else {
-                realizedPnl += closeQty * (avgEntryPrice - price);
+                realizedPnl += closeQty * (avgEntry - price);
             }
 
+            long prevQty = netQuantity;
             netQuantity += signedQty;
+
             if (netQuantity == 0) {
-                avgEntryPrice = 0;
+                totalCost = 0;
             } else if (Long.signum(netQuantity) != Long.signum(prevQty)) {
-                avgEntryPrice = price;
+                long remainder = Math.abs(netQuantity);
+                totalCost = price * remainder;
+            } else {
+                totalCost = avgEntry * Math.abs(netQuantity);
             }
         }
+    }
+
+    public long getAvgEntryPrice() {
+        return netQuantity == 0 ? 0 : totalCost / Math.abs(netQuantity);
     }
 
     public void addLeaves(Side side, long qty) {
@@ -70,9 +78,9 @@ public final class Position {
         }
     }
 
-    void setFromBuffer(long netQty, long avgEntry, double pnl, long fees, long leavesBuy, long leavesSell) {
+    void setFromBuffer(long netQty, long cost, long pnl, long fees, long leavesBuy, long leavesSell) {
         this.netQuantity = netQty;
-        this.avgEntryPrice = avgEntry;
+        this.totalCost = cost;
         this.realizedPnl = pnl;
         this.totalFees = fees;
         this.leavesBuyQty = leavesBuy;

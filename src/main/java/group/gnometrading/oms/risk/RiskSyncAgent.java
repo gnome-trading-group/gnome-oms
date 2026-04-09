@@ -2,7 +2,7 @@ package group.gnometrading.oms.risk;
 
 import group.gnometrading.collections.IntHashMap;
 import group.gnometrading.concurrent.GnomeAgent;
-import group.gnometrading.oms.risk.policy.KillSwitchPolicy;
+import group.gnometrading.oms.risk.policy.AutoDenyPolicy;
 import group.gnometrading.oms.risk.policy.MaxNotionalValuePolicy;
 import group.gnometrading.oms.risk.policy.MaxOrderSizePolicy;
 import group.gnometrading.oms.risk.policy.MaxPnlLossPolicy;
@@ -119,7 +119,7 @@ public final class RiskSyncAgent implements GnomeAgent {
     @SuppressWarnings("checkstyle:ReturnCount")
     private static OrderRiskPolicy createOrderPolicy(final RiskPolicyType type) {
         return switch (type) {
-            case KILL_SWITCH -> new KillSwitchPolicy();
+            case KILL_SWITCH -> new AutoDenyPolicy();
             case MAX_NOTIONAL -> new MaxNotionalValuePolicy();
             case MAX_ORDER_SIZE -> new MaxOrderSizePolicy();
             case MAX_POSITION -> new MaxPositionPolicy();

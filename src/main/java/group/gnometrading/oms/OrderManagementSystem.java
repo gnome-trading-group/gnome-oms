@@ -3,7 +3,6 @@ package group.gnometrading.oms;
 import group.gnometrading.SecurityMaster;
 import group.gnometrading.collections.IntHashMap;
 import group.gnometrading.oms.action.ActionSink;
-import group.gnometrading.oms.intent.ClientOidGenerator;
 import group.gnometrading.oms.intent.IntentResolver;
 import group.gnometrading.oms.position.Position;
 import group.gnometrading.oms.position.PositionTracker;
@@ -11,13 +10,13 @@ import group.gnometrading.oms.risk.RiskEngine;
 import group.gnometrading.oms.state.OrderStateManager;
 import group.gnometrading.oms.state.TrackedOrder;
 import group.gnometrading.schemas.CancelOrder;
-import group.gnometrading.schemas.ClientOidCodec;
 import group.gnometrading.schemas.ExecType;
 import group.gnometrading.schemas.Intent;
 import group.gnometrading.schemas.ModifyOrder;
 import group.gnometrading.schemas.Order;
 import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.schemas.OrderExecutionReportDecoder;
+import group.gnometrading.sm.ListingSpec;
 import java.util.logging.Logger;
 
 public final class OrderManagementSystem {
@@ -27,31 +26,31 @@ public final class OrderManagementSystem {
     private final OrderStateManager orderStateManager;
     private final PositionTracker positionTracker;
     private final RiskEngine riskEngine;
-    private final ClientOidGenerator oidGenerator;
     private final SecurityMaster securityMaster;
     private final IntHashMap<IntentResolver> resolvers;
     private final Order riskCheckOrder = new Order();
     private final RiskCheckingSink riskCheckingSink = new RiskCheckingSink();
+    private long oidCounter;
 
     public OrderManagementSystem(
             OrderStateManager orderStateManager,
             PositionTracker positionTracker,
             RiskEngine riskEngine,
-            SecurityMaster securityMaster,
-            ClientOidGenerator oidGenerator) {
+            SecurityMaster securityMaster) {
         this.orderStateManager = orderStateManager;
         this.positionTracker = positionTracker;
         this.riskEngine = riskEngine;
-        this.oidGenerator = oidGenerator;
         this.securityMaster = securityMaster;
         this.resolvers = new IntHashMap<>(4);
+    }
+
+    private long nextOid() {
+        return ++oidCounter;
     }
 
     private int resolveListingId(int exchangeId, long securityId) {
         return securityMaster.getListing(exchangeId, (int) securityId).listingId();
     }
-
-    // --- Intent processing ---
 
     public void processIntent(Intent intent, ActionSink sink) {
         IntentResolver resolver = getOrCreateResolver(intent.decoder.strategyId());
@@ -59,10 +58,8 @@ public final class OrderManagementSystem {
         resolver.resolve(intent, riskCheckingSink);
     }
 
-    // --- Execution report processing ---
-
     public void processExecutionReport(OrderExecutionReport report, ActionSink sink) {
-        long counter = ClientOidCodec.decodeCounter(report.buffer, report.decoder.clientOidEncodingOffset());
+        long counter = report.getClientOidCounter();
         TrackedOrder tracked = orderStateManager.getOrder(counter);
         if (tracked == null) {
             return;
@@ -83,8 +80,6 @@ public final class OrderManagementSystem {
         checkMarketRisk(strategyId, listingId, sink);
     }
 
-    // --- Direct order management ---
-
     public boolean validateOrder(Order order) {
         return riskEngine.check(order, positionTracker, orderStateManager, 0, 0);
     }
@@ -93,13 +88,8 @@ public final class OrderManagementSystem {
         orderStateManager.trackOrder(order);
         int listingId = resolveListingId(order.decoder.exchangeId(), order.decoder.securityId());
         positionTracker.addStrategyLeaves(
-                ClientOidCodec.decodeStrategyId(order.buffer, order.decoder.clientOidEncodingOffset()),
-                listingId,
-                order.decoder.side(),
-                order.decoder.size());
+                order.getClientOidStrategyId(), listingId, order.decoder.side(), order.decoder.size());
     }
-
-    // --- Query methods ---
 
     public Position getPosition(int listingId) {
         return positionTracker.getPosition(listingId);
@@ -141,13 +131,11 @@ public final class OrderManagementSystem {
     public IntentResolver getOrCreateResolver(int strategyId) {
         IntentResolver resolver = resolvers.get(strategyId);
         if (resolver == null) {
-            resolver = new IntentResolver(oidGenerator, securityMaster, strategyId);
+            resolver = new IntentResolver(this::nextOid, securityMaster, strategyId);
             resolvers.put(strategyId, resolver);
         }
         return resolver;
     }
-
-    // --- Internal helpers ---
 
     private void checkMarketRisk(final int strategyId, final int listingId, final ActionSink sink) {
         if (riskEngine.checkMarketPolicies(strategyId, listingId, positionTracker, orderStateManager)) {
@@ -159,17 +147,15 @@ public final class OrderManagementSystem {
     }
 
     private final CancelOrder marketRiskCancel = new CancelOrder();
-    private final byte[] marketRiskCancelClientOidBuf = new byte[ClientOidCodec.CLIENT_OID_LENGTH];
 
     private void cancelAllOpenOrders(final int strategyId, final ActionSink sink) {
         orderStateManager.forEachOrder(tracked -> {
             if (tracked.getStrategyId() == strategyId && !tracked.getState().isTerminal()) {
-                ClientOidCodec.encode(marketRiskCancelClientOidBuf, tracked.getClientOidCounter(), strategyId);
+                marketRiskCancel.encodeClientOid(tracked.getClientOidCounter(), strategyId);
                 marketRiskCancel
                         .encoder
                         .exchangeId((short) tracked.getExchangeId())
-                        .securityId(tracked.getSecurityId())
-                        .putClientOid(marketRiskCancelClientOidBuf, 0, ClientOidCodec.CLIENT_OID_LENGTH);
+                        .securityId(tracked.getSecurityId());
                 sink.onCancel(marketRiskCancel);
             }
         });
@@ -217,16 +203,17 @@ public final class OrderManagementSystem {
 
         @Override
         public void onNewOrder(Order order) {
-            final int strategyId =
-                    ClientOidCodec.decodeStrategyId(order.buffer, order.decoder.clientOidEncodingOffset());
+            final int strategyId = order.getClientOidStrategyId();
             final int listingId = resolveListingId(order.decoder.exchangeId(), order.decoder.securityId());
+            if (!passesExchangeConstraints(listingId, order.decoder.price(), order.decoder.size())) {
+                logger.warning("Order " + order.getClientOidCounter() + " rejected by exchange constraints");
+                return;
+            }
             if (riskEngine.check(order, positionTracker, orderStateManager, strategyId, listingId)) {
                 onOrderAccepted(order);
                 delegate.onNewOrder(order);
             } else {
-                final long counter =
-                        ClientOidCodec.decodeCounter(order.buffer, order.decoder.clientOidEncodingOffset());
-                logger.warning("Order " + counter + " rejected by risk check");
+                logger.warning("Order " + order.getClientOidCounter() + " rejected by risk check");
             }
         }
 
@@ -237,7 +224,7 @@ public final class OrderManagementSystem {
 
         @Override
         public void onModify(ModifyOrder modify) {
-            final long counter = ClientOidCodec.decodeCounter(modify.buffer, modify.decoder.clientOidEncodingOffset());
+            final long counter = modify.getClientOidCounter();
             final TrackedOrder original = orderStateManager.getOrder(counter);
             if (original == null) {
                 return;
@@ -252,6 +239,10 @@ public final class OrderManagementSystem {
                     .orderType(original.getOrderType())
                     .timeInForce(original.getTimeInForce());
             final int listingId = resolveListingId(modify.decoder.exchangeId(), modify.decoder.securityId());
+            if (!passesExchangeConstraints(listingId, modify.decoder.price(), modify.decoder.size())) {
+                logger.warning("Modify " + counter + " rejected by exchange constraints");
+                return;
+            }
             if (riskEngine.check(
                     riskCheckOrder, positionTracker, orderStateManager, original.getStrategyId(), listingId)) {
                 positionTracker.removeStrategyLeaves(
@@ -263,6 +254,17 @@ public final class OrderManagementSystem {
             } else {
                 logger.warning("Modify " + counter + " rejected by risk check");
             }
+        }
+
+        private boolean passesExchangeConstraints(int listingId, long price, long size) {
+            ListingSpec spec = securityMaster.getListingSpec(listingId);
+            if (spec == null) {
+                return true;
+            }
+            if (spec.lotSize() > 0 && size % spec.lotSize() != 0) {
+                return false;
+            }
+            return spec.minNotional() <= 0 || price * size >= spec.minNotional();
         }
     }
 }

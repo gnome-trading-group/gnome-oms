@@ -1,42 +1,32 @@
 package group.gnometrading.oms.position;
 
+import group.gnometrading.collections.IntHashMap;
+
 /**
  * Strategy-side {@link PositionView} backed by a {@link SharedPositionBuffer}.
  *
  * <p>Reads use a seqlock spin until a consistent snapshot is obtained. Zero allocation
  * on every read — the returned {@link Position} is a pre-allocated flyweight valid only
- * until the next call to {@link #getPosition} or {@link #getEffectiveQuantity}.
+ * until the next call to {@link #getPosition}.
  *
- * <p>The {@code slotByListingId} array must be pre-built at startup via
- * {@link DefaultPositionTracker#registerSlot} before any strategy thread reads.
+ * <p>Constructed via {@link DefaultPositionTracker#createPositionView(int)} after all
+ * slots have been registered.
  */
 public final class LivePositionView implements PositionView {
 
     private final SharedPositionBuffer buffer;
-    private final int[] slotByListingId;
+    private final IntHashMap<Integer> slotByListingId;
     private final Position flyweight = new Position();
 
-    /**
-     * @param buffer          the shared buffer written by the OMS thread
-     * @param slotByListingId array where {@code slotByListingId[listingId]} is the assigned slot index;
-     *                        unregistered entries must be -1
-     */
-    public LivePositionView(SharedPositionBuffer buffer, int[] slotByListingId) {
+    LivePositionView(SharedPositionBuffer buffer, IntHashMap<Integer> slotByListingId) {
         this.buffer = buffer;
         this.slotByListingId = slotByListingId;
     }
 
     @Override
     public Position getPosition(int listingId) {
-        int slot = slotByListingId[listingId];
+        Integer slot = slotByListingId.get(listingId);
         buffer.readSpinning(slot, flyweight);
         return flyweight;
-    }
-
-    @Override
-    public long getEffectiveQuantity(int listingId) {
-        int slot = slotByListingId[listingId];
-        buffer.readSpinning(slot, flyweight);
-        return flyweight.getEffectiveQuantity();
     }
 }
