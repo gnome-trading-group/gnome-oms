@@ -1,6 +1,7 @@
 package group.gnometrading.oms.position;
 
 import group.gnometrading.collections.IntHashMap;
+import group.gnometrading.collections.IntToIntHashMap;
 import group.gnometrading.schemas.Side;
 import java.util.function.Consumer;
 
@@ -105,7 +106,7 @@ public final class DefaultPositionTracker implements PositionTracker {
 
     @Override
     public PositionView createPositionView(int strategyId) {
-        IntHashMap<Integer> slotByListingId = new IntHashMap<>();
+        IntToIntHashMap slotByListingId = new IntToIntHashMap();
         for (int slot = 0; slot < slotRegistry.count(); slot++) {
             if (slotRegistry.strategyId(slot) == strategyId) {
                 slotByListingId.put(slotRegistry.listingId(slot), slot);

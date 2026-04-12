@@ -2,6 +2,8 @@ package group.gnometrading.oms;
 
 import group.gnometrading.SecurityMaster;
 import group.gnometrading.collections.IntHashMap;
+import group.gnometrading.logging.LogMessage;
+import group.gnometrading.logging.Logger;
 import group.gnometrading.oms.action.ActionSink;
 import group.gnometrading.oms.intent.IntentResolver;
 import group.gnometrading.oms.position.Position;
@@ -17,11 +19,10 @@ import group.gnometrading.schemas.Order;
 import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.schemas.OrderExecutionReportDecoder;
 import group.gnometrading.sm.ListingSpec;
-import java.util.logging.Logger;
 
 public final class OrderManagementSystem {
 
-    private static final Logger logger = Logger.getLogger(OrderManagementSystem.class.getName());
+    private final Logger logger;
 
     private final OrderStateManager orderStateManager;
     private final PositionTracker positionTracker;
@@ -33,10 +34,12 @@ public final class OrderManagementSystem {
     private long oidCounter;
 
     public OrderManagementSystem(
+            Logger logger,
             OrderStateManager orderStateManager,
             PositionTracker positionTracker,
             RiskEngine riskEngine,
             SecurityMaster securityMaster) {
+        this.logger = logger;
         this.orderStateManager = orderStateManager;
         this.positionTracker = positionTracker;
         this.riskEngine = riskEngine;
@@ -62,7 +65,8 @@ public final class OrderManagementSystem {
         long counter = report.getClientOidCounter();
         TrackedOrder tracked = orderStateManager.getOrder(counter);
         if (tracked == null) {
-            return;
+            throw new IllegalStateException(
+                    "Received execution report for unknown order with clientOidCounter: " + counter);
         }
 
         long leavesQtyBefore = tracked.getLeavesQty();
@@ -76,6 +80,7 @@ public final class OrderManagementSystem {
             orderStateManager.releaseOrder(tracked);
         }
 
+        // TODO: Move this to when we get a generic market update
         int listingId = resolveListingId(report.decoder.exchangeId(), report.decoder.securityId());
         checkMarketRisk(strategyId, listingId, sink);
     }
@@ -131,7 +136,7 @@ public final class OrderManagementSystem {
     public IntentResolver getOrCreateResolver(int strategyId) {
         IntentResolver resolver = resolvers.get(strategyId);
         if (resolver == null) {
-            resolver = new IntentResolver(this::nextOid, securityMaster, strategyId);
+            resolver = new IntentResolver(this::nextOid, strategyId);
             resolvers.put(strategyId, resolver);
         }
         return resolver;
@@ -184,9 +189,6 @@ public final class OrderManagementSystem {
 
     private void forwardToResolver(OrderExecutionReport report, TrackedOrder tracked, int strategyId, ActionSink sink) {
         IntentResolver resolver = resolvers.get(strategyId);
-        if (resolver == null) {
-            return;
-        }
         riskCheckingSink.delegate = sink;
         resolver.onExecutionReport(
                 report.decoder.exchangeId(), report.decoder.securityId(), report, tracked.getSide(), riskCheckingSink);
@@ -206,14 +208,14 @@ public final class OrderManagementSystem {
             final int strategyId = order.getClientOidStrategyId();
             final int listingId = resolveListingId(order.decoder.exchangeId(), order.decoder.securityId());
             if (!passesExchangeConstraints(listingId, order.decoder.price(), order.decoder.size())) {
-                logger.warning("Order " + order.getClientOidCounter() + " rejected by exchange constraints");
+                logger.log(LogMessage.ORDER_REJECTED_EXCHANGE_CONSTRAINTS, order.getClientOidCounter());
                 return;
             }
             if (riskEngine.check(order, positionTracker, orderStateManager, strategyId, listingId)) {
                 onOrderAccepted(order);
                 delegate.onNewOrder(order);
             } else {
-                logger.warning("Order " + order.getClientOidCounter() + " rejected by risk check");
+                logger.log(LogMessage.ORDER_REJECTED_RISK_CHECK, order.getClientOidCounter());
             }
         }
 
@@ -240,7 +242,7 @@ public final class OrderManagementSystem {
                     .timeInForce(original.getTimeInForce());
             final int listingId = resolveListingId(modify.decoder.exchangeId(), modify.decoder.securityId());
             if (!passesExchangeConstraints(listingId, modify.decoder.price(), modify.decoder.size())) {
-                logger.warning("Modify " + counter + " rejected by exchange constraints");
+                logger.log(LogMessage.ORDER_REJECTED_EXCHANGE_CONSTRAINTS, counter);
                 return;
             }
             if (riskEngine.check(
@@ -252,7 +254,7 @@ public final class OrderManagementSystem {
                 original.modify(modify.decoder.price(), modify.decoder.size());
                 delegate.onModify(modify);
             } else {
-                logger.warning("Modify " + counter + " rejected by risk check");
+                logger.log(LogMessage.ORDER_REJECTED_RISK_CHECK, counter);
             }
         }
 

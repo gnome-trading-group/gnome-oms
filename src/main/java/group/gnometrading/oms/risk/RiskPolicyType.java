@@ -7,7 +7,8 @@ public enum RiskPolicyType {
     MAX_NOTIONAL(Category.ORDER),
     MAX_ORDER_SIZE(Category.ORDER),
     MAX_POSITION(Category.ORDER),
-    MAX_PNL_LOSS(Category.MARKET);
+    MAX_PNL_LOSS(Category.MARKET),
+    MAX_TOTAL_PNL_LOSS(Category.MARKET);
 
     public enum Category {
         ORDER,
@@ -35,6 +36,8 @@ public enum RiskPolicyType {
             return MAX_POSITION;
         } else if (type.equals("MAX_PNL_LOSS")) {
             return MAX_PNL_LOSS;
+        } else if (type.equals("MAX_TOTAL_PNL_LOSS")) {
+            return MAX_TOTAL_PNL_LOSS;
         }
         return null;
     }

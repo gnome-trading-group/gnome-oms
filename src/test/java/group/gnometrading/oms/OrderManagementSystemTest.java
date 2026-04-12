@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.when;
 
 import group.gnometrading.SecurityMaster;
+import group.gnometrading.logging.NullLogger;
 import group.gnometrading.oms.action.ActionSink;
 import group.gnometrading.oms.position.DefaultPositionTracker;
 import group.gnometrading.oms.position.SharedPositionBuffer;
@@ -47,7 +48,8 @@ class OrderManagementSystemTest {
         RingBufferOrderStateManager orderStateManager = new RingBufferOrderStateManager(64);
         DefaultPositionTracker positionTracker = new DefaultPositionTracker(new SharedPositionBuffer(8));
         RiskEngine riskEngine = new RiskEngine();
-        oms = new OrderManagementSystem(orderStateManager, positionTracker, riskEngine, securityMaster);
+        oms = new OrderManagementSystem(
+                new NullLogger(), orderStateManager, positionTracker, riskEngine, securityMaster);
         delegate = new RecordingSink();
 
         Listing listing = new Listing(

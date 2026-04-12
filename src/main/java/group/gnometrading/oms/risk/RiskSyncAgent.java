@@ -2,11 +2,14 @@ package group.gnometrading.oms.risk;
 
 import group.gnometrading.collections.IntHashMap;
 import group.gnometrading.concurrent.GnomeAgent;
+import group.gnometrading.oms.pnl.PriceSlotRegistry;
+import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.risk.policy.AutoDenyPolicy;
 import group.gnometrading.oms.risk.policy.MaxNotionalValuePolicy;
 import group.gnometrading.oms.risk.policy.MaxOrderSizePolicy;
 import group.gnometrading.oms.risk.policy.MaxPnlLossPolicy;
 import group.gnometrading.oms.risk.policy.MaxPositionPolicy;
+import group.gnometrading.oms.risk.policy.MaxTotalPnlLossPolicy;
 import group.gnometrading.risk.PolicyScope;
 import group.gnometrading.risk.RiskMaster;
 import group.gnometrading.risk.RiskPolicyRecord;
@@ -27,16 +30,30 @@ public final class RiskSyncAgent implements GnomeAgent {
     private final RiskEngine riskEngine;
     private final Schedule refreshSchedule;
     private final IntHashMap<Configurable> policyCache;
+    private final SharedPriceBuffer priceBuffer;
+    private final PriceSlotRegistry priceSlotRegistry;
 
     public RiskSyncAgent(
             final RiskMaster riskMaster,
             final RiskEngine riskEngine,
             final EpochClock clock,
             final Duration refreshInterval) {
+        this(riskMaster, riskEngine, clock, refreshInterval, null, null);
+    }
+
+    public RiskSyncAgent(
+            final RiskMaster riskMaster,
+            final RiskEngine riskEngine,
+            final EpochClock clock,
+            final Duration refreshInterval,
+            final SharedPriceBuffer priceBuffer,
+            final PriceSlotRegistry priceSlotRegistry) {
         this.riskMaster = riskMaster;
         this.riskEngine = riskEngine;
         this.refreshSchedule = new Schedule(clock, refreshInterval.toMillis(), this::refreshAndPublish);
         this.policyCache = new IntHashMap<>();
+        this.priceBuffer = priceBuffer;
+        this.priceSlotRegistry = priceSlotRegistry;
     }
 
     @Override
@@ -127,9 +144,10 @@ public final class RiskSyncAgent implements GnomeAgent {
         };
     }
 
-    private static MarketRiskPolicy createMarketPolicy(final RiskPolicyType type) {
+    private MarketRiskPolicy createMarketPolicy(final RiskPolicyType type) {
         return switch (type) {
             case MAX_PNL_LOSS -> new MaxPnlLossPolicy();
+            case MAX_TOTAL_PNL_LOSS -> new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry);
             default -> throw new IllegalStateException("Unhandled market policy type: " + type);
         };
     }

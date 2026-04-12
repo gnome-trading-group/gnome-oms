@@ -2,6 +2,7 @@ package group.gnometrading.oms.pnl;
 
 import group.gnometrading.RegistryConnection;
 import group.gnometrading.codecs.json.JsonEncoder;
+import group.gnometrading.collections.IntToIntHashMap;
 import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.oms.position.Position;
 import group.gnometrading.oms.position.PositionTracker;
@@ -23,7 +24,7 @@ import org.agrona.concurrent.EpochClock;
 public final class PnlReportingAgent implements GnomeAgent, StrategyPositionConsumer {
 
     private static final String PNL_SNAPSHOTS_PATH = "/api/pnl/snapshots";
-    private static final int BYTES_PER_SNAPSHOT = 256;
+    private static final int BYTES_PER_SNAPSHOT = 384;
     private final PositionTracker positionTracker;
     private final RegistryConnection registryConnection;
     private final Schedule flushSchedule;
@@ -31,6 +32,8 @@ public final class PnlReportingAgent implements GnomeAgent, StrategyPositionCons
     private final PnlSnapshot[] snapshots;
     private final ByteBuffer bodyBuffer;
     private final JsonEncoder jsonEncoder;
+    private final SharedPriceBuffer priceBuffer;
+    private final PriceSlotRegistry priceSlotRegistry;
 
     private int pendingCount;
 
@@ -40,6 +43,17 @@ public final class PnlReportingAgent implements GnomeAgent, StrategyPositionCons
             final EpochClock clock,
             final Duration flushInterval,
             final int maxSlots) {
+        this(positionTracker, registryConnection, clock, flushInterval, maxSlots, null, null);
+    }
+
+    public PnlReportingAgent(
+            final PositionTracker positionTracker,
+            final RegistryConnection registryConnection,
+            final EpochClock clock,
+            final Duration flushInterval,
+            final int maxSlots,
+            final SharedPriceBuffer priceBuffer,
+            final PriceSlotRegistry priceSlotRegistry) {
         this.positionTracker = positionTracker;
         this.registryConnection = registryConnection;
         this.flushSchedule = new Schedule(clock, flushInterval.toMillis(), this::snapshotAndFlush);
@@ -50,6 +64,8 @@ public final class PnlReportingAgent implements GnomeAgent, StrategyPositionCons
         }
         this.bodyBuffer = ByteBuffer.allocate(maxSlots * BYTES_PER_SNAPSHOT);
         this.jsonEncoder = new JsonEncoder();
+        this.priceBuffer = priceBuffer;
+        this.priceSlotRegistry = priceSlotRegistry;
     }
 
     @Override
@@ -76,10 +92,31 @@ public final class PnlReportingAgent implements GnomeAgent, StrategyPositionCons
             return;
         }
 
+        enrichWithMarkPrices();
+
         bodyBuffer.clear();
         jsonEncoder.wrap(bodyBuffer);
         buildJson();
         registryConnection.post(path, bodyBuffer.array(), bodyBuffer.position());
+    }
+
+    private void enrichWithMarkPrices() {
+        if (priceBuffer == null || priceSlotRegistry == null) {
+            return;
+        }
+        for (int i = 0; i < pendingCount; i++) {
+            final PnlSnapshot snap = snapshots[i];
+            final int slot = priceSlotRegistry.getSlot(snap.listingId);
+            if (slot == IntToIntHashMap.MISSING) {
+                continue;
+            }
+            final long markPrice = priceBuffer.readSpinning(slot);
+            if (markPrice == 0) {
+                continue;
+            }
+            snap.markPrice = markPrice;
+            snap.unrealizedPnl = snap.netQuantity * (markPrice - snap.avgEntryPrice);
+        }
     }
 
     private void buildJson() {
@@ -105,6 +142,12 @@ public final class PnlReportingAgent implements GnomeAgent, StrategyPositionCons
                 .writeObjectEntry("avgEntryPrice", snapshot.avgEntryPrice)
                 .writeComma()
                 .writeObjectEntry("realizedPnl", snapshot.realizedPnl)
+                .writeComma()
+                .writeObjectEntry("unrealizedPnl", snapshot.unrealizedPnl)
+                .writeComma()
+                .writeObjectEntry("totalPnl", snapshot.realizedPnl + snapshot.unrealizedPnl)
+                .writeComma()
+                .writeObjectEntry("markPrice", snapshot.markPrice)
                 .writeComma()
                 .writeObjectEntry("totalFees", snapshot.totalFees)
                 .writeComma()

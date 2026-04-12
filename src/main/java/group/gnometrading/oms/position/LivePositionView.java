@@ -1,6 +1,6 @@
 package group.gnometrading.oms.position;
 
-import group.gnometrading.collections.IntHashMap;
+import group.gnometrading.collections.IntToIntMap;
 
 /**
  * Strategy-side {@link PositionView} backed by a {@link SharedPositionBuffer}.
@@ -15,17 +15,17 @@ import group.gnometrading.collections.IntHashMap;
 public final class LivePositionView implements PositionView {
 
     private final SharedPositionBuffer buffer;
-    private final IntHashMap<Integer> slotByListingId;
+    private final IntToIntMap slotByListingId;
     private final Position flyweight = new Position();
 
-    LivePositionView(SharedPositionBuffer buffer, IntHashMap<Integer> slotByListingId) {
+    LivePositionView(SharedPositionBuffer buffer, IntToIntMap slotByListingId) {
         this.buffer = buffer;
         this.slotByListingId = slotByListingId;
     }
 
     @Override
     public Position getPosition(int listingId) {
-        Integer slot = slotByListingId.get(listingId);
+        int slot = slotByListingId.get(listingId);
         buffer.readSpinning(slot, flyweight);
         return flyweight;
     }

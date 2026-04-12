@@ -11,6 +11,8 @@ final class PnlSnapshot {
     long totalFees;
     long leavesBuyQty;
     long leavesSellQty;
+    long markPrice;
+    long unrealizedPnl;
 
     void set(int sid, int lid, Position position) {
         this.strategyId = sid;
@@ -21,5 +23,7 @@ final class PnlSnapshot {
         this.totalFees = position.totalFees;
         this.leavesBuyQty = position.leavesBuyQty;
         this.leavesSellQty = position.leavesSellQty;
+        this.markPrice = 0;
+        this.unrealizedPnl = 0;
     }
 }
