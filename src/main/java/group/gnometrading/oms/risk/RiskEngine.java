@@ -45,6 +45,18 @@ public final class RiskEngine {
         this.snapshot = new AtomicReference<>(new RiskEngineSnapshot());
     }
 
+    /**
+     * Creates a RiskEngine pre-loaded with the given order-time policies in the global order
+     * group. Intended for backtest and test use where no {@link RiskSyncAgent} is running.
+     */
+    public static RiskEngine withOrderPolicies(final OrderRiskPolicy... policies) {
+        final OrderPolicyGroup orderGroup = new OrderPolicyGroup(Math.max(policies.length, 1));
+        for (final OrderRiskPolicy p : policies) {
+            orderGroup.policies[orderGroup.count++] = p;
+        }
+        return new RiskEngine(orderGroup, new MarketPolicyGroup(1));
+    }
+
     void publishSnapshot(final RiskEngineSnapshot newSnapshot) {
         snapshot.set(newSnapshot);
     }
