@@ -57,6 +57,23 @@ public final class RiskEngine {
         return new RiskEngine(orderGroup, new MarketPolicyGroup(1));
     }
 
+    /**
+     * Creates a RiskEngine pre-loaded with the given order-time and market-time policies in the
+     * global groups. Intended for backtest and test use where no {@link RiskSyncAgent} is running.
+     */
+    public static RiskEngine withPolicies(
+            final OrderRiskPolicy[] orderPolicies, final MarketRiskPolicy[] marketPolicies) {
+        final OrderPolicyGroup orderGroup = new OrderPolicyGroup(Math.max(orderPolicies.length, 1));
+        for (final OrderRiskPolicy p : orderPolicies) {
+            orderGroup.policies[orderGroup.count++] = p;
+        }
+        final MarketPolicyGroup marketGroup = new MarketPolicyGroup(Math.max(marketPolicies.length, 1));
+        for (final MarketRiskPolicy p : marketPolicies) {
+            marketGroup.policies[marketGroup.count++] = p;
+        }
+        return new RiskEngine(orderGroup, marketGroup);
+    }
+
     void publishSnapshot(final RiskEngineSnapshot newSnapshot) {
         snapshot.set(newSnapshot);
     }
