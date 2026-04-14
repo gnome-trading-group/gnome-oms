@@ -86,8 +86,8 @@ public final class IntentResolver {
                         slot.onCancelSubmitted();
                     } else if (qPrice != slot.getActivePrice() || qSize != slot.getActiveSize()) {
                         slot.clearQueuedIntent();
-                        emitModify(exchangeId, securityId, slot, qPrice, qSize, handler);
                         slot.onModifySubmitted(qPrice, qSize);
+                        emitModify(exchangeId, securityId, slot, qPrice, qSize, handler);
                     } else {
                         slot.clearQueuedIntent();
                     }
@@ -157,8 +157,8 @@ public final class IntentResolver {
                     emitCancel(exchangeId, securityId, slot, handler);
                     slot.onCancelSubmitted();
                 } else if (slot.getActivePrice() != snappedPrice || slot.getActiveSize() != desiredSize) {
-                    emitModify(exchangeId, securityId, slot, snappedPrice, desiredSize, handler);
                     slot.onModifySubmitted(snappedPrice, desiredSize);
+                    emitModify(exchangeId, securityId, slot, snappedPrice, desiredSize, handler);
                 }
             }
             case PENDING_MODIFY, PENDING_CANCEL -> {
@@ -220,8 +220,8 @@ public final class IntentResolver {
                 .orderType(OrderType.LIMIT)
                 .timeInForce(TimeInForce.GOOD_TILL_CANCELED);
         pendingOrder.encoder.flags().clear();
-        handler.onNewOrder(pendingOrder);
         slot.onNewSubmitted(oid, price, size);
+        handler.onNewOrder(pendingOrder);
     }
 
     private void resolveTake(Intent intent, long takeSize, ActionSink handler) {

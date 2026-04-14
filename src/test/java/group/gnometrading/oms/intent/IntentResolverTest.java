@@ -453,6 +453,57 @@ class IntentResolverTest {
         assertEquals(102L, sink.modifies.get(0).price);
     }
 
+    // --- synchronous rejection (handler rejects inside onNewOrder / onModify) ---
+    // These tests verify the ordering fix: slot state is set BEFORE the handler is called,
+    // so a synchronous rejection fired inside the handler finds the slot in the correct state.
+
+    @Test
+    void slotIsCleanedUpWhenHandlerRejectsSynchronously() {
+        // Without the fix: slot is still EMPTY when the rejection fires → onExecutionReport returns early
+        // → slot transitions to PENDING_NEW after the call → stuck forever.
+        RejectingOnNewSink rejectingSink = new RejectingOnNewSink(resolver, sink);
+        resolver.resolve(buildIntent(SECURITY_ID, 100L, 10L, nullPrice(), 0L), rejectingSink);
+        sink.clear();
+
+        // Slot must be EMPTY — a fresh intent submits a new order
+        resolve(100L, 10L, nullPrice(), 0L);
+        assertEquals(1, sink.newOrders.size());
+    }
+
+    @Test
+    void resubmittedOrderIsAlsoSynchronouslyRejectedAndSlotRemainsClean() {
+        // First order pending, second intent queued
+        resolve(100L, 10L, nullPrice(), 0L);
+        long firstOid = sink.newOrders.get(0).clientOidCounter;
+        resolve(102L, 8L, nullPrice(), 0L);
+        sink.clear();
+
+        // Handler rejects every new order synchronously — the original rejection causes the queued
+        // intent to resubmit, which also gets synchronously rejected. Slot must be EMPTY at the end.
+        RejectingOnNewSink rejectingSink = new RejectingOnNewSink(resolver, sink);
+        OrderExecutionReport report = buildReport(firstOid, ExecType.REJECT, 0L, 0L);
+        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, report, Side.Bid, rejectingSink);
+
+        // Slot must be EMPTY — a fresh resolve submits a new order
+        resolve(100L, 10L, nullPrice(), 0L);
+        assertEquals(1, sink.newOrders.size());
+    }
+
+    @Test
+    void slotRevertsToLiveWhenHandlerRejectsModifySynchronously() {
+        // Without the fix: slot is still LIVE when the rejection fires → CANCEL_REJECT is ignored
+        // → slot stays in PENDING_MODIFY after the call → stuck.
+        goLive(100L, 10L);
+        long oid = oidCounter.get();
+
+        RejectingOnModifySink rejectingSink = new RejectingOnModifySink(resolver, sink, oid);
+        resolver.resolve(buildIntent(SECURITY_ID, 101L, 10L, nullPrice(), 0L), rejectingSink);
+
+        // Slot must have reverted to LIVE — same price/size intent does nothing
+        resolve(100L, 10L, nullPrice(), 0L);
+        assertEquals(0, sink.modifies.size());
+    }
+
     // --- onExecutionReport — stale / unknown ---
 
     @Test
@@ -650,4 +701,60 @@ class IntentResolverTest {
             long clientOidCounter, long price, long size, Side side, OrderType orderType, TimeInForce timeInForce) {}
 
     private record ModifyCapture(long price, long size) {}
+
+    /** Fires a synchronous REJECT exec report back into the resolver when a new order is received. */
+    private final class RejectingOnNewSink implements ActionSink {
+        private final IntentResolver resolver;
+        private final CapturingSink delegate;
+
+        RejectingOnNewSink(IntentResolver resolver, CapturingSink delegate) {
+            this.resolver = resolver;
+            this.delegate = delegate;
+        }
+
+        @Override
+        public void onNewOrder(Order order) {
+            OrderExecutionReport report = buildReport(order.getClientOidCounter(), ExecType.REJECT, 0L, 0L);
+            resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, report, order.decoder.side(), delegate);
+        }
+
+        @Override
+        public void onCancel(CancelOrder cancel) {
+            delegate.onCancel(cancel);
+        }
+
+        @Override
+        public void onModify(ModifyOrder modify) {
+            delegate.onModify(modify);
+        }
+    }
+
+    /** Fires a synchronous CANCEL_REJECT exec report back into the resolver when a modify is received. */
+    private final class RejectingOnModifySink implements ActionSink {
+        private final IntentResolver resolver;
+        private final CapturingSink delegate;
+        private final long oid;
+
+        RejectingOnModifySink(IntentResolver resolver, CapturingSink delegate, long oid) {
+            this.resolver = resolver;
+            this.delegate = delegate;
+            this.oid = oid;
+        }
+
+        @Override
+        public void onNewOrder(Order order) {
+            delegate.onNewOrder(order);
+        }
+
+        @Override
+        public void onCancel(CancelOrder cancel) {
+            delegate.onCancel(cancel);
+        }
+
+        @Override
+        public void onModify(ModifyOrder modify) {
+            OrderExecutionReport report = buildReport(oid, ExecType.CANCEL_REJECT, 100L, 10L);
+            resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, report, Side.Bid, delegate);
+        }
+    }
 }

@@ -20,7 +20,11 @@ import org.agrona.concurrent.UnsafeBuffer;
  * <p>Reads {@link Intent} messages from the intent ring buffer and
  * {@link OrderExecutionReport} messages from the exec report ring buffer, processes
  * them through the {@link OrderManagementSystem}, and writes approved
- * Order/CancelOrder/ModifyOrder actions to the outbound ring buffer.
+ * Order/CancelOrder/ModifyOrder actions to the order outbound ring buffer.
+ *
+ * <p>After processing each exec report from the gateway, the report (and any synthetic
+ * risk-rejection reports) is forwarded to the strategy via the strategy exec report buffer.
+ * This ensures the strategy only sees exec reports after the OMS has updated position state.
  *
  * <p>Risk policy sync is handled by a dedicated {@link group.gnometrading.oms.risk.RiskSyncAgent}
  * running on its own thread — this agent's hot path performs no I/O or sync work.
@@ -33,19 +37,22 @@ public final class OmsAgent implements GnomeAgent, SequencedEventHandler, Action
     private final OrderManagementSystem oms;
     private final SequencedPoller intentPoller;
     private final SequencedPoller execReportPoller;
-    private final SequencedRingBuffer<?> outboundBuffer;
+    private final SequencedRingBuffer<?> orderOutboundBuffer;
+    private final SequencedRingBuffer<OrderExecutionReport> strategyExecReportBuffer;
 
     // Pre-allocated flyweights for decoding inbound events
     private final Intent intent = new Intent();
     private final OrderExecutionReport execReport = new OrderExecutionReport();
 
     public OmsAgent(
-            OrderManagementSystem oms,
-            SequencedRingBuffer<Intent> intentBuffer,
-            SequencedRingBuffer<OrderExecutionReport> execReportBuffer,
-            SequencedRingBuffer<?> outboundBuffer) {
+            final OrderManagementSystem oms,
+            final SequencedRingBuffer<Intent> intentBuffer,
+            final SequencedRingBuffer<OrderExecutionReport> execReportBuffer,
+            final SequencedRingBuffer<?> orderOutboundBuffer,
+            final SequencedRingBuffer<OrderExecutionReport> strategyExecReportBuffer) {
         this.oms = oms;
-        this.outboundBuffer = outboundBuffer;
+        this.orderOutboundBuffer = orderOutboundBuffer;
+        this.strategyExecReportBuffer = strategyExecReportBuffer;
         this.intentPoller = intentBuffer.createPoller(this);
         this.execReportPoller = execReportBuffer.createPoller(this);
     }
@@ -64,28 +71,38 @@ public final class OmsAgent implements GnomeAgent, SequencedEventHandler, Action
     }
 
     @Override
-    public void onSequencedEvent(long globalSeq, int templateId, UnsafeBuffer buf, int len) throws Exception {
+    public void onSequencedEvent(final long globalSeq, final int templateId, final UnsafeBuffer buf, final int len)
+            throws Exception {
         if (templateId == IntentDecoder.TEMPLATE_ID) {
-            intent.buffer.putBytes(0, buf, 0, len);
+            intent.wrap(buf);
             oms.processIntent(intent, this);
         } else if (templateId == OrderExecutionReportDecoder.TEMPLATE_ID) {
-            execReport.buffer.putBytes(0, buf, 0, len);
+            execReport.wrap(buf);
             oms.processExecutionReport(execReport, this);
+            onExecReport(execReport);
         }
     }
 
     @Override
-    public void onNewOrder(Order order) {
-        outboundBuffer.publishRaw(order.buffer, order.messageHeaderDecoder.templateId(), order.totalMessageSize());
+    public void onNewOrder(final Order order) {
+        orderOutboundBuffer.publishRaw(order.buffer, order.messageHeaderDecoder.templateId(), order.totalMessageSize());
     }
 
     @Override
-    public void onCancel(CancelOrder cancel) {
-        outboundBuffer.publishRaw(cancel.buffer, cancel.messageHeaderDecoder.templateId(), cancel.totalMessageSize());
+    public void onCancel(final CancelOrder cancel) {
+        orderOutboundBuffer.publishRaw(
+                cancel.buffer, cancel.messageHeaderDecoder.templateId(), cancel.totalMessageSize());
     }
 
     @Override
-    public void onModify(ModifyOrder modify) {
-        outboundBuffer.publishRaw(modify.buffer, modify.messageHeaderDecoder.templateId(), modify.totalMessageSize());
+    public void onModify(final ModifyOrder modify) {
+        orderOutboundBuffer.publishRaw(
+                modify.buffer, modify.messageHeaderDecoder.templateId(), modify.totalMessageSize());
+    }
+
+    @Override
+    public void onExecReport(final OrderExecutionReport report) {
+        strategyExecReportBuffer.publishRaw(
+                report.buffer, report.messageHeaderDecoder.templateId(), report.totalMessageSize());
     }
 }

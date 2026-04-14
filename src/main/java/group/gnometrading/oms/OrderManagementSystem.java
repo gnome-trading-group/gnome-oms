@@ -18,6 +18,8 @@ import group.gnometrading.schemas.ModifyOrder;
 import group.gnometrading.schemas.Order;
 import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.schemas.OrderExecutionReportDecoder;
+import group.gnometrading.schemas.OrderStatus;
+import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.sm.ListingSpec;
 
 public final class OrderManagementSystem {
@@ -30,6 +32,7 @@ public final class OrderManagementSystem {
     private final SecurityMaster securityMaster;
     private final IntHashMap<IntentResolver> resolvers;
     private final Order riskCheckOrder = new Order();
+    private final OrderExecutionReport syntheticReject = new OrderExecutionReport();
     private final RiskCheckingSink riskCheckingSink = new RiskCheckingSink();
     private long oidCounter;
 
@@ -204,11 +207,12 @@ public final class OrderManagementSystem {
         ActionSink delegate;
 
         @Override
-        public void onNewOrder(Order order) {
+        public void onNewOrder(final Order order) {
             final int strategyId = order.getClientOidStrategyId();
             final int listingId = resolveListingId(order.decoder.exchangeId(), order.decoder.securityId());
             if (!passesExchangeConstraints(listingId, order.decoder.price(), order.decoder.size())) {
                 logger.log(LogMessage.ORDER_REJECTED_EXCHANGE_CONSTRAINTS, order.getClientOidCounter());
+                emitNewOrderRejection(order, RejectReason.INVALID_SIZE);
                 return;
             }
             if (riskEngine.check(order, positionTracker, orderStateManager, strategyId, listingId)) {
@@ -216,7 +220,38 @@ public final class OrderManagementSystem {
                 delegate.onNewOrder(order);
             } else {
                 logger.log(LogMessage.ORDER_REJECTED_RISK_CHECK, order.getClientOidCounter());
+                emitNewOrderRejection(order, RejectReason.RISK_LIMIT_EXCEEDED);
             }
+        }
+
+        private void emitNewOrderRejection(final Order order, final RejectReason reason) {
+            syntheticReject.encodeClientOid(order.getClientOidCounter(), order.getClientOidStrategyId());
+            syntheticReject
+                    .encoder
+                    .exchangeId(order.decoder.exchangeId())
+                    .securityId(order.decoder.securityId())
+                    .orderId(0)
+                    .execType(ExecType.REJECT)
+                    .orderStatus(OrderStatus.REJECTED)
+                    .rejectReason(reason)
+                    .filledQty(0)
+                    .fillPrice(OrderExecutionReportDecoder.fillPriceNullValue())
+                    .cumulativeQty(0)
+                    .leavesQty(0)
+                    .timestampEvent(0)
+                    .timestampRecv(0)
+                    .fee(OrderExecutionReportDecoder.feeNullValue());
+            syntheticReject.encoder.flags().clear();
+            final IntentResolver resolver = resolvers.get(order.getClientOidStrategyId());
+            if (resolver != null) {
+                resolver.onExecutionReport(
+                        order.decoder.exchangeId(),
+                        order.decoder.securityId(),
+                        syntheticReject,
+                        order.decoder.side(),
+                        delegate);
+            }
+            delegate.onExecReport(syntheticReject);
         }
 
         @Override
@@ -225,7 +260,7 @@ public final class OrderManagementSystem {
         }
 
         @Override
-        public void onModify(ModifyOrder modify) {
+        public void onModify(final ModifyOrder modify) {
             final long counter = modify.getClientOidCounter();
             final TrackedOrder original = orderStateManager.getOrder(counter);
             if (original == null) {
@@ -243,6 +278,7 @@ public final class OrderManagementSystem {
             final int listingId = resolveListingId(modify.decoder.exchangeId(), modify.decoder.securityId());
             if (!passesExchangeConstraints(listingId, modify.decoder.price(), modify.decoder.size())) {
                 logger.log(LogMessage.ORDER_REJECTED_EXCHANGE_CONSTRAINTS, counter);
+                emitModifyRejection(modify, original, RejectReason.INVALID_SIZE);
                 return;
             }
             if (riskEngine.check(
@@ -255,7 +291,39 @@ public final class OrderManagementSystem {
                 delegate.onModify(modify);
             } else {
                 logger.log(LogMessage.ORDER_REJECTED_RISK_CHECK, counter);
+                emitModifyRejection(modify, original, RejectReason.RISK_LIMIT_EXCEEDED);
             }
+        }
+
+        private void emitModifyRejection(
+                final ModifyOrder modify, final TrackedOrder original, final RejectReason reason) {
+            syntheticReject.encodeClientOid(original.getClientOidCounter(), original.getStrategyId());
+            syntheticReject
+                    .encoder
+                    .exchangeId(modify.decoder.exchangeId())
+                    .securityId(modify.decoder.securityId())
+                    .orderId(0)
+                    .execType(ExecType.CANCEL_REJECT)
+                    .orderStatus(OrderStatus.NEW)
+                    .rejectReason(reason)
+                    .filledQty(0)
+                    .fillPrice(OrderExecutionReportDecoder.fillPriceNullValue())
+                    .cumulativeQty(0)
+                    .leavesQty(original.getLeavesQty())
+                    .timestampEvent(0)
+                    .timestampRecv(0)
+                    .fee(OrderExecutionReportDecoder.feeNullValue());
+            syntheticReject.encoder.flags().clear();
+            final IntentResolver resolver = resolvers.get(original.getStrategyId());
+            if (resolver != null) {
+                resolver.onExecutionReport(
+                        modify.decoder.exchangeId(),
+                        modify.decoder.securityId(),
+                        syntheticReject,
+                        original.getSide(),
+                        delegate);
+            }
+            delegate.onExecReport(syntheticReject);
         }
 
         private boolean passesExchangeConstraints(int listingId, long price, long size) {
