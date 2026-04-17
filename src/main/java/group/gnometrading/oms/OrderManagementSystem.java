@@ -68,8 +68,8 @@ public final class OrderManagementSystem {
         long counter = report.getClientOidCounter();
         TrackedOrder tracked = orderStateManager.getOrder(counter);
         if (tracked == null) {
-            throw new IllegalStateException(
-                    "Received execution report for unknown order with clientOidCounter: " + counter);
+            logger.log(LogMessage.EXEC_REPORT_FOR_UNKNOWN_ORDER, counter);
+            return;
         }
 
         long leavesQtyBefore = tracked.getLeavesQty();
