@@ -334,7 +334,7 @@ public final class OrderManagementSystem {
             if (spec.lotSize() > 0 && size % spec.lotSize() != 0) {
                 return false;
             }
-            return spec.minNotional() <= 0 || price * size >= spec.minNotional();
+            return spec.minNotional() <= 0 || size > 0 && price >= spec.minNotional() / size;
         }
     }
 }
