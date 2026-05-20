@@ -61,7 +61,8 @@ public final class OrderManagementSystem {
     public void processIntent(Intent intent, ActionSink sink) {
         IntentResolver resolver = getOrCreateResolver(intent.decoder.strategyId());
         riskCheckingSink.delegate = sink;
-        resolver.resolve(intent, riskCheckingSink);
+        int listingId = resolveListingId(intent.decoder.exchangeId(), intent.decoder.securityId());
+        resolver.resolve(intent, listingId, riskCheckingSink);
     }
 
     public void processExecutionReport(OrderExecutionReport report, ActionSink sink) {
@@ -74,17 +75,17 @@ public final class OrderManagementSystem {
 
         long leavesQtyBefore = tracked.getLeavesQty();
         int strategyId = tracked.getStrategyId();
+        // TODO: Move this to when we get a generic market update
+        int listingId = resolveListingId(report.decoder.exchangeId(), report.decoder.securityId());
 
         orderStateManager.applyExecutionReport(report);
-        updatePositionTracking(report, tracked, strategyId, leavesQtyBefore);
-        forwardToResolver(report, tracked, strategyId, sink);
+        updatePositionTracking(report, tracked, strategyId, leavesQtyBefore, listingId);
+        forwardToResolver(report, tracked, strategyId, listingId, sink);
 
         if (tracked.getState().isTerminal()) {
             orderStateManager.releaseOrder(tracked);
         }
 
-        // TODO: Move this to when we get a generic market update
-        int listingId = resolveListingId(report.decoder.exchangeId(), report.decoder.securityId());
         checkMarketRisk(strategyId, listingId, sink);
     }
 
@@ -170,9 +171,8 @@ public final class OrderManagementSystem {
     }
 
     private void updatePositionTracking(
-            OrderExecutionReport report, TrackedOrder tracked, int strategyId, long leavesQtyBefore) {
+            OrderExecutionReport report, TrackedOrder tracked, int strategyId, long leavesQtyBefore, int listingId) {
         ExecType exec = report.decoder.execType();
-        int listingId = resolveListingId(report.decoder.exchangeId(), report.decoder.securityId());
         if (exec == ExecType.FILL || exec == ExecType.PARTIAL_FILL) {
             positionTracker.removeStrategyLeaves(strategyId, listingId, tracked.getSide(), report.decoder.filledQty());
             long fee = report.decoder.fee() == OrderExecutionReportDecoder.feeNullValue() ? 0 : report.decoder.fee();
@@ -190,11 +190,17 @@ public final class OrderManagementSystem {
         }
     }
 
-    private void forwardToResolver(OrderExecutionReport report, TrackedOrder tracked, int strategyId, ActionSink sink) {
+    private void forwardToResolver(
+            OrderExecutionReport report, TrackedOrder tracked, int strategyId, int listingId, ActionSink sink) {
         IntentResolver resolver = resolvers.get(strategyId);
         riskCheckingSink.delegate = sink;
         resolver.onExecutionReport(
-                report.decoder.exchangeId(), report.decoder.securityId(), report, tracked.getSide(), riskCheckingSink);
+                report.decoder.exchangeId(),
+                report.decoder.securityId(),
+                listingId,
+                report,
+                tracked.getSide(),
+                riskCheckingSink);
     }
 
     /**
@@ -212,7 +218,7 @@ public final class OrderManagementSystem {
             final int listingId = resolveListingId(order.decoder.exchangeId(), order.decoder.securityId());
             if (!passesExchangeConstraints(listingId, order.decoder.price(), order.decoder.size())) {
                 logger.log(LogMessage.ORDER_REJECTED_EXCHANGE_CONSTRAINTS, order.getClientOidCounter());
-                emitNewOrderRejection(order, RejectReason.INVALID_SIZE);
+                emitNewOrderRejection(order, listingId, RejectReason.INVALID_SIZE);
                 return;
             }
             if (riskEngine.check(order, positionTracker, orderStateManager, strategyId, listingId)) {
@@ -220,11 +226,11 @@ public final class OrderManagementSystem {
                 delegate.onNewOrder(order);
             } else {
                 logger.log(LogMessage.ORDER_REJECTED_RISK_CHECK, order.getClientOidCounter());
-                emitNewOrderRejection(order, RejectReason.RISK_LIMIT_EXCEEDED);
+                emitNewOrderRejection(order, listingId, RejectReason.RISK_LIMIT_EXCEEDED);
             }
         }
 
-        private void emitNewOrderRejection(final Order order, final RejectReason reason) {
+        private void emitNewOrderRejection(final Order order, final int listingId, final RejectReason reason) {
             syntheticReject.encodeClientOid(order.getClientOidCounter(), order.getClientOidStrategyId());
             syntheticReject
                     .encoder
@@ -247,6 +253,7 @@ public final class OrderManagementSystem {
                 resolver.onExecutionReport(
                         order.decoder.exchangeId(),
                         order.decoder.securityId(),
+                        listingId,
                         syntheticReject,
                         order.decoder.side(),
                         delegate);
@@ -278,7 +285,7 @@ public final class OrderManagementSystem {
             final int listingId = resolveListingId(modify.decoder.exchangeId(), modify.decoder.securityId());
             if (!passesExchangeConstraints(listingId, modify.decoder.price(), modify.decoder.size())) {
                 logger.log(LogMessage.ORDER_REJECTED_EXCHANGE_CONSTRAINTS, counter);
-                emitModifyRejection(modify, original, RejectReason.INVALID_SIZE);
+                emitModifyRejection(modify, original, listingId, RejectReason.INVALID_SIZE);
                 return;
             }
             if (riskEngine.check(
@@ -291,12 +298,12 @@ public final class OrderManagementSystem {
                 delegate.onModify(modify);
             } else {
                 logger.log(LogMessage.ORDER_REJECTED_RISK_CHECK, counter);
-                emitModifyRejection(modify, original, RejectReason.RISK_LIMIT_EXCEEDED);
+                emitModifyRejection(modify, original, listingId, RejectReason.RISK_LIMIT_EXCEEDED);
             }
         }
 
         private void emitModifyRejection(
-                final ModifyOrder modify, final TrackedOrder original, final RejectReason reason) {
+                final ModifyOrder modify, final TrackedOrder original, final int listingId, final RejectReason reason) {
             syntheticReject.encodeClientOid(original.getClientOidCounter(), original.getStrategyId());
             syntheticReject
                     .encoder
@@ -319,6 +326,7 @@ public final class OrderManagementSystem {
                 resolver.onExecutionReport(
                         modify.decoder.exchangeId(),
                         modify.decoder.securityId(),
+                        listingId,
                         syntheticReject,
                         original.getSide(),
                         delegate);

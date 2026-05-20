@@ -23,6 +23,7 @@ class IntentResolverTest {
 
     private static final int EXCHANGE_ID = 1;
     private static final int SECURITY_ID = 42;
+    private static final int LISTING_ID = 100;
     private static final int STRATEGY_ID = 7;
 
     private AtomicLong oidCounter;
@@ -184,16 +185,30 @@ class IntentResolverTest {
     }
 
     @Test
-    void pendingModifyWithZeroSizeClearsQueue() {
+    void pendingModifyWithZeroSizeQueuesCancelNoImmediateAction() {
         goLive(100L, 10L);
         resolve(101L, 10L, nullPrice(), 0L); // into PENDING_MODIFY
         sink.clear();
 
-        resolve(nullPrice(), 0L, nullPrice(), 0L); // clear queue
+        resolve(nullPrice(), 0L, nullPrice(), 0L); // queues cancel
 
-        // no action yet; but after modify ack, nothing is replayed
-        ModifyCapture m = sink.modifies.isEmpty() ? null : sink.modifies.get(0);
-        assertNull(m);
+        assertEquals(0, sink.cancels.size());
+        assertEquals(0, sink.modifies.size());
+    }
+
+    @Test
+    void pendingModifyCancelFiresAfterModifyAck() {
+        goLive(100L, 10L);
+        long oid = oidCounter.get();
+        resolve(101L, 10L, nullPrice(), 0L); // PENDING_MODIFY
+        resolve(nullPrice(), 0L, nullPrice(), 0L); // queue cancel
+        sink.clear();
+
+        OrderExecutionReport report = buildReport(oid, ExecType.NEW, 101L, 10L);
+        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, LISTING_ID, report, Side.Bid, sink);
+
+        assertEquals(1, sink.cancels.size());
+        assertEquals(0, sink.modifies.size());
     }
 
     // --- onExecutionReport — NEW ack ---
@@ -262,7 +277,7 @@ class IntentResolverTest {
 
         // The modify ack arrives as ExecType.NEW with the original order's oid
         OrderExecutionReport report = buildReport(modifyOid - 1, ExecType.NEW, 101L, 20L);
-        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, report, Side.Bid, sink);
+        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, LISTING_ID, report, Side.Bid, sink);
 
         assertEquals(0, sink.modifies.size());
         assertEquals(0, sink.cancels.size());
@@ -277,7 +292,7 @@ class IntentResolverTest {
         sink.clear();
 
         OrderExecutionReport report = buildReport(oid, ExecType.FILL, 100L, 0L);
-        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, report, Side.Bid, sink);
+        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, LISTING_ID, report, Side.Bid, sink);
 
         // Slot is now EMPTY — a new intent triggers a new order
         resolve(100L, 10L, nullPrice(), 0L);
@@ -293,7 +308,7 @@ class IntentResolverTest {
         sink.clear();
 
         OrderExecutionReport report = buildReport(oid, ExecType.PARTIAL_FILL, 100L, 5L);
-        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, report, Side.Bid, sink);
+        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, LISTING_ID, report, Side.Bid, sink);
 
         assertEquals(0, sink.newOrders.size());
         assertEquals(0, sink.modifies.size());
@@ -309,7 +324,7 @@ class IntentResolverTest {
         sink.clear();
 
         OrderExecutionReport report = buildReport(oid, ExecType.CANCEL, 100L, 0L);
-        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, report, Side.Bid, sink);
+        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, LISTING_ID, report, Side.Bid, sink);
 
         assertEquals(0, sink.newOrders.size());
 
@@ -327,7 +342,7 @@ class IntentResolverTest {
 
         // Before ack, simulate cancel
         OrderExecutionReport report = buildReport(oid, ExecType.CANCEL, 0L, 0L);
-        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, report, Side.Bid, sink);
+        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, LISTING_ID, report, Side.Bid, sink);
 
         assertEquals(1, sink.newOrders.size());
         assertEquals(102L, sink.newOrders.get(0).price);
@@ -342,7 +357,7 @@ class IntentResolverTest {
         sink.clear();
 
         OrderExecutionReport report = buildReport(oid, ExecType.CANCEL, 0L, 0L);
-        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, report, Side.Bid, sink);
+        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, LISTING_ID, report, Side.Bid, sink);
 
         assertEquals(0, sink.newOrders.size());
     }
@@ -356,7 +371,7 @@ class IntentResolverTest {
         sink.clear();
 
         OrderExecutionReport report = buildReport(oid, ExecType.REJECT, 0L, 0L);
-        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, report, Side.Bid, sink);
+        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, LISTING_ID, report, Side.Bid, sink);
 
         assertEquals(0, sink.newOrders.size());
     }
@@ -369,7 +384,7 @@ class IntentResolverTest {
         sink.clear();
 
         OrderExecutionReport report = buildReport(oid, ExecType.REJECT, 0L, 0L);
-        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, report, Side.Bid, sink);
+        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, LISTING_ID, report, Side.Bid, sink);
 
         assertEquals(1, sink.newOrders.size());
         assertEquals(102L, sink.newOrders.get(0).price);
@@ -385,7 +400,7 @@ class IntentResolverTest {
         sink.clear();
 
         OrderExecutionReport report = buildReport(oid, ExecType.CANCEL_REJECT, 100L, 10L);
-        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, report, Side.Bid, sink);
+        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, LISTING_ID, report, Side.Bid, sink);
 
         // No actions and slot is back to LIVE — same intent does nothing
         assertEquals(0, sink.cancels.size());
@@ -402,7 +417,7 @@ class IntentResolverTest {
         sink.clear();
 
         OrderExecutionReport report = buildReport(oid, ExecType.CANCEL_REJECT, 100L, 10L);
-        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, report, Side.Bid, sink);
+        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, LISTING_ID, report, Side.Bid, sink);
 
         assertEquals(1, sink.modifies.size());
         assertEquals(101L, sink.modifies.get(0).price);
@@ -416,7 +431,7 @@ class IntentResolverTest {
         sink.clear();
 
         OrderExecutionReport report = buildReport(oid, ExecType.CANCEL_REJECT, 100L, 10L);
-        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, report, Side.Bid, sink);
+        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, LISTING_ID, report, Side.Bid, sink);
 
         assertEquals(0, sink.cancels.size());
         assertEquals(0, sink.modifies.size());
@@ -430,7 +445,7 @@ class IntentResolverTest {
         sink.clear();
 
         OrderExecutionReport report = buildReport(oid, ExecType.CANCEL_REJECT, 100L, 10L);
-        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, report, Side.Bid, sink);
+        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, LISTING_ID, report, Side.Bid, sink);
 
         assertEquals(0, sink.modifies.size());
         // Back to LIVE at original price — same intent does nothing
@@ -447,7 +462,7 @@ class IntentResolverTest {
         sink.clear();
 
         OrderExecutionReport report = buildReport(oid, ExecType.CANCEL_REJECT, 100L, 10L);
-        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, report, Side.Bid, sink);
+        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, LISTING_ID, report, Side.Bid, sink);
 
         assertEquals(1, sink.modifies.size());
         assertEquals(102L, sink.modifies.get(0).price);
@@ -462,7 +477,7 @@ class IntentResolverTest {
         // Without the fix: slot is still EMPTY when the rejection fires → onExecutionReport returns early
         // → slot transitions to PENDING_NEW after the call → stuck forever.
         RejectingOnNewSink rejectingSink = new RejectingOnNewSink(resolver, sink);
-        resolver.resolve(buildIntent(SECURITY_ID, 100L, 10L, nullPrice(), 0L), rejectingSink);
+        resolver.resolve(buildIntent(SECURITY_ID, 100L, 10L, nullPrice(), 0L), LISTING_ID, rejectingSink);
         sink.clear();
 
         // Slot must be EMPTY — a fresh intent submits a new order
@@ -482,7 +497,7 @@ class IntentResolverTest {
         // intent to resubmit, which also gets synchronously rejected. Slot must be EMPTY at the end.
         RejectingOnNewSink rejectingSink = new RejectingOnNewSink(resolver, sink);
         OrderExecutionReport report = buildReport(firstOid, ExecType.REJECT, 0L, 0L);
-        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, report, Side.Bid, rejectingSink);
+        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, LISTING_ID, report, Side.Bid, rejectingSink);
 
         // Slot must be EMPTY — a fresh resolve submits a new order
         resolve(100L, 10L, nullPrice(), 0L);
@@ -497,7 +512,7 @@ class IntentResolverTest {
         long oid = oidCounter.get();
 
         RejectingOnModifySink rejectingSink = new RejectingOnModifySink(resolver, sink, oid);
-        resolver.resolve(buildIntent(SECURITY_ID, 101L, 10L, nullPrice(), 0L), rejectingSink);
+        resolver.resolve(buildIntent(SECURITY_ID, 101L, 10L, nullPrice(), 0L), LISTING_ID, rejectingSink);
 
         // Slot must have reverted to LIVE — same price/size intent does nothing
         resolve(100L, 10L, nullPrice(), 0L);
@@ -512,7 +527,7 @@ class IntentResolverTest {
         sink.clear();
 
         OrderExecutionReport report = buildReport(999L, ExecType.CANCEL, 0L, 0L);
-        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, report, Side.Bid, sink);
+        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, LISTING_ID, report, Side.Bid, sink);
 
         assertEquals(0, sink.cancels.size());
     }
@@ -520,7 +535,7 @@ class IntentResolverTest {
     @Test
     void reportForUnknownSecurityIsIgnored() {
         OrderExecutionReport report = buildReport(1L, ExecType.CANCEL, 0L, 0L);
-        resolver.onExecutionReport(EXCHANGE_ID, 999L, report, Side.Bid, sink);
+        resolver.onExecutionReport(EXCHANGE_ID, 999L, 999, report, Side.Bid, sink);
 
         assertEquals(0, sink.cancels.size());
     }
@@ -542,7 +557,7 @@ class IntentResolverTest {
                 .takeSide(Side.Bid)
                 .takeOrderType(OrderType.NULL_VAL);
 
-        resolver.resolve(intent, sink);
+        resolver.resolve(intent, LISTING_ID, sink);
 
         assertEquals(1, sink.newOrders.size());
         NewOrderCapture o = sink.newOrders.get(0);
@@ -568,7 +583,7 @@ class IntentResolverTest {
                 .takeOrderType(OrderType.LIMIT)
                 .takeLimitPrice(102L);
 
-        resolver.resolve(intent, sink);
+        resolver.resolve(intent, LISTING_ID, sink);
 
         assertEquals(1, sink.newOrders.size());
         NewOrderCapture o = sink.newOrders.get(0);
@@ -584,8 +599,8 @@ class IntentResolverTest {
         Intent intentA = buildIntent(SECURITY_ID, 100L, 10L, nullPrice(), 0L);
         Intent intentB = buildIntent(99L, 200L, 5L, nullPrice(), 0L);
 
-        resolver.resolve(intentA, sink);
-        resolver.resolve(intentB, sink);
+        resolver.resolve(intentA, LISTING_ID, sink);
+        resolver.resolve(intentB, 101, sink);
 
         assertEquals(2, sink.newOrders.size());
 
@@ -598,10 +613,170 @@ class IntentResolverTest {
         assertEquals(1, sink.modifies.size());
     }
 
+    @Test
+    void sameSecurityDifferentListings_independentSlots() {
+        int listingB = 200;
+        // Same securityId, different listingIds (representing different exchanges)
+        Intent intentA = buildIntent(SECURITY_ID, 100L, 10L, nullPrice(), 0L);
+        Intent intentB = buildIntent(SECURITY_ID, 200L, 5L, nullPrice(), 0L);
+
+        resolver.resolve(intentA, LISTING_ID, sink);
+        resolver.resolve(intentB, listingB, sink);
+
+        assertEquals(2, sink.newOrders.size()); // each listing gets its own slot
+
+        // Ack listing A — listing B (still PENDING_NEW) must not be affected
+        long oidA = sink.newOrders.get(0).clientOidCounter;
+        ackSecurity(oidA, SECURITY_ID, Side.Bid);
+        sink.clear();
+
+        // Listing A is now LIVE; different price triggers modify
+        resolver.resolve(buildIntent(SECURITY_ID, 101L, 10L, nullPrice(), 0L), LISTING_ID, sink);
+        assertEquals(1, sink.modifies.size());
+        assertEquals(101L, sink.modifies.get(0).price);
+
+        // Listing B still PENDING_NEW — intent queues, no immediate action
+        resolver.resolve(intentB, listingB, sink);
+        assertEquals(1, sink.modifies.size()); // no extra modify from listing B
+        assertEquals(0, sink.newOrders.size());
+    }
+
+    // --- additional edge cases ---
+
+    @Test
+    void cancelRejectWithQueuedCancel_emitsCancel() {
+        goLive(100L, 10L);
+        long oid = oidCounter.get();
+        resolve(nullPrice(), 0L, nullPrice(), 0L); // slot -> PENDING_CANCEL
+        resolve(nullPrice(), 0L, nullPrice(), 0L); // queue another cancel (size=0)
+        sink.clear();
+
+        OrderExecutionReport report = buildReport(oid, ExecType.CANCEL_REJECT, 100L, 10L);
+        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, LISTING_ID, report, Side.Bid, sink);
+
+        assertEquals(0, sink.modifies.size());
+        assertEquals(1, sink.cancels.size());
+    }
+
+    @Test
+    void modifyRejectWithQueuedCancel_emitsCancel() {
+        goLive(100L, 10L);
+        long oid = oidCounter.get();
+        resolve(101L, 10L, nullPrice(), 0L); // slot -> PENDING_MODIFY
+        resolve(nullPrice(), 0L, nullPrice(), 0L); // queue cancel (size=0)
+        sink.clear();
+
+        OrderExecutionReport report = buildReport(oid, ExecType.CANCEL_REJECT, 100L, 10L);
+        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, LISTING_ID, report, Side.Bid, sink);
+
+        assertEquals(0, sink.modifies.size());
+        assertEquals(1, sink.cancels.size());
+    }
+
+    @Test
+    void fillDuringPendingModify_terminatesSlot() {
+        goLive(100L, 10L);
+        long oid = oidCounter.get();
+        resolve(101L, 10L, nullPrice(), 0L); // slot -> PENDING_MODIFY
+        sink.clear();
+
+        OrderExecutionReport report = buildReport(oid, ExecType.FILL, 100L, 0L);
+        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, LISTING_ID, report, Side.Bid, sink);
+
+        // Slot must be EMPTY — next intent triggers a fresh new order
+        resolve(100L, 10L, nullPrice(), 0L);
+        assertEquals(1, sink.newOrders.size());
+    }
+
+    @Test
+    void partialFillDuringPendingModify_doesNotChangeSlot() {
+        goLive(100L, 10L);
+        long oid = oidCounter.get();
+        resolve(101L, 10L, nullPrice(), 0L); // slot -> PENDING_MODIFY
+        sink.clear();
+
+        OrderExecutionReport report = buildReport(oid, ExecType.PARTIAL_FILL, 100L, 5L);
+        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, LISTING_ID, report, Side.Bid, sink);
+
+        assertEquals(0, sink.newOrders.size());
+        assertEquals(0, sink.modifies.size());
+        assertEquals(0, sink.cancels.size());
+        // Slot still PENDING_MODIFY — next intent queues
+        resolve(102L, 10L, nullPrice(), 0L);
+        assertEquals(0, sink.modifies.size());
+    }
+
+    @Test
+    void fillDuringPendingCancel_terminatesSlotAndClearsQueuedIntent() {
+        goLive(100L, 10L);
+        long oid = oidCounter.get();
+        resolve(nullPrice(), 0L, nullPrice(), 0L); // slot -> PENDING_CANCEL
+        resolve(101L, 5L, nullPrice(), 0L); // queue new intent
+        sink.clear();
+
+        OrderExecutionReport report = buildReport(oid, ExecType.FILL, 100L, 0L);
+        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, LISTING_ID, report, Side.Bid, sink);
+
+        // FILL terminates slot; queued intent cleared because fill already consumed order
+        assertEquals(0, sink.newOrders.size());
+        // Slot EMPTY — next intent submits fresh order
+        resolve(100L, 10L, nullPrice(), 0L);
+        assertEquals(1, sink.newOrders.size());
+    }
+
+    @Test
+    void rapidIntentChanges_onlyLastOneQueued() {
+        resolve(100L, 10L, nullPrice(), 0L); // slot -> PENDING_NEW
+        // Submit 5 intents — each overwrites the previous queued intent
+        resolve(101L, 11L, nullPrice(), 0L);
+        resolve(102L, 12L, nullPrice(), 0L);
+        resolve(103L, 13L, nullPrice(), 0L);
+        resolve(104L, 14L, nullPrice(), 0L);
+        resolve(105L, 15L, nullPrice(), 0L);
+        long oid = sink.newOrders.get(0).clientOidCounter;
+        sink.clear();
+
+        ack(oid, Side.Bid);
+
+        // Only the last queued intent (105@15) should fire as a modify
+        assertEquals(1, sink.modifies.size());
+        assertEquals(105L, sink.modifies.get(0).price);
+        assertEquals(15L, sink.modifies.get(0).size);
+    }
+
+    @Test
+    void fillClearsQueuedIntent_noResubmit() {
+        resolve(100L, 10L, nullPrice(), 0L);
+        long oid = sink.newOrders.get(0).clientOidCounter;
+        resolve(101L, 10L, nullPrice(), 0L); // queue intent
+        sink.clear();
+
+        OrderExecutionReport report = buildReport(oid, ExecType.FILL, 100L, 0L);
+        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, LISTING_ID, report, Side.Bid, sink);
+
+        // FILL clears queued intent without resubmitting
+        assertEquals(0, sink.newOrders.size());
+    }
+
+    @Test
+    void expireWithQueuedIntent_resubmits() {
+        resolve(100L, 10L, nullPrice(), 0L);
+        long oid = sink.newOrders.get(0).clientOidCounter;
+        resolve(102L, 8L, nullPrice(), 0L);
+        sink.clear();
+
+        OrderExecutionReport report = buildReport(oid, ExecType.EXPIRE, 0L, 0L);
+        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, LISTING_ID, report, Side.Bid, sink);
+
+        assertEquals(1, sink.newOrders.size());
+        assertEquals(102L, sink.newOrders.get(0).price);
+        assertEquals(8L, sink.newOrders.get(0).size);
+    }
+
     // --- helpers ---
 
     private void resolve(long bidPrice, long bidSize, long askPrice, long askSize) {
-        resolver.resolve(buildIntent(SECURITY_ID, bidPrice, bidSize, askPrice, askSize), sink);
+        resolver.resolve(buildIntent(SECURITY_ID, bidPrice, bidSize, askPrice, askSize), LISTING_ID, sink);
     }
 
     private Intent buildIntent(long securityId, long bidPrice, long bidSize, long askPrice, long askSize) {
@@ -633,7 +808,7 @@ class IntentResolverTest {
                 .fillPrice(0)
                 .cumulativeQty(0)
                 .leavesQty(10);
-        resolver.onExecutionReport(EXCHANGE_ID, securityId, report, side, sink);
+        resolver.onExecutionReport(EXCHANGE_ID, securityId, LISTING_ID, report, side, sink);
     }
 
     private OrderExecutionReport buildReport(long clientOidCounter, ExecType type, long price, long leavesQty) {
@@ -715,7 +890,7 @@ class IntentResolverTest {
         @Override
         public void onNewOrder(Order order) {
             OrderExecutionReport report = buildReport(order.getClientOidCounter(), ExecType.REJECT, 0L, 0L);
-            resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, report, order.decoder.side(), delegate);
+            resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, LISTING_ID, report, order.decoder.side(), delegate);
         }
 
         @Override
@@ -754,7 +929,7 @@ class IntentResolverTest {
         @Override
         public void onModify(ModifyOrder modify) {
             OrderExecutionReport report = buildReport(oid, ExecType.CANCEL_REJECT, 100L, 10L);
-            resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, report, Side.Bid, delegate);
+            resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, LISTING_ID, report, Side.Bid, delegate);
         }
     }
 }

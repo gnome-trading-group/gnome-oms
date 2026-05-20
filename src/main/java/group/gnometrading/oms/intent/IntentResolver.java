@@ -22,7 +22,7 @@ public final class IntentResolver {
     private final CancelOrder pendingCancel = new CancelOrder();
     private final ModifyOrder pendingModify = new ModifyOrder();
 
-    // Slots keyed by securityId — one bid and one ask slot per instrument
+    // Slots keyed by listingId — one bid and one ask slot per (exchange, security) listing
     private final LongHashMap<OrderSlot> bidSlots = new LongHashMap<>(4);
     private final LongHashMap<OrderSlot> askSlots = new LongHashMap<>(4);
 
@@ -31,7 +31,7 @@ public final class IntentResolver {
         this.strategyId = strategyId;
     }
 
-    public void resolve(Intent intent, ActionSink handler) {
+    public void resolve(Intent intent, int listingId, ActionSink handler) {
         int exchangeId = intent.decoder.exchangeId();
         long securityId = intent.decoder.securityId();
 
@@ -40,11 +40,9 @@ public final class IntentResolver {
         long bidPrice = intent.decoder.bidPrice() == IntentDecoder.bidPriceNullValue() ? 0 : intent.decoder.bidPrice();
         long askPrice = intent.decoder.askPrice() == IntentDecoder.askPriceNullValue() ? 0 : intent.decoder.askPrice();
 
-        resolveSide(
-                exchangeId, securityId, Side.Bid, bidPrice, bidSize, getOrCreateSlot(bidSlots, securityId), handler);
+        resolveSide(exchangeId, securityId, Side.Bid, bidPrice, bidSize, getOrCreateSlot(bidSlots, listingId), handler);
 
-        resolveSide(
-                exchangeId, securityId, Side.Ask, askPrice, askSize, getOrCreateSlot(askSlots, securityId), handler);
+        resolveSide(exchangeId, securityId, Side.Ask, askPrice, askSize, getOrCreateSlot(askSlots, listingId), handler);
 
         long takeSize = intent.decoder.takeSize() == IntentDecoder.takeSizeNullValue() ? 0 : intent.decoder.takeSize();
         if (takeSize > 0) {
@@ -57,9 +55,14 @@ public final class IntentResolver {
      * May emit a new order action if a queued intent fires after cancel confirmation.
      */
     public void onExecutionReport(
-            int exchangeId, long securityId, OrderExecutionReport report, Side side, ActionSink handler) {
+            int exchangeId,
+            long securityId,
+            int listingId,
+            OrderExecutionReport report,
+            Side side,
+            ActionSink handler) {
         LongHashMap<OrderSlot> slots = side == Side.Bid ? bidSlots : askSlots;
-        OrderSlot slot = slots.get(securityId);
+        OrderSlot slot = slots.get(listingId);
         if (slot == null) {
             return;
         }
@@ -144,7 +147,7 @@ public final class IntentResolver {
                     submitNew(exchangeId, securityId, side, snappedPrice, desiredSize, slot, handler);
                 }
             }
-            case PENDING_NEW -> {
+            case PENDING_NEW, PENDING_MODIFY, PENDING_CANCEL -> {
                 if (wantsOrder) {
                     slot.queueIntent(snappedPrice, desiredSize);
                 } else {
@@ -161,13 +164,6 @@ public final class IntentResolver {
                     emitModify(exchangeId, securityId, slot, snappedPrice, desiredSize, handler);
                 }
             }
-            case PENDING_MODIFY, PENDING_CANCEL -> {
-                if (wantsOrder) {
-                    slot.queueIntent(snappedPrice, desiredSize);
-                } else {
-                    slot.clearQueuedIntent();
-                }
-            }
         }
     }
 
@@ -175,7 +171,10 @@ public final class IntentResolver {
         long qPrice = slot.getQueuedPrice();
         long qSize = slot.getQueuedSize();
         slot.clearQueuedIntent();
-        if (qPrice != slot.getActivePrice() || qSize != slot.getActiveSize()) {
+        if (qSize == 0) {
+            emitCancel(exchangeId, securityId, slot, handler);
+            slot.onCancelSubmitted();
+        } else if (qPrice != slot.getActivePrice() || qSize != slot.getActiveSize()) {
             emitModify(exchangeId, securityId, slot, qPrice, qSize, handler);
             slot.onModifySubmitted(qPrice, qSize);
         }
@@ -250,11 +249,11 @@ public final class IntentResolver {
         handler.onNewOrder(pendingOrder);
     }
 
-    private OrderSlot getOrCreateSlot(LongHashMap<OrderSlot> slots, long securityId) {
-        OrderSlot slot = slots.get(securityId);
+    private OrderSlot getOrCreateSlot(LongHashMap<OrderSlot> slots, long listingId) {
+        OrderSlot slot = slots.get(listingId);
         if (slot == null) {
             slot = new OrderSlot();
-            slots.put(securityId, slot);
+            slots.put(listingId, slot);
         }
         return slot;
     }

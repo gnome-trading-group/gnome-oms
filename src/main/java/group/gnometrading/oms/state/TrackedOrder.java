@@ -3,6 +3,7 @@ package group.gnometrading.oms.state;
 import group.gnometrading.schemas.ExecType;
 import group.gnometrading.schemas.Order;
 import group.gnometrading.schemas.OrderExecutionReport;
+import group.gnometrading.schemas.OrderExecutionReportDecoder;
 import group.gnometrading.schemas.OrderType;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.TimeInForce;
@@ -74,13 +75,17 @@ public final class TrackedOrder {
             }
             case PARTIAL_FILL -> {
                 state = OrderState.PARTIALLY_FILLED;
-                totalCost += report.decoder.fillPrice() * report.decoder.filledQty() + report.decoder.fee();
+                long fee =
+                        report.decoder.fee() == OrderExecutionReportDecoder.feeNullValue() ? 0 : report.decoder.fee();
+                totalCost += report.decoder.fillPrice() * report.decoder.filledQty() + fee;
                 filledQty = report.decoder.cumulativeQty();
                 leavesQty = report.decoder.leavesQty();
             }
             case FILL -> {
                 state = OrderState.FILLED;
-                totalCost += report.decoder.fillPrice() * report.decoder.filledQty() + report.decoder.fee();
+                long fee =
+                        report.decoder.fee() == OrderExecutionReportDecoder.feeNullValue() ? 0 : report.decoder.fee();
+                totalCost += report.decoder.fillPrice() * report.decoder.filledQty() + fee;
                 filledQty = report.decoder.cumulativeQty();
                 leavesQty = 0;
             }
