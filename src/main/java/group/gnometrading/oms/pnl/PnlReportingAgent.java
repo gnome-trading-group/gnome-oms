@@ -24,7 +24,7 @@ import org.agrona.concurrent.EpochClock;
 public final class PnlReportingAgent implements GnomeAgent, StrategyPositionConsumer {
 
     private static final String PNL_SNAPSHOTS_PATH = "/api/pnl/snapshots";
-    private static final int BYTES_PER_SNAPSHOT = 384;
+    private static final int BYTES_PER_SNAPSHOT = 512;
     private final PositionTracker positionTracker;
     private final RegistryConnection registryConnection;
     private final Schedule flushSchedule;
@@ -34,6 +34,7 @@ public final class PnlReportingAgent implements GnomeAgent, StrategyPositionCons
     private final JsonEncoder jsonEncoder;
     private final SharedPriceBuffer priceBuffer;
     private final PriceSlotRegistry priceSlotRegistry;
+    private final String sessionId;
 
     private int pendingCount;
 
@@ -42,8 +43,9 @@ public final class PnlReportingAgent implements GnomeAgent, StrategyPositionCons
             final RegistryConnection registryConnection,
             final EpochClock clock,
             final Duration flushInterval,
-            final int maxSlots) {
-        this(positionTracker, registryConnection, clock, flushInterval, maxSlots, null, null);
+            final int maxSlots,
+            final String sessionId) {
+        this(positionTracker, registryConnection, clock, flushInterval, maxSlots, sessionId, null, null);
     }
 
     public PnlReportingAgent(
@@ -52,6 +54,7 @@ public final class PnlReportingAgent implements GnomeAgent, StrategyPositionCons
             final EpochClock clock,
             final Duration flushInterval,
             final int maxSlots,
+            final String sessionId,
             final SharedPriceBuffer priceBuffer,
             final PriceSlotRegistry priceSlotRegistry) {
         this.positionTracker = positionTracker;
@@ -64,6 +67,7 @@ public final class PnlReportingAgent implements GnomeAgent, StrategyPositionCons
         }
         this.bodyBuffer = ByteBuffer.allocate(maxSlots * BYTES_PER_SNAPSHOT);
         this.jsonEncoder = new JsonEncoder();
+        this.sessionId = sessionId;
         this.priceBuffer = priceBuffer;
         this.priceSlotRegistry = priceSlotRegistry;
     }
@@ -81,7 +85,9 @@ public final class PnlReportingAgent implements GnomeAgent, StrategyPositionCons
 
     @Override
     public void accept(final int strategyId, final int listingId, final Position position) {
-        snapshots[pendingCount++].set(strategyId, listingId, position);
+        final PnlSnapshot snap = snapshots[pendingCount++];
+        snap.set(strategyId, listingId, position);
+        snap.sessionId = sessionId;
     }
 
     private void snapshotAndFlush() {
@@ -133,6 +139,8 @@ public final class PnlReportingAgent implements GnomeAgent, StrategyPositionCons
     private void appendSnapshot(final PnlSnapshot snapshot) {
         jsonEncoder
                 .writeObjectStart()
+                .writeObjectEntry("sessionId", snapshot.sessionId)
+                .writeComma()
                 .writeObjectEntry("strategyId", snapshot.strategyId)
                 .writeComma()
                 .writeObjectEntry("listingId", snapshot.listingId)

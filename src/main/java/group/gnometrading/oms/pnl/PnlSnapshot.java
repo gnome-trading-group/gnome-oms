@@ -13,6 +13,7 @@ final class PnlSnapshot {
     long leavesSellQty;
     long markPrice;
     long unrealizedPnl;
+    String sessionId;
 
     void set(int sid, int lid, Position position) {
         this.strategyId = sid;
