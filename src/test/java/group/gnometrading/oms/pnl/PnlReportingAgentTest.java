@@ -45,7 +45,7 @@ class PnlReportingAgentTest {
         buffer = new SharedPositionBuffer(MAX_SLOTS);
         tracker = new DefaultPositionTracker(buffer);
         agent = new PnlReportingAgent(
-                tracker, registryConnection, clock, Duration.ofMillis(FLUSH_INTERVAL_MS), MAX_SLOTS);
+                tracker, registryConnection, clock, Duration.ofMillis(FLUSH_INTERVAL_MS), MAX_SLOTS, "test-session-id");
         priceBuffer = new SharedPriceBuffer(MAX_SLOTS);
         priceSlotRegistry = new PriceSlotRegistry(MAX_SLOTS);
         enrichedAgent = new PnlReportingAgent(
@@ -54,6 +54,7 @@ class PnlReportingAgentTest {
                 clock,
                 Duration.ofMillis(FLUSH_INTERVAL_MS),
                 MAX_SLOTS,
+                "test-session-id",
                 priceBuffer,
                 priceSlotRegistry);
     }
