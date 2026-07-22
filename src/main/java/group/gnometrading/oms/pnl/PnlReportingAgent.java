@@ -44,16 +44,6 @@ public final class PnlReportingAgent implements GnomeAgent, StrategyPositionCons
             final EpochClock clock,
             final Duration flushInterval,
             final int maxSlots,
-            final String sessionId) {
-        this(positionTracker, registryConnection, clock, flushInterval, maxSlots, sessionId, null, null);
-    }
-
-    public PnlReportingAgent(
-            final PositionTracker positionTracker,
-            final RegistryConnection registryConnection,
-            final EpochClock clock,
-            final Duration flushInterval,
-            final int maxSlots,
             final String sessionId,
             final SharedPriceBuffer priceBuffer,
             final PriceSlotRegistry priceSlotRegistry) {
@@ -86,8 +76,7 @@ public final class PnlReportingAgent implements GnomeAgent, StrategyPositionCons
     @Override
     public void accept(final int strategyId, final int listingId, final Position position) {
         final PnlSnapshot snap = snapshots[pendingCount++];
-        snap.set(strategyId, listingId, position);
-        snap.sessionId = sessionId;
+        snap.set(strategyId, sessionId, listingId, position);
     }
 
     private void snapshotAndFlush() {
@@ -107,9 +96,6 @@ public final class PnlReportingAgent implements GnomeAgent, StrategyPositionCons
     }
 
     private void enrichWithMarkPrices() {
-        if (priceBuffer == null || priceSlotRegistry == null) {
-            return;
-        }
         for (int i = 0; i < pendingCount; i++) {
             final PnlSnapshot snap = snapshots[i];
             final int slot = priceSlotRegistry.getSlot(snap.listingId);
@@ -139,9 +125,9 @@ public final class PnlReportingAgent implements GnomeAgent, StrategyPositionCons
     private void appendSnapshot(final PnlSnapshot snapshot) {
         jsonEncoder
                 .writeObjectStart()
-                .writeObjectEntry("sessionId", snapshot.sessionId)
-                .writeComma()
                 .writeObjectEntry("strategyId", snapshot.strategyId)
+                .writeComma()
+                .writeObjectEntry("sessionId", snapshot.sessionId)
                 .writeComma()
                 .writeObjectEntry("listingId", snapshot.listingId)
                 .writeComma()

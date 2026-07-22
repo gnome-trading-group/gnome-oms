@@ -4,6 +4,7 @@ import group.gnometrading.oms.position.Position;
 
 final class PnlSnapshot {
     int strategyId;
+    String sessionId;
     int listingId;
     long netQuantity;
     long avgEntryPrice;
@@ -13,10 +14,10 @@ final class PnlSnapshot {
     long leavesSellQty;
     long markPrice;
     long unrealizedPnl;
-    String sessionId;
 
-    void set(int sid, int lid, Position position) {
+    void set(int sid, String session, int lid, Position position) {
         this.strategyId = sid;
+        this.sessionId = session;
         this.listingId = lid;
         this.netQuantity = position.netQuantity;
         this.avgEntryPrice = position.getAvgEntryPrice();

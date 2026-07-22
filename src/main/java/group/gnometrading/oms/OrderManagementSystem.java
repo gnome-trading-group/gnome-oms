@@ -2,10 +2,13 @@ package group.gnometrading.oms;
 
 import group.gnometrading.SecurityMaster;
 import group.gnometrading.collections.IntHashMap;
+import group.gnometrading.collections.IntToIntHashMap;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.oms.action.ActionSink;
 import group.gnometrading.oms.intent.IntentResolver;
+import group.gnometrading.oms.pnl.PriceSlotRegistry;
+import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.Position;
 import group.gnometrading.oms.position.PositionTracker;
 import group.gnometrading.oms.risk.RiskEngine;
@@ -30,6 +33,8 @@ public final class OrderManagementSystem {
     private final PositionTracker positionTracker;
     private final RiskEngine riskEngine;
     private final SecurityMaster securityMaster;
+    private final SharedPriceBuffer priceBuffer;
+    private final PriceSlotRegistry priceSlotRegistry;
     private final IntHashMap<IntentResolver> resolvers;
     private final Order riskCheckOrder = new Order();
     private final OrderExecutionReport syntheticReject = new OrderExecutionReport();
@@ -41,12 +46,16 @@ public final class OrderManagementSystem {
             OrderStateManager orderStateManager,
             PositionTracker positionTracker,
             RiskEngine riskEngine,
-            SecurityMaster securityMaster) {
+            SecurityMaster securityMaster,
+            SharedPriceBuffer priceBuffer,
+            PriceSlotRegistry priceSlotRegistry) {
         this.logger = logger;
         this.orderStateManager = orderStateManager;
         this.positionTracker = positionTracker;
         this.riskEngine = riskEngine;
         this.securityMaster = securityMaster;
+        this.priceBuffer = priceBuffer;
+        this.priceSlotRegistry = priceSlotRegistry;
         this.resolvers = new IntHashMap<>(4);
     }
 
@@ -342,7 +351,14 @@ public final class OrderManagementSystem {
             if (spec.lotSize() > 0 && size % spec.lotSize() != 0) {
                 return false;
             }
-            return spec.minNotional() <= 0 || size > 0 && price >= spec.minNotional() / size;
+            long effectivePrice = price;
+            if (effectivePrice <= 0) {
+                int slot = priceSlotRegistry.getSlot(listingId);
+                if (slot != IntToIntHashMap.MISSING) {
+                    effectivePrice = priceBuffer.readSpinning(slot);
+                }
+            }
+            return spec.minNotional() <= 0 || size > 0 && effectivePrice >= spec.minNotional() / size;
         }
     }
 }

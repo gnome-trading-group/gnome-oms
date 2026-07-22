@@ -5,6 +5,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.when;
 
 import group.gnometrading.logging.NullLogger;
+import group.gnometrading.oms.pnl.PriceSlotRegistry;
+import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.DefaultPositionTracker;
 import group.gnometrading.oms.position.SharedPositionBuffer;
 import group.gnometrading.oms.risk.RiskEngine;
@@ -76,7 +78,13 @@ class OmsAgentTest {
         DefaultPositionTracker positionTracker = new DefaultPositionTracker(new SharedPositionBuffer(16));
         RiskEngine riskEngine = new RiskEngine();
         oms = new OrderManagementSystem(
-                new NullLogger(), orderStateManager, positionTracker, riskEngine, securityMaster);
+                new NullLogger(),
+                orderStateManager,
+                positionTracker,
+                riskEngine,
+                securityMaster,
+                new SharedPriceBuffer(1),
+                new PriceSlotRegistry(1));
 
         omsAgent = new OmsAgent(oms, intentBuffer, execReportBuffer, orderOutboundBuffer, strategyExecReportBuffer);
 

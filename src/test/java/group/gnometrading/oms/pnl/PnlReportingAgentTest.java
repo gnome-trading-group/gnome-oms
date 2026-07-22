@@ -35,7 +35,6 @@ class PnlReportingAgentTest {
     private PnlReportingAgent agent;
     private SharedPriceBuffer priceBuffer;
     private PriceSlotRegistry priceSlotRegistry;
-    private PnlReportingAgent enrichedAgent;
 
     private long mockTime = 0;
     private final EpochClock clock = () -> mockTime;
@@ -44,11 +43,9 @@ class PnlReportingAgentTest {
     void setUp() {
         buffer = new SharedPositionBuffer(MAX_SLOTS);
         tracker = new DefaultPositionTracker(buffer);
-        agent = new PnlReportingAgent(
-                tracker, registryConnection, clock, Duration.ofMillis(FLUSH_INTERVAL_MS), MAX_SLOTS, "test-session-id");
         priceBuffer = new SharedPriceBuffer(MAX_SLOTS);
         priceSlotRegistry = new PriceSlotRegistry(MAX_SLOTS);
-        enrichedAgent = new PnlReportingAgent(
+        agent = new PnlReportingAgent(
                 tracker,
                 registryConnection,
                 clock,
@@ -132,7 +129,7 @@ class PnlReportingAgentTest {
         int priceSlot = priceSlotRegistry.register(LISTING_ID);
         priceBuffer.write(priceSlot, 80L);
 
-        String json = triggerFlushAndCaptureJson(enrichedAgent);
+        String json = triggerFlushAndCaptureJson(agent);
         assertTrue(json.contains("\"markPrice\":80"));
         assertTrue(json.contains("\"unrealizedPnl\":300"));
         assertTrue(json.contains("\"totalPnl\":300"));
@@ -146,7 +143,7 @@ class PnlReportingAgentTest {
         int priceSlot = priceSlotRegistry.register(LISTING_ID);
         priceBuffer.write(priceSlot, 130L);
 
-        String json = triggerFlushAndCaptureJson(enrichedAgent);
+        String json = triggerFlushAndCaptureJson(agent);
         assertTrue(json.contains("\"markPrice\":130"));
         assertTrue(json.contains("\"unrealizedPnl\":-300"));
         assertTrue(json.contains("\"totalPnl\":-300"));
@@ -163,7 +160,7 @@ class PnlReportingAgentTest {
         int priceSlot = priceSlotRegistry.register(LISTING_ID);
         priceBuffer.write(priceSlot, 80L);
 
-        String json = triggerFlushAndCaptureJson(enrichedAgent);
+        String json = triggerFlushAndCaptureJson(agent);
         assertTrue(json.contains("\"unrealizedPnl\":-100"));
         assertTrue(json.contains("\"totalPnl\":100"));
     }
@@ -175,7 +172,7 @@ class PnlReportingAgentTest {
         priceSlotRegistry.register(LISTING_ID);
         // price never written — readSpinning returns 0
 
-        String json = triggerFlushAndCaptureJson(enrichedAgent);
+        String json = triggerFlushAndCaptureJson(agent);
         assertTrue(json.contains("\"markPrice\":0"));
         assertTrue(json.contains("\"unrealizedPnl\":0"));
     }
@@ -185,17 +182,6 @@ class PnlReportingAgentTest {
         tracker.registerSlot(STRATEGY_ID, LISTING_ID);
         tracker.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 10, 50, 0);
         // LISTING_ID not registered in priceSlotRegistry
-
-        String json = triggerFlushAndCaptureJson(enrichedAgent);
-        assertTrue(json.contains("\"markPrice\":0"));
-        assertTrue(json.contains("\"unrealizedPnl\":0"));
-    }
-
-    @Test
-    void enrichment_nullPriceBuffer_fieldsRemainZero() {
-        // 5-arg constructor passes null for both price buffer and registry
-        tracker.registerSlot(STRATEGY_ID, LISTING_ID);
-        tracker.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 10, 50, 0);
 
         String json = triggerFlushAndCaptureJson(agent);
         assertTrue(json.contains("\"markPrice\":0"));

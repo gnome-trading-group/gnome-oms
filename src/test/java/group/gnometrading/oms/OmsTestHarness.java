@@ -6,6 +6,8 @@ import static org.mockito.Mockito.when;
 import group.gnometrading.SecurityMaster;
 import group.gnometrading.logging.NullLogger;
 import group.gnometrading.oms.action.ActionSink;
+import group.gnometrading.oms.pnl.PriceSlotRegistry;
+import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.DefaultPositionTracker;
 import group.gnometrading.oms.position.Position;
 import group.gnometrading.oms.position.SharedPositionBuffer;
@@ -60,7 +62,13 @@ public final class OmsTestHarness {
         this.orderStateManager = new RingBufferOrderStateManager(64);
         this.positionTracker = new DefaultPositionTracker(new SharedPositionBuffer(16));
         this.oms = new OrderManagementSystem(
-                new NullLogger(), orderStateManager, positionTracker, riskEngine, securityMaster);
+                new NullLogger(),
+                orderStateManager,
+                positionTracker,
+                riskEngine,
+                securityMaster,
+                new SharedPriceBuffer(1),
+                new PriceSlotRegistry(1));
         this.sink = new RecordingSink();
         stubDefaultListing();
     }

@@ -6,6 +6,8 @@ import static org.mockito.Mockito.when;
 import group.gnometrading.SecurityMaster;
 import group.gnometrading.logging.NullLogger;
 import group.gnometrading.oms.action.ActionSink;
+import group.gnometrading.oms.pnl.PriceSlotRegistry;
+import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.DefaultPositionTracker;
 import group.gnometrading.oms.position.SharedPositionBuffer;
 import group.gnometrading.oms.risk.RiskEngine;
@@ -49,7 +51,13 @@ class OrderManagementSystemTest {
         DefaultPositionTracker positionTracker = new DefaultPositionTracker(new SharedPositionBuffer(8));
         RiskEngine riskEngine = new RiskEngine();
         oms = new OrderManagementSystem(
-                new NullLogger(), orderStateManager, positionTracker, riskEngine, securityMaster);
+                new NullLogger(),
+                orderStateManager,
+                positionTracker,
+                riskEngine,
+                securityMaster,
+                new SharedPriceBuffer(1),
+                new PriceSlotRegistry(1));
         delegate = new RecordingSink();
 
         Listing listing = new Listing(
