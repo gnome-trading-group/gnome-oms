@@ -352,7 +352,7 @@ public final class OrderManagementSystem {
                 return false;
             }
             long effectivePrice = price;
-            if (effectivePrice <= 0) {
+            if (effectivePrice <= 0 && priceSlotRegistry != null) {
                 int slot = priceSlotRegistry.getSlot(listingId);
                 if (slot != IntToIntHashMap.MISSING) {
                     effectivePrice = priceBuffer.readSpinning(slot);
