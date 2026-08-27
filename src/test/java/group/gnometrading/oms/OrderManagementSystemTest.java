@@ -1,9 +1,15 @@
 package group.gnometrading.oms;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import group.gnometrading.SecurityMaster;
+import group.gnometrading.logging.LogMessage;
+import group.gnometrading.logging.Logger;
 import group.gnometrading.logging.NullLogger;
 import group.gnometrading.oms.action.ActionSink;
 import group.gnometrading.oms.pnl.PriceSlotRegistry;
@@ -66,7 +72,7 @@ class OrderManagementSystemTest {
                 new Security(SECURITY_ID, "SYM", 1),
                 "SYM",
                 "SYM");
-        when(securityMaster.getListing(EXCHANGE_ID, SECURITY_ID)).thenReturn(listing);
+        lenient().when(securityMaster.getListing(EXCHANGE_ID, SECURITY_ID)).thenReturn(listing);
     }
 
     // --- lotSize constraint ---
@@ -168,6 +174,35 @@ class OrderManagementSystemTest {
 
         submitIntent(1L, 1L); // notional=1 < 1000
         assertEquals(0, delegate.modifies.size());
+    }
+
+    @Test
+    void testCancelRejectForUnknownOrderIsDiscardedSilently() {
+        Logger mockLogger = mock(Logger.class);
+        OrderManagementSystem testOms = new OrderManagementSystem(
+                mockLogger,
+                new RingBufferOrderStateManager(64),
+                new DefaultPositionTracker(new SharedPositionBuffer(8)),
+                new RiskEngine(),
+                securityMaster,
+                new SharedPriceBuffer(1),
+                new PriceSlotRegistry(1));
+
+        OrderExecutionReport cancelReject = new OrderExecutionReport();
+        cancelReject.encodeClientOid(1L, STRATEGY_ID);
+        cancelReject
+                .encoder
+                .exchangeId(EXCHANGE_ID)
+                .securityId(SECURITY_ID)
+                .execType(ExecType.CANCEL_REJECT)
+                .filledQty(0)
+                .fillPrice(0)
+                .cumulativeQty(0)
+                .leavesQty(0);
+        testOms.processExecutionReport(cancelReject, delegate);
+
+        verify(mockLogger, never()).log(LogMessage.EXEC_REPORT_FOR_UNKNOWN_ORDER, 1L);
+        assertEquals(0, delegate.newOrders.size());
     }
 
     // --- helpers ---

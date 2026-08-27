@@ -78,7 +78,9 @@ public final class OrderManagementSystem {
         long counter = report.getClientOidCounter();
         TrackedOrder tracked = orderStateManager.getOrder(counter);
         if (tracked == null) {
-            logger.log(LogMessage.EXEC_REPORT_FOR_UNKNOWN_ORDER, counter);
+            if (report.decoder.execType() != ExecType.CANCEL_REJECT) {
+                logger.log(LogMessage.EXEC_REPORT_FOR_UNKNOWN_ORDER, counter);
+            }
             return;
         }
 
