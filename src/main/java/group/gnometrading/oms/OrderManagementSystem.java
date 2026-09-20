@@ -168,6 +168,19 @@ public final class OrderManagementSystem {
 
     private final CancelOrder marketRiskCancel = new CancelOrder();
 
+    public void shutdownCancelAll(final ActionSink sink) {
+        orderStateManager.forEachOrder(tracked -> {
+            if (!tracked.getState().isTerminal()) {
+                marketRiskCancel.encodeClientOid(tracked.getClientOidCounter(), tracked.getStrategyId());
+                marketRiskCancel
+                        .encoder
+                        .exchangeId((short) tracked.getExchangeId())
+                        .securityId(tracked.getSecurityId());
+                sink.onCancel(marketRiskCancel);
+            }
+        });
+    }
+
     private void cancelAllOpenOrders(final int strategyId, final ActionSink sink) {
         orderStateManager.forEachOrder(tracked -> {
             if (tracked.getStrategyId() == strategyId && !tracked.getState().isTerminal()) {

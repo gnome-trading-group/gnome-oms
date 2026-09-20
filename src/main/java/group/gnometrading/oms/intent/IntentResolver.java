@@ -182,11 +182,7 @@ public final class IntentResolver {
 
     private void emitCancel(int exchangeId, long securityId, OrderSlot slot, ActionSink handler) {
         pendingCancel.encodeClientOid(slot.getActiveClientOid(), strategyId);
-        pendingCancel
-                .encoder
-                .exchangeId((short) exchangeId)
-                .securityId((int) securityId)
-                .orderId(0);
+        pendingCancel.encoder.exchangeId((short) exchangeId).securityId((int) securityId);
         handler.onCancel(pendingCancel);
     }
 
@@ -197,7 +193,6 @@ public final class IntentResolver {
                 .encoder
                 .exchangeId((short) exchangeId)
                 .securityId((int) securityId)
-                .orderId(0)
                 .price(price)
                 .size((int) size)
                 .orderType(OrderType.LIMIT)

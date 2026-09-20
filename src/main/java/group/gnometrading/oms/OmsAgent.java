@@ -105,4 +105,9 @@ public final class OmsAgent implements GnomeAgent, SequencedEventHandler, Action
         strategyExecReportBuffer.publishRaw(
                 report.buffer, report.messageHeaderDecoder.templateId(), report.totalMessageSize());
     }
+
+    @Override
+    public void onClose() {
+        oms.shutdownCancelAll(this);
+    }
 }
