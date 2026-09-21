@@ -12,6 +12,7 @@ import group.gnometrading.schemas.OrderExecutionReportDecoder;
 import group.gnometrading.sequencer.SequencedEventHandler;
 import group.gnometrading.sequencer.SequencedPoller;
 import group.gnometrading.sequencer.SequencedRingBuffer;
+import org.agrona.concurrent.EpochNanoClock;
 import org.agrona.concurrent.UnsafeBuffer;
 
 /**
@@ -39,6 +40,7 @@ public final class OmsAgent implements GnomeAgent, SequencedEventHandler, Action
     private final SequencedPoller execReportPoller;
     private final SequencedRingBuffer<?> orderOutboundBuffer;
     private final SequencedRingBuffer<OrderExecutionReport> strategyExecReportBuffer;
+    private final EpochNanoClock nanoClock;
 
     // Pre-allocated flyweights for decoding inbound events
     private final Intent intent = new Intent();
@@ -49,10 +51,12 @@ public final class OmsAgent implements GnomeAgent, SequencedEventHandler, Action
             final SequencedRingBuffer<Intent> intentBuffer,
             final SequencedRingBuffer<OrderExecutionReport> execReportBuffer,
             final SequencedRingBuffer<?> orderOutboundBuffer,
-            final SequencedRingBuffer<OrderExecutionReport> strategyExecReportBuffer) {
+            final SequencedRingBuffer<OrderExecutionReport> strategyExecReportBuffer,
+            final EpochNanoClock nanoClock) {
         this.oms = oms;
         this.orderOutboundBuffer = orderOutboundBuffer;
         this.strategyExecReportBuffer = strategyExecReportBuffer;
+        this.nanoClock = nanoClock;
         this.intentPoller = intentBuffer.createPoller(this);
         this.execReportPoller = execReportBuffer.createPoller(this);
     }
@@ -85,17 +89,20 @@ public final class OmsAgent implements GnomeAgent, SequencedEventHandler, Action
 
     @Override
     public void onNewOrder(final Order order) {
+        order.encoder.timestampSend(nanoClock.nanoTime());
         orderOutboundBuffer.publishRaw(order.buffer, order.messageHeaderDecoder.templateId(), order.totalMessageSize());
     }
 
     @Override
     public void onCancel(final CancelOrder cancel) {
+        cancel.encoder.timestampSend(nanoClock.nanoTime());
         orderOutboundBuffer.publishRaw(
                 cancel.buffer, cancel.messageHeaderDecoder.templateId(), cancel.totalMessageSize());
     }
 
     @Override
     public void onModify(final ModifyOrder modify) {
+        modify.encoder.timestampSend(nanoClock.nanoTime());
         orderOutboundBuffer.publishRaw(
                 modify.buffer, modify.messageHeaderDecoder.templateId(), modify.totalMessageSize());
     }

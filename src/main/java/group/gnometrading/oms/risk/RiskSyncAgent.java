@@ -9,6 +9,8 @@ import group.gnometrading.risk.RiskMaster;
 import group.gnometrading.risk.RiskPolicyRecord;
 import group.gnometrading.utils.Schedule;
 import java.time.Duration;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.LockSupport;
 import org.agrona.concurrent.EpochClock;
 
 /**
@@ -19,6 +21,8 @@ import org.agrona.concurrent.EpochClock;
  * The OMS hot path reads only from the published snapshot — no sync work, no I/O.
  */
 public final class RiskSyncAgent implements GnomeAgent {
+
+    private static final long MAX_PARK_MS = 1000L;
 
     private final RiskMaster riskMaster;
     private final RiskEngine riskEngine;
@@ -56,6 +60,10 @@ public final class RiskSyncAgent implements GnomeAgent {
     @Override
     public int doWork() {
         refreshSchedule.check();
+        long remainingMs = refreshSchedule.millisUntilNext();
+        if (remainingMs > 0) {
+            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(Math.min(remainingMs, MAX_PARK_MS)));
+        }
         return 0;
     }
 

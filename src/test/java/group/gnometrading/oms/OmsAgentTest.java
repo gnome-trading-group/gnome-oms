@@ -86,7 +86,8 @@ class OmsAgentTest {
                 new SharedPriceBuffer(1),
                 new PriceSlotRegistry(1));
 
-        omsAgent = new OmsAgent(oms, intentBuffer, execReportBuffer, orderOutboundBuffer, strategyExecReportBuffer);
+        omsAgent = new OmsAgent(
+                oms, intentBuffer, execReportBuffer, orderOutboundBuffer, strategyExecReportBuffer, () -> 0L);
 
         Listing listing = new Listing(
                 LISTING_ID,
