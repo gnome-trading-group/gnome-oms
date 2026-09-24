@@ -26,9 +26,12 @@ public final class OrderSlot {
     private long pendingModifyPrice;
     private long pendingModifySize;
 
+    private short activeFlags;
+
     // Queued intent: what the strategy wants next, stored while a pending state is in-flight
     private long queuedPrice;
     private long queuedSize;
+    private short queuedFlags;
     private boolean hasQueuedIntent;
 
     public State getState() {
@@ -51,11 +54,12 @@ public final class OrderSlot {
         return state == State.PENDING_CANCEL;
     }
 
-    public void onNewSubmitted(long clientOid, long price, long size) {
+    public void onNewSubmitted(long clientOid, long price, long size, short flags) {
         this.state = State.PENDING_NEW;
         this.activeClientOid = clientOid;
         this.activePrice = price;
         this.activeSize = size;
+        this.activeFlags = flags;
     }
 
     public void onNewAcked() {
@@ -98,18 +102,28 @@ public final class OrderSlot {
         this.state = State.LIVE;
     }
 
+    public short getActiveFlags() {
+        return activeFlags;
+    }
+
+    public short getQueuedFlags() {
+        return queuedFlags;
+    }
+
     public void onTerminal() {
         this.state = State.EMPTY;
         this.activeClientOid = 0;
         this.activePrice = 0;
         this.activeSize = 0;
+        this.activeFlags = 0;
         this.pendingModifyPrice = 0;
         this.pendingModifySize = 0;
     }
 
-    public void queueIntent(long price, long size) {
+    public void queueIntent(long price, long size, short flags) {
         this.queuedPrice = price;
         this.queuedSize = size;
+        this.queuedFlags = flags;
         this.hasQueuedIntent = true;
     }
 
@@ -117,6 +131,7 @@ public final class OrderSlot {
         this.hasQueuedIntent = false;
         this.queuedPrice = 0;
         this.queuedSize = 0;
+        this.queuedFlags = 0;
     }
 
     public boolean hasQueuedIntent() {

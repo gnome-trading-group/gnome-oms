@@ -27,7 +27,7 @@ class OrderSlotTest {
 
     @Test
     void onNewSubmittedTransitionsToPendingNew() {
-        slot.onNewSubmitted(42L, 100L, 10L);
+        slot.onNewSubmitted(42L, 100L, 10L, (short) 0);
 
         assertEquals(OrderSlot.State.PENDING_NEW, slot.getState());
         assertEquals(42L, slot.getActiveClientOid());
@@ -37,7 +37,7 @@ class OrderSlotTest {
 
     @Test
     void onNewAckedTransitionsToLive() {
-        slot.onNewSubmitted(1L, 100L, 10L);
+        slot.onNewSubmitted(1L, 100L, 10L, (short) 0);
         slot.onNewAcked();
 
         assertEquals(OrderSlot.State.LIVE, slot.getState());
@@ -111,7 +111,7 @@ class OrderSlotTest {
 
     @Test
     void queueIntentStoresValues() {
-        slot.queueIntent(99L, 5L);
+        slot.queueIntent(99L, 5L, (short) 0);
 
         assertTrue(slot.hasQueuedIntent());
         assertEquals(99L, slot.getQueuedPrice());
@@ -120,7 +120,7 @@ class OrderSlotTest {
 
     @Test
     void clearQueuedIntentResetsValues() {
-        slot.queueIntent(99L, 5L);
+        slot.queueIntent(99L, 5L, (short) 0);
         slot.clearQueuedIntent();
 
         assertFalse(slot.hasQueuedIntent());
@@ -130,17 +130,50 @@ class OrderSlotTest {
 
     @Test
     void queueIntentOverwritesPreviousIntent() {
-        slot.queueIntent(99L, 5L);
-        slot.queueIntent(101L, 8L);
+        slot.queueIntent(99L, 5L, (short) 0);
+        slot.queueIntent(101L, 8L, (short) 0);
 
         assertEquals(101L, slot.getQueuedPrice());
         assertEquals(8L, slot.getQueuedSize());
     }
 
+    // --- flags ---
+
+    @Test
+    void activeFlagsStoredOnNewSubmitted() {
+        slot.onNewSubmitted(1L, 100L, 10L, (short) 1);
+
+        assertEquals((short) 1, slot.getActiveFlags());
+    }
+
+    @Test
+    void activeFlagsClearedOnTerminal() {
+        slot.onNewSubmitted(1L, 100L, 10L, (short) 1);
+        slot.onNewAcked();
+        slot.onTerminal();
+
+        assertEquals((short) 0, slot.getActiveFlags());
+    }
+
+    @Test
+    void queuedFlagsStoredAndRetrieved() {
+        slot.queueIntent(99L, 5L, (short) 1);
+
+        assertEquals((short) 1, slot.getQueuedFlags());
+    }
+
+    @Test
+    void queuedFlagsClearedOnClearQueuedIntent() {
+        slot.queueIntent(99L, 5L, (short) 1);
+        slot.clearQueuedIntent();
+
+        assertEquals((short) 0, slot.getQueuedFlags());
+    }
+
     // --- helpers ---
 
     private void goLive(long oid, long price, long size) {
-        slot.onNewSubmitted(oid, price, size);
+        slot.onNewSubmitted(oid, price, size, (short) 0);
         slot.onNewAcked();
     }
 }

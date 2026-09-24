@@ -773,6 +773,70 @@ class IntentResolverTest {
         assertEquals(8L, sink.newOrders.get(0).size);
     }
 
+    // --- POST_ONLY flag propagation ---
+
+    @Test
+    void postOnlyFlagPropagatedToNewOrder() {
+        Intent intent = buildIntentWithFlags(SECURITY_ID, 100L, 10L, nullPrice(), 0L, (short) 1);
+        resolver.resolve(intent, LISTING_ID, sink);
+
+        assertEquals(1, sink.newOrders.size());
+        assertTrue(sink.newOrders.get(0).flags() != 0);
+    }
+
+    @Test
+    void postOnlyFlagPropagatedToModify() {
+        goLive(100L, 10L);
+        sink.clear();
+
+        Intent intent = buildIntentWithFlags(SECURITY_ID, 101L, 10L, nullPrice(), 0L, (short) 1);
+        resolver.resolve(intent, LISTING_ID, sink);
+
+        assertEquals(1, sink.modifies.size());
+        assertTrue(sink.modifies.get(0).flags() != 0);
+    }
+
+    @Test
+    void postOnlyFlagNotPropagatedToTakeOrder() {
+        Intent intent = new Intent();
+        intent.encoder
+                .strategyId(STRATEGY_ID)
+                .exchangeId(EXCHANGE_ID)
+                .securityId(SECURITY_ID)
+                .bidPrice(IntentDecoder.bidPriceNullValue())
+                .bidSize(IntentDecoder.bidSizeNullValue())
+                .askPrice(IntentDecoder.askPriceNullValue())
+                .askSize(IntentDecoder.askSizeNullValue())
+                .takeSize(5L)
+                .takeSide(Side.Bid)
+                .takeOrderType(OrderType.NULL_VAL);
+        intent.encoder.flags().postOnly(true);
+
+        resolver.resolve(intent, LISTING_ID, sink);
+
+        assertEquals(1, sink.newOrders.size());
+        assertEquals(0, sink.newOrders.get(0).flags());
+    }
+
+    @Test
+    void queuedIntentPreservesFlags() {
+        // Submit first order (no flags) → PENDING_NEW
+        resolve(100L, 10L, nullPrice(), 0L);
+        long oid = sink.newOrders.get(0).clientOidCounter;
+        sink.clear();
+
+        // Queue a postOnly intent
+        Intent queued = buildIntentWithFlags(SECURITY_ID, 101L, 10L, nullPrice(), 0L, (short) 1);
+        resolver.resolve(queued, LISTING_ID, sink);
+        assertEquals(0, sink.modifies.size()); // still pending
+
+        // Ack → queued intent fires as modify with postOnly flag
+        ack(oid, Side.Bid);
+
+        assertEquals(1, sink.modifies.size());
+        assertTrue(sink.modifies.get(0).flags() != 0);
+    }
+
     // --- helpers ---
 
     private void resolve(long bidPrice, long bidSize, long askPrice, long askSize) {
@@ -780,6 +844,11 @@ class IntentResolverTest {
     }
 
     private Intent buildIntent(long securityId, long bidPrice, long bidSize, long askPrice, long askSize) {
+        return buildIntentWithFlags(securityId, bidPrice, bidSize, askPrice, askSize, (short) 0);
+    }
+
+    private Intent buildIntentWithFlags(
+            long securityId, long bidPrice, long bidSize, long askPrice, long askSize, short flags) {
         Intent intent = new Intent();
         intent.encoder
                 .strategyId(STRATEGY_ID)
@@ -790,6 +859,10 @@ class IntentResolverTest {
                 .askPrice(askPrice)
                 .askSize(askSize == 0 ? IntentDecoder.askSizeNullValue() : askSize)
                 .takeSize(IntentDecoder.takeSizeNullValue());
+        intent.encoder.flags().clear();
+        if ((flags & 1) != 0) {
+            intent.encoder.flags().postOnly(true);
+        }
         return intent;
     }
 
@@ -858,12 +931,16 @@ class IntentResolverTest {
                     order.decoder.size(),
                     order.decoder.side(),
                     order.decoder.orderType(),
-                    order.decoder.timeInForce()));
+                    order.decoder.timeInForce(),
+                    order.decoder.flags().getRaw()));
         }
 
         @Override
         public void onModify(ModifyOrder modify) {
-            modifies.add(new ModifyCapture(modify.decoder.price(), modify.decoder.size()));
+            modifies.add(new ModifyCapture(
+                    modify.decoder.price(),
+                    modify.decoder.size(),
+                    modify.decoder.flags().getRaw()));
         }
 
         @Override
@@ -873,9 +950,15 @@ class IntentResolverTest {
     }
 
     private record NewOrderCapture(
-            long clientOidCounter, long price, long size, Side side, OrderType orderType, TimeInForce timeInForce) {}
+            long clientOidCounter,
+            long price,
+            long size,
+            Side side,
+            OrderType orderType,
+            TimeInForce timeInForce,
+            short flags) {}
 
-    private record ModifyCapture(long price, long size) {}
+    private record ModifyCapture(long price, long size, short flags) {}
 
     /** Fires a synchronous REJECT exec report back into the resolver when a new order is received. */
     private final class RejectingOnNewSink implements ActionSink {
