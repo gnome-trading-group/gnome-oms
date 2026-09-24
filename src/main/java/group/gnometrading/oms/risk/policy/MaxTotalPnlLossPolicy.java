@@ -8,6 +8,7 @@ import group.gnometrading.oms.position.PositionTracker;
 import group.gnometrading.oms.risk.MarketRiskPolicy;
 import group.gnometrading.oms.risk.util.PolicyParameters;
 import group.gnometrading.oms.state.OrderStateManager;
+import group.gnometrading.schemas.Statics;
 import group.gnometrading.strings.GnomeString;
 
 /**
@@ -63,7 +64,7 @@ public final class MaxTotalPnlLossPolicy extends AbstractConfigurablePolicy impl
         }
 
         final long unrealizedPnl = pos.netQuantity * (markPrice - pos.getAvgEntryPrice());
-        final long totalPnl = pos.realizedPnl + unrealizedPnl;
+        final long totalPnl = pos.realizedPnl + unrealizedPnl - pos.totalFees * Statics.SIZE_SCALING_FACTOR;
         return totalPnl < -maxLoss;
     }
 }

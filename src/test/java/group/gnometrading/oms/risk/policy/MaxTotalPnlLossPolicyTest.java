@@ -149,6 +149,29 @@ class MaxTotalPnlLossPolicyTest {
         assertFalse(policy.isViolated(STRATEGY_ID, LISTING_ID, positions, orders));
     }
 
+    // --- fees ---
+
+    @Test
+    void violated_feesContributeToViolation() {
+        // Long 10 @ avg 100, mark = 95 → unrealizedPnl = -50 (alone: -50 < -100 is false, not violated)
+        // fee = 1 → totalPnl = -50 - 1 * SIZE_SCALING_FACTOR → violated with maxLoss = 100
+        positions.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 10, 100, 1);
+        priceBuffer.write(priceSlot, 95L);
+
+        final MaxTotalPnlLossPolicy policy = new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, 100L);
+        assertTrue(policy.isViolated(STRATEGY_ID, LISTING_ID, positions, orders));
+    }
+
+    @Test
+    void notViolated_sameScenarioWithoutFees() {
+        // Same position as violated_feesContributeToViolation but fee = 0 → not violated
+        positions.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 10, 100, 0);
+        priceBuffer.write(priceSlot, 95L);
+
+        final MaxTotalPnlLossPolicy policy = new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, 100L);
+        assertFalse(policy.isViolated(STRATEGY_ID, LISTING_ID, positions, orders));
+    }
+
     // --- reconfigure ---
 
     @Test

@@ -8,6 +8,7 @@ import group.gnometrading.RegistryConnection;
 import group.gnometrading.oms.position.DefaultPositionTracker;
 import group.gnometrading.oms.position.SharedPositionBuffer;
 import group.gnometrading.schemas.Side;
+import group.gnometrading.schemas.Statics;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import org.agrona.concurrent.EpochClock;
@@ -175,6 +176,19 @@ class PnlReportingAgentTest {
         String json = triggerFlushAndCaptureJson(agent);
         assertTrue(json.contains("\"markPrice\":0"));
         assertTrue(json.contains("\"unrealizedPnl\":0"));
+    }
+
+    @Test
+    void enrichment_feeSubtractedFromTotalPnl() {
+        // Long 10 @ avg 50, mark = 80 → unrealizedPnl = 300, fee = 1 (PRICE_SCALE unit)
+        // totalPnl = 0 + 300 - 1 * SIZE_SCALING_FACTOR
+        tracker.registerSlot(STRATEGY_ID, LISTING_ID);
+        tracker.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 10, 50, 1);
+        int priceSlot = priceSlotRegistry.register(LISTING_ID);
+        priceBuffer.write(priceSlot, 80L);
+
+        String json = triggerFlushAndCaptureJson(agent);
+        assertTrue(json.contains("\"totalPnl\":" + (300 - 1L * Statics.SIZE_SCALING_FACTOR)));
     }
 
     @Test

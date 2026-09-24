@@ -7,6 +7,7 @@ import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.oms.position.Position;
 import group.gnometrading.oms.position.PositionTracker;
 import group.gnometrading.oms.position.StrategyPositionConsumer;
+import group.gnometrading.schemas.Statics;
 import group.gnometrading.strings.GnomeString;
 import group.gnometrading.strings.ViewString;
 import group.gnometrading.utils.Schedule;
@@ -146,7 +147,11 @@ public final class PnlReportingAgent implements GnomeAgent, StrategyPositionCons
                 .writeComma()
                 .writeObjectEntry("unrealizedPnl", snapshot.unrealizedPnl)
                 .writeComma()
-                .writeObjectEntry("totalPnl", snapshot.realizedPnl + snapshot.unrealizedPnl)
+                .writeObjectEntry(
+                        "totalPnl",
+                        snapshot.realizedPnl
+                                + snapshot.unrealizedPnl
+                                - snapshot.totalFees * Statics.SIZE_SCALING_FACTOR)
                 .writeComma()
                 .writeObjectEntry("markPrice", snapshot.markPrice)
                 .writeComma()
