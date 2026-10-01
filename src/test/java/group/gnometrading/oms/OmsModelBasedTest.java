@@ -121,7 +121,7 @@ class OmsModelBasedTest {
                     if (!wants) {
                         slot.clearQueue();
                         slot.state = ModelSlot.State.PENDING_CANCEL;
-                    } else if (price != slot.activePrice || size != slot.activeSize) {
+                    } else if (price != slot.activePrice || size != slot.restingQty()) {
                         doModify(side, price, size, slot);
                     }
                 }
@@ -134,19 +134,22 @@ class OmsModelBasedTest {
             slot.state = ModelSlot.State.PENDING_NEW;
             slot.activeOid = oid;
             slot.activePrice = price;
-            slot.activeSize = size;
+            slot.activeOrderQty = size;
+            slot.filledQty = 0;
             orders.put(oid, new ModelOrder(side, securityId, listingId, size));
             getOrCreatePosition(listingId).addLeaves(side, size);
         }
 
-        private void doModify(Side side, long price, long size, ModelSlot slot) {
+        // {@code restingQty} is what the strategy wants working; the modify carries the FIX order
+        // quantity, which adds back the fills already seen.
+        private void doModify(Side side, long price, long restingQty, ModelSlot slot) {
             ModelOrder order = orders.get(slot.activeOid);
             ModelPosition pos = getOrCreatePosition(order.listingId);
             pos.removeLeaves(side, order.leavesQty);
-            pos.addLeaves(side, size);
-            order.leavesQty = size;
+            pos.addLeaves(side, restingQty);
+            order.leavesQty = restingQty;
             slot.pendingPrice = price;
-            slot.pendingSize = size;
+            slot.pendingOrderQty = restingQty + slot.filledQty;
             slot.state = ModelSlot.State.PENDING_MODIFY;
         }
 
@@ -187,15 +190,18 @@ class OmsModelBasedTest {
             }
 
             // mirrors IntentResolver.onExecutionReport
+            if (cumQty != OrderExecutionReportDecoder.cumulativeQtyNullValue()) {
+                slot.filledQty = Math.max(slot.filledQty, cumQty);
+            }
             switch (type) {
                 case NEW -> {
                     order.leavesQty = leavesQty;
                     if (slot.state == ModelSlot.State.PENDING_MODIFY) {
                         slot.state = ModelSlot.State.LIVE;
                         slot.activePrice = slot.pendingPrice;
-                        slot.activeSize = slot.pendingSize;
+                        slot.activeOrderQty = slot.pendingOrderQty;
                         slot.pendingPrice = 0;
-                        slot.pendingSize = 0;
+                        slot.pendingOrderQty = 0;
                     } else {
                         slot.state = ModelSlot.State.LIVE;
                     }
@@ -228,7 +234,7 @@ class OmsModelBasedTest {
                     if (slot.state == ModelSlot.State.PENDING_MODIFY) {
                         slot.state = ModelSlot.State.LIVE;
                         slot.pendingPrice = 0;
-                        slot.pendingSize = 0;
+                        slot.pendingOrderQty = 0;
                         if (slot.hasQueued) fireQueuedOnLive(side, slot, order);
                     } else if (slot.state == ModelSlot.State.PENDING_CANCEL) {
                         slot.state = ModelSlot.State.LIVE;
@@ -247,7 +253,7 @@ class OmsModelBasedTest {
             slot.clearQueue();
             if (qs == 0) {
                 slot.state = ModelSlot.State.PENDING_CANCEL;
-            } else if (qp != slot.activePrice || qs != slot.activeSize) {
+            } else if (qp != slot.activePrice || qs != slot.restingQty()) {
                 doModify(side, qp, qs, slot);
             }
         }
@@ -273,9 +279,10 @@ class OmsModelBasedTest {
         State state = State.EMPTY;
         long activeOid;
         long activePrice;
-        long activeSize;
+        long activeOrderQty;
+        long filledQty;
         long pendingPrice;
-        long pendingSize;
+        long pendingOrderQty;
         long queuedPrice;
         long queuedSize;
         boolean hasQueued;
@@ -292,13 +299,18 @@ class OmsModelBasedTest {
             queuedSize = 0;
         }
 
+        long restingQty() {
+            return Math.max(0, activeOrderQty - filledQty);
+        }
+
         void onTerminal() {
             state = State.EMPTY;
             activeOid = 0;
             activePrice = 0;
-            activeSize = 0;
+            activeOrderQty = 0;
+            filledQty = 0;
             pendingPrice = 0;
-            pendingSize = 0;
+            pendingOrderQty = 0;
         }
     }
 
@@ -485,6 +497,8 @@ class OmsModelBasedTest {
                     model.getOrCreatePosition(OmsTestHarness.LISTING_ID),
                     h.getPosition(OmsTestHarness.LISTING_ID),
                     evCtx);
+            assertLeavesMatchVenue(
+                    outstanding, OmsTestHarness.LISTING_ID, h.getPosition(OmsTestHarness.LISTING_ID), evCtx);
         }
     }
 
@@ -619,6 +633,8 @@ class OmsModelBasedTest {
                     model.getOrCreatePosition(OmsTestHarness.LISTING_ID),
                     h.getPosition(OmsTestHarness.LISTING_ID),
                     evCtx);
+            assertLeavesMatchVenue(
+                    outstanding, OmsTestHarness.LISTING_ID, h.getPosition(OmsTestHarness.LISTING_ID), evCtx);
         }
     }
 
@@ -856,7 +872,7 @@ class OmsModelBasedTest {
                 OutstandingOrder oo = byOid.get(mod.clientOidCounter());
                 if (oo != null) {
                     firmModel.removeLeaves(oo.side, oo.leavesQty);
-                    firmModel.addLeaves(oo.side, mod.size());
+                    firmModel.addLeaves(oo.side, mod.size() - oo.cumQty);
                 }
             }
 
@@ -920,8 +936,25 @@ class OmsModelBasedTest {
         for (int j = prevMod; j < h.sink.modifies.size(); j++) {
             OmsTestHarness.ModifyCapture mod = h.sink.modifies.get(j);
             OutstandingOrder o = byOid.get(mod.clientOidCounter());
-            if (o != null) o.leavesQty = mod.size();
+            if (o != null) o.leavesQty = mod.size() - o.cumQty; // FIX: leaves = order qty - cum qty
         }
+    }
+
+    /**
+     * The OMS's booked leaves must equal what the venue has working. The stand-in venue applies FIX
+     * semantics independently of the reference model, so this checks the OMS against the venue rather
+     * than against a second copy of its own logic.
+     */
+    private void assertLeavesMatchVenue(List<OutstandingOrder> outstanding, int listingId, Position rp, String ctx) {
+        long venueBuy = 0;
+        long venueSell = 0;
+        for (OutstandingOrder o : outstanding) {
+            if (o.listingId != listingId) continue;
+            if (o.side == Side.Bid) venueBuy += o.leavesQty;
+            else venueSell += o.leavesQty;
+        }
+        assertEquals(venueBuy, rp == null ? 0 : rp.leavesBuyQty, ctx + " venue vs OMS leavesBuyQty");
+        assertEquals(venueSell, rp == null ? 0 : rp.leavesSellQty, ctx + " venue vs OMS leavesSellQty");
     }
 
     private void assertPositionMatches(ModelPosition mp, Position rp, String ctx) {

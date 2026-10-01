@@ -98,10 +98,11 @@ public final class TrackedOrder {
         }
     }
 
-    public void modify(long newPrice, long newSize) {
+    /** {@code newOrderQty} is the FIX order quantity, so what remains working is that less the fills. */
+    public void modify(long newPrice, long newOrderQty) {
         this.price = newPrice;
-        this.size = newSize;
-        this.leavesQty = newSize;
+        this.size = newOrderQty;
+        this.leavesQty = Math.max(0, newOrderQty - filledQty);
     }
 
     public OrderState getState() {

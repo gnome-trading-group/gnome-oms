@@ -29,6 +29,13 @@ An Intent carries two independent modes in a single message:
 | `takeOrderType`  | `MARKET` or `LIMIT`; null defaults to `MARKET`      |
 | `takeLimitPrice` | limit price when `takeOrderType=LIMIT`; else unused |
 
+**Quantities.** A make size is the *resting* quantity the strategy wants working, not the
+order's total. On the wire the OMS follows FIX: an `Order` or `ModifyOrder` size is the order
+quantity, the order's total size including what has already filled, and exec reports carry the
+cumulative quantity and leaves (leaves = order quantity − cumulative). The OMS translates: a
+modify carries *desired resting + filled so far*. Keeping the wire quantity total is what keeps a
+modify correct when fills land while it is in flight.
+
 Both halves are processed together on every `processIntent` call. A pure make intent
 leaves take fields null; a pure take intent leaves bid/ask fields null (which, crucially,
 maps to size=0 — see section 3).
@@ -108,13 +115,18 @@ Decision table by current slot state and desired outcome:
 |-----------------|-----------------------------------------------------------|--------------------------------------|
 | EMPTY           | Submit new order → PENDING_NEW                            | Nothing                              |
 | PENDING_NEW     | Queue intent (price, size)                                | Queue cancel intent (0, 0)           |
-| LIVE            | Same price+size as active → nothing. Different → modify → PENDING_MODIFY. | Cancel → PENDING_CANCEL |
+| LIVE            | Same price and resting size as what is working → nothing. Different → modify (order qty = size + filled) → PENDING_MODIFY. | Cancel → PENDING_CANCEL |
 | PENDING_MODIFY  | Queue intent (price, size)                                | Queue cancel intent (0, 0)           |
 | PENDING_CANCEL  | Queue intent (price, size)                                | Queue cancel intent (0, 0)           |
 
 When the slot is LIVE and a modify is warranted, `RiskCheckingSink.onModify` intercepts
 the modify before it reaches the action sink. If it passes risk checks, position leaves
-are updated immediately (remove old size, add new size) and `TrackedOrder` is updated.
+are updated immediately (remove the old leaves, add the new ones: order qty − filled) and
+`TrackedOrder` is updated.
+
+Because the comparison is against what is still resting, a partial fill that leaves less
+working than the strategy asked for is topped back up the next time the strategy expresses that
+intent: with 3 of 10 filled, an unchanged intent for 10 sends a modify to order qty 13.
 If it fails, a synthetic `CANCEL_REJECT` is injected back into the resolver, which then
 fires any queued intent.
 
@@ -173,8 +185,9 @@ modifies before they leave the OMS.
 
 1. Same exchange constraint and risk engine checks (risk is re-evaluated against the new
    size).
-2. **Accept**: `positionTracker.removeStrategyLeaves(old size)` then
-   `positionTracker.addStrategyLeaves(new size)` — both firm and strategy positions are
+2. **Accept**: `positionTracker.removeStrategyLeaves(old leaves)` then
+   `positionTracker.addStrategyLeaves(new leaves)`, where new leaves = the modify's order qty −
+   filled. Risk and exchange constraints are evaluated on those new leaves. Both firm and strategy positions are
    updated immediately, before the modify reaches the exchange. `TrackedOrder.modify` also
    updates the order's stored price and size.
 3. **Fail**: a synthetic `CANCEL_REJECT` is injected into the resolver, which reverts the
@@ -220,8 +233,8 @@ so it reflects the quantity that was live just before this report arrived.
 ### `leavesQty` Accounting Through a Modify
 
 When a modify is accepted by `RiskCheckingSink.onModify`, position leaves are updated
-immediately (old size removed, new size added) and `TrackedOrder.leavesQty` is set to the
-new size. The exchange later sends a NEW ack for the modified order. That ack does **not**
+immediately (old leaves removed, new leaves added) and `TrackedOrder.leavesQty` is set to the
+new order qty less what has filled. The exchange later sends a NEW ack for the modified order. That ack does **not**
 produce another position update — the leaves were already reconciled when the modify was
 sent. If the modify is rejected (`CANCEL_REJECT`), `RiskCheckingSink` has not changed the
 position, so nothing needs to be undone.

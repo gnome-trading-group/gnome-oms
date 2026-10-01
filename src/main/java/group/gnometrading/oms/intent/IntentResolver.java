@@ -9,6 +9,7 @@ import group.gnometrading.schemas.IntentDecoder;
 import group.gnometrading.schemas.ModifyOrder;
 import group.gnometrading.schemas.Order;
 import group.gnometrading.schemas.OrderExecutionReport;
+import group.gnometrading.schemas.OrderExecutionReportDecoder;
 import group.gnometrading.schemas.OrderFlagsDecoder;
 import group.gnometrading.schemas.OrderType;
 import group.gnometrading.schemas.Side;
@@ -89,6 +90,10 @@ public final class IntentResolver {
         if (reportCounter != slot.getActiveClientOid()) {
             return;
         }
+        final long cumulativeQty = report.decoder.cumulativeQty();
+        if (cumulativeQty != OrderExecutionReportDecoder.cumulativeQtyNullValue()) {
+            slot.onCumulativeQty(cumulativeQty);
+        }
 
         ExecType exec = report.decoder.execType();
         switch (exec) {
@@ -106,10 +111,11 @@ public final class IntentResolver {
                         slot.clearQueuedIntent();
                         emitCancel(exchangeId, securityId, slot, handler);
                         slot.onCancelSubmitted();
-                    } else if (qPrice != slot.getActivePrice() || qSize != slot.getActiveSize()) {
+                    } else if (qPrice != slot.getActivePrice() || qSize != slot.getRestingQty()) {
                         slot.clearQueuedIntent();
-                        slot.onModifySubmitted(qPrice, qSize);
-                        emitModify(exchangeId, securityId, slot, qPrice, qSize, qFlags, handler);
+                        final long orderQty = slot.orderQtyForResting(qSize);
+                        slot.onModifySubmitted(qPrice, orderQty);
+                        emitModify(exchangeId, securityId, slot, qPrice, orderQty, qFlags, handler);
                     } else {
                         slot.clearQueuedIntent();
                     }
@@ -180,9 +186,10 @@ public final class IntentResolver {
                     slot.clearQueuedIntent();
                     emitCancel(exchangeId, securityId, slot, handler);
                     slot.onCancelSubmitted();
-                } else if (slot.getActivePrice() != snappedPrice || slot.getActiveSize() != desiredSize) {
-                    slot.onModifySubmitted(snappedPrice, desiredSize);
-                    emitModify(exchangeId, securityId, slot, snappedPrice, desiredSize, flags, handler);
+                } else if (slot.getActivePrice() != snappedPrice || slot.getRestingQty() != desiredSize) {
+                    final long orderQty = slot.orderQtyForResting(desiredSize);
+                    slot.onModifySubmitted(snappedPrice, orderQty);
+                    emitModify(exchangeId, securityId, slot, snappedPrice, orderQty, flags, handler);
                 }
             }
         }
@@ -196,9 +203,10 @@ public final class IntentResolver {
         if (qSize == 0) {
             emitCancel(exchangeId, securityId, slot, handler);
             slot.onCancelSubmitted();
-        } else if (qPrice != slot.getActivePrice() || qSize != slot.getActiveSize()) {
-            emitModify(exchangeId, securityId, slot, qPrice, qSize, qFlags, handler);
-            slot.onModifySubmitted(qPrice, qSize);
+        } else if (qPrice != slot.getActivePrice() || qSize != slot.getRestingQty()) {
+            final long orderQty = slot.orderQtyForResting(qSize);
+            emitModify(exchangeId, securityId, slot, qPrice, orderQty, qFlags, handler);
+            slot.onModifySubmitted(qPrice, orderQty);
         }
     }
 
@@ -208,15 +216,22 @@ public final class IntentResolver {
         handler.onCancel(pendingCancel);
     }
 
+    /** {@code orderQty} is the FIX order quantity: the order's total size, including what has filled. */
     private void emitModify(
-            int exchangeId, long securityId, OrderSlot slot, long price, long size, short flags, ActionSink handler) {
+            int exchangeId,
+            long securityId,
+            OrderSlot slot,
+            long price,
+            long orderQty,
+            short flags,
+            ActionSink handler) {
         pendingModify.encodeClientOid(slot.getActiveClientOid(), strategyId);
         pendingModify
                 .encoder
                 .exchangeId((short) exchangeId)
                 .securityId((int) securityId)
                 .price(price)
-                .size((int) size)
+                .size((int) orderQty)
                 .orderType(OrderType.LIMIT)
                 .timeInForce(TimeInForce.GOOD_TILL_CANCELED);
         pendingModify.encoder.flags().clear();

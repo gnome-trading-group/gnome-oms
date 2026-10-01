@@ -32,7 +32,7 @@ class OrderSlotTest {
         assertEquals(OrderSlot.State.PENDING_NEW, slot.getState());
         assertEquals(42L, slot.getActiveClientOid());
         assertEquals(100L, slot.getActivePrice());
-        assertEquals(10L, slot.getActiveSize());
+        assertEquals(10L, slot.getActiveOrderQty());
     }
 
     @Test
@@ -61,7 +61,7 @@ class OrderSlotTest {
 
         assertEquals(OrderSlot.State.LIVE, slot.getState());
         assertEquals(101L, slot.getActivePrice());
-        assertEquals(20L, slot.getActiveSize());
+        assertEquals(20L, slot.getActiveOrderQty());
     }
 
     @Test
@@ -72,7 +72,7 @@ class OrderSlotTest {
 
         assertEquals(OrderSlot.State.LIVE, slot.getState());
         assertEquals(100L, slot.getActivePrice());
-        assertEquals(10L, slot.getActiveSize());
+        assertEquals(10L, slot.getActiveOrderQty());
     }
 
     // --- LIVE → PENDING_CANCEL → EMPTY ---
@@ -93,7 +93,7 @@ class OrderSlotTest {
         assertEquals(OrderSlot.State.EMPTY, slot.getState());
         assertEquals(0L, slot.getActiveClientOid());
         assertEquals(0L, slot.getActivePrice());
-        assertEquals(0L, slot.getActiveSize());
+        assertEquals(0L, slot.getActiveOrderQty());
     }
 
     // --- cancel reject ---
@@ -175,5 +175,53 @@ class OrderSlotTest {
     private void goLive(long oid, long price, long size) {
         slot.onNewSubmitted(oid, price, size, (short) 0);
         slot.onNewAcked();
+    }
+
+    @Test
+    void restingQty_IsOrderQtyLessFillsSeen() {
+        final OrderSlot slot = new OrderSlot();
+        slot.onNewSubmitted(1L, 100L, 10L, (short) 0);
+        slot.onNewAcked();
+        slot.onCumulativeQty(3L);
+
+        assertEquals(10L, slot.getActiveOrderQty());
+        assertEquals(7L, slot.getRestingQty());
+        assertEquals(13L, slot.orderQtyForResting(10L)); // FIX: order qty includes what has filled
+    }
+
+    @Test
+    void cumulativeQty_NeverRegresses() {
+        final OrderSlot slot = new OrderSlot();
+        slot.onNewSubmitted(1L, 100L, 10L, (short) 0);
+        slot.onCumulativeQty(5L);
+        slot.onCumulativeQty(3L); // a stale or replayed report
+
+        assertEquals(5L, slot.getFilledQty());
+    }
+
+    @Test
+    void confirmedModify_KeepsFillsAndAdoptsNewOrderQty() {
+        final OrderSlot slot = new OrderSlot();
+        slot.onNewSubmitted(1L, 100L, 10L, (short) 0);
+        slot.onNewAcked();
+        slot.onCumulativeQty(3L);
+        slot.onModifySubmitted(101L, slot.orderQtyForResting(5L));
+        slot.onModifyConfirmed();
+
+        assertEquals(8L, slot.getActiveOrderQty());
+        assertEquals(5L, slot.getRestingQty());
+    }
+
+    @Test
+    void newSubmissionAndTerminal_ResetFills() {
+        final OrderSlot slot = new OrderSlot();
+        slot.onNewSubmitted(1L, 100L, 10L, (short) 0);
+        slot.onCumulativeQty(4L);
+        slot.onTerminal();
+        assertEquals(0L, slot.getFilledQty());
+
+        slot.onCumulativeQty(2L);
+        slot.onNewSubmitted(2L, 100L, 10L, (short) 0);
+        assertEquals(0L, slot.getFilledQty());
     }
 }

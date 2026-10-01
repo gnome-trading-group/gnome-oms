@@ -4,6 +4,10 @@ package group.gnometrading.oms.intent;
  * Tracks the lifecycle state of a single order slot (one per side per instrument per strategy).
  * Ensures only one order is live or pending at a time on each side.
  *
+ * <p>Quantities follow FIX: the order quantity is the order's total size including what has filled,
+ * and the resting quantity is that less the fills seen. Strategies express intents as resting size;
+ * keeping the order quantity total is what lets a modify stay correct while fills are still landing.
+ *
  * <p>State machine:
  * EMPTY → PENDING_NEW → LIVE → PENDING_MODIFY → LIVE
  *                            → PENDING_CANCEL → EMPTY
@@ -21,10 +25,11 @@ public final class OrderSlot {
     private State state = State.EMPTY;
     private long activeClientOid;
     private long activePrice;
-    private long activeSize;
+    private long activeOrderQty;
+    private long filledQty;
 
     private long pendingModifyPrice;
-    private long pendingModifySize;
+    private long pendingModifyOrderQty;
 
     private short activeFlags;
 
@@ -54,11 +59,12 @@ public final class OrderSlot {
         return state == State.PENDING_CANCEL;
     }
 
-    public void onNewSubmitted(long clientOid, long price, long size, short flags) {
+    public void onNewSubmitted(long clientOid, long price, long orderQty, short flags) {
         this.state = State.PENDING_NEW;
         this.activeClientOid = clientOid;
         this.activePrice = price;
-        this.activeSize = size;
+        this.activeOrderQty = orderQty;
+        this.filledQty = 0;
         this.activeFlags = flags;
     }
 
@@ -74,28 +80,47 @@ public final class OrderSlot {
         return activePrice;
     }
 
-    public long getActiveSize() {
-        return activeSize;
+    public long getActiveOrderQty() {
+        return activeOrderQty;
     }
 
-    public void onModifySubmitted(long pendingPrice, long pendingSize) {
+    public long getFilledQty() {
+        return filledQty;
+    }
+
+    /** What is still working on the venue: the order quantity less the fills seen. */
+    public long getRestingQty() {
+        return Math.max(0, activeOrderQty - filledQty);
+    }
+
+    /** The FIX order quantity a modify must carry for {@code restingQty} to be left working. */
+    public long orderQtyForResting(long restingQty) {
+        return restingQty + filledQty;
+    }
+
+    /** Records the order's cumulative fill. Monotonic, so a stale or repeated report cannot regress it. */
+    public void onCumulativeQty(long cumulativeQty) {
+        this.filledQty = Math.max(this.filledQty, cumulativeQty);
+    }
+
+    public void onModifySubmitted(long pendingPrice, long pendingOrderQty) {
         this.state = State.PENDING_MODIFY;
         this.pendingModifyPrice = pendingPrice;
-        this.pendingModifySize = pendingSize;
+        this.pendingModifyOrderQty = pendingOrderQty;
     }
 
     public void onModifyConfirmed() {
         this.state = State.LIVE;
         this.activePrice = this.pendingModifyPrice;
-        this.activeSize = this.pendingModifySize;
+        this.activeOrderQty = this.pendingModifyOrderQty;
         this.pendingModifyPrice = 0;
-        this.pendingModifySize = 0;
+        this.pendingModifyOrderQty = 0;
     }
 
     public void onModifyRejected() {
         this.state = State.LIVE;
         this.pendingModifyPrice = 0;
-        this.pendingModifySize = 0;
+        this.pendingModifyOrderQty = 0;
     }
 
     public void onCancelRejected() {
@@ -114,10 +139,11 @@ public final class OrderSlot {
         this.state = State.EMPTY;
         this.activeClientOid = 0;
         this.activePrice = 0;
-        this.activeSize = 0;
+        this.activeOrderQty = 0;
+        this.filledQty = 0;
         this.activeFlags = 0;
         this.pendingModifyPrice = 0;
-        this.pendingModifySize = 0;
+        this.pendingModifyOrderQty = 0;
     }
 
     public void queueIntent(long price, long size, short flags) {

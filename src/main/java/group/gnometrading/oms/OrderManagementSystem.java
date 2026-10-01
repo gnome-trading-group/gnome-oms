@@ -17,6 +17,7 @@ import group.gnometrading.oms.state.TrackedOrder;
 import group.gnometrading.schemas.CancelOrder;
 import group.gnometrading.schemas.ExecType;
 import group.gnometrading.schemas.Intent;
+import group.gnometrading.schemas.Liquidity;
 import group.gnometrading.schemas.ModifyOrder;
 import group.gnometrading.schemas.Order;
 import group.gnometrading.schemas.OrderExecutionReport;
@@ -272,6 +273,7 @@ public final class OrderManagementSystem {
                     .timestampRecv(0)
                     .fee(OrderExecutionReportDecoder.feeNullValue());
             syntheticReject.encoder.flags().clear();
+            syntheticReject.encoder.liquidity(Liquidity.NULL_VAL);
             final IntentResolver resolver = resolvers.get(order.getClientOidStrategyId());
             if (resolver != null) {
                 resolver.onExecutionReport(
@@ -297,17 +299,20 @@ public final class OrderManagementSystem {
             if (original == null) {
                 return;
             }
+            // modify.size is the FIX order quantity, filled portion included. Risk, exchange constraints
+            // and position leaves all concern what can still execute, which is that less the fills.
+            final long newLeaves = Math.max(0, modify.decoder.size() - original.getFilledQty());
             riskCheckOrder
                     .encoder
                     .exchangeId((short) modify.decoder.exchangeId())
                     .securityId((int) modify.decoder.securityId())
                     .side(original.getSide())
                     .price(modify.decoder.price())
-                    .size(modify.decoder.size())
+                    .size(newLeaves)
                     .orderType(original.getOrderType())
                     .timeInForce(original.getTimeInForce());
             final int listingId = resolveListingId(modify.decoder.exchangeId(), modify.decoder.securityId());
-            if (!passesExchangeConstraints(listingId, modify.decoder.price(), modify.decoder.size())) {
+            if (!passesExchangeConstraints(listingId, modify.decoder.price(), newLeaves)) {
                 logger.log(LogMessage.ORDER_REJECTED_EXCHANGE_CONSTRAINTS, counter);
                 emitModifyRejection(modify, original, listingId, RejectReason.INVALID_SIZE);
                 return;
@@ -316,8 +321,7 @@ public final class OrderManagementSystem {
                     riskCheckOrder, positionTracker, orderStateManager, original.getStrategyId(), listingId)) {
                 positionTracker.removeStrategyLeaves(
                         original.getStrategyId(), listingId, original.getSide(), original.getLeavesQty());
-                positionTracker.addStrategyLeaves(
-                        original.getStrategyId(), listingId, original.getSide(), modify.decoder.size());
+                positionTracker.addStrategyLeaves(original.getStrategyId(), listingId, original.getSide(), newLeaves);
                 original.modify(modify.decoder.price(), modify.decoder.size());
                 delegate.onModify(modify);
             } else {
@@ -345,6 +349,7 @@ public final class OrderManagementSystem {
                     .timestampRecv(0)
                     .fee(OrderExecutionReportDecoder.feeNullValue());
             syntheticReject.encoder.flags().clear();
+            syntheticReject.encoder.liquidity(Liquidity.NULL_VAL);
             final IntentResolver resolver = resolvers.get(original.getStrategyId());
             if (resolver != null) {
                 resolver.onExecutionReport(

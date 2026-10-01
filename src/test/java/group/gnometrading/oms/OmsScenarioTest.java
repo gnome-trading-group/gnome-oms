@@ -138,12 +138,29 @@ class OmsScenarioTest {
         assertEquals(15L, pos.leavesBuyQty);
         assertEquals(0, h.sink.modifies.size()); // no second modify emitted
 
-        // Step 4: Modify ack (NEW exec type confirms modify)
-        h.injectAck(counter, 5); // ack for the modify
-        // After ack, slot is LIVE at 101@20
+        // Step 4: Modify ack. FIX: order qty 20, cum 5, so 15 is working.
+        h.injectAck(counter, 15);
         h.sink.clear();
-        h.submitBidIntent(101L, 20L); // same price/size = no action
+
+        // Step 5: the strategy still wants 20 resting, but only 15 is. Intent size is resting size,
+        // so the OMS tops it back up, sending the FIX order quantity: 20 resting + 5 filled.
+        h.submitBidIntent(101L, 20L);
+        assertEquals(1, h.sink.modifies.size());
+        assertEquals(25L, h.sink.modifies.get(0).size());
+        assertEquals(20L, h.getPosition(OmsTestHarness.LISTING_ID).leavesBuyQty);
+    }
+
+    @Test
+    void scenario_intentMatchingWhatIsStillResting_SendsNothing() {
+        long counter = h.submitBidIntent(100L, 10L);
+        h.injectAck(counter, 10);
+        h.injectFill(counter, 3, 100, 3, 7);
+        h.sink.clear();
+
+        // 7 is resting; an intent for 7 at the same price is already satisfied.
+        h.submitBidIntent(100L, 7L);
         assertEquals(0, h.sink.modifies.size());
+        assertEquals(0, h.sink.newOrders.size());
     }
 
     /**
