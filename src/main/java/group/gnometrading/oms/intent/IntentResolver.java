@@ -14,12 +14,14 @@ import group.gnometrading.schemas.OrderFlagsDecoder;
 import group.gnometrading.schemas.OrderType;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.TimeInForce;
+import java.util.function.IntPredicate;
 import java.util.function.LongSupplier;
 
 public final class IntentResolver {
 
     private final LongSupplier oidSupplier;
     private final int strategyId;
+    private final IntPredicate nativeModifyByListing;
     private final Order pendingOrder = new Order();
     private final CancelOrder pendingCancel = new CancelOrder();
     private final ModifyOrder pendingModify = new ModifyOrder();
@@ -28,9 +30,14 @@ public final class IntentResolver {
     private final LongHashMap<OrderSlot> bidSlots = new LongHashMap<>(4);
     private final LongHashMap<OrderSlot> askSlots = new LongHashMap<>(4);
 
-    public IntentResolver(LongSupplier oidSupplier, int strategyId) {
+    /**
+     * @param nativeModifyByListing whether a listing's venue can change a working order in place; asked
+     *     once per listing, when its slots are created
+     */
+    public IntentResolver(LongSupplier oidSupplier, int strategyId, IntPredicate nativeModifyByListing) {
         this.oidSupplier = oidSupplier;
         this.strategyId = strategyId;
+        this.nativeModifyByListing = nativeModifyByListing;
     }
 
     public void resolve(Intent intent, int listingId, ActionSink handler) {
@@ -113,9 +120,7 @@ public final class IntentResolver {
                         slot.onCancelSubmitted();
                     } else if (qPrice != slot.getActivePrice() || qSize != slot.getRestingQty()) {
                         slot.clearQueuedIntent();
-                        final long orderQty = slot.orderQtyForResting(qSize);
-                        slot.onModifySubmitted(qPrice, orderQty);
-                        emitModify(exchangeId, securityId, slot, qPrice, orderQty, qFlags, handler);
+                        changeLiveOrder(exchangeId, securityId, slot, qPrice, qSize, qFlags, handler);
                     } else {
                         slot.clearQueuedIntent();
                     }
@@ -149,7 +154,12 @@ public final class IntentResolver {
                     }
                 } else if (slot.getState() == OrderSlot.State.PENDING_CANCEL) {
                     slot.onCancelRejected();
-                    if (slot.hasQueuedIntent()) {
+                    if (!slot.supportsNativeModify()) {
+                        // Without native modify the queued intent is the replacement whose cancel was just
+                        // refused. Re-sending it would cancel again and loop against a venue that keeps
+                        // refusing (e.g. a minimum order age), so wait for the strategy's next intent.
+                        slot.clearQueuedIntent();
+                    } else if (slot.hasQueuedIntent()) {
                         processQueuedIntentOnLive(exchangeId, securityId, slot, handler);
                     }
                 }
@@ -187,9 +197,7 @@ public final class IntentResolver {
                     emitCancel(exchangeId, securityId, slot, handler);
                     slot.onCancelSubmitted();
                 } else if (slot.getActivePrice() != snappedPrice || slot.getRestingQty() != desiredSize) {
-                    final long orderQty = slot.orderQtyForResting(desiredSize);
-                    slot.onModifySubmitted(snappedPrice, orderQty);
-                    emitModify(exchangeId, securityId, slot, snappedPrice, orderQty, flags, handler);
+                    changeLiveOrder(exchangeId, securityId, slot, snappedPrice, desiredSize, flags, handler);
                 }
             }
         }
@@ -204,9 +212,33 @@ public final class IntentResolver {
             emitCancel(exchangeId, securityId, slot, handler);
             slot.onCancelSubmitted();
         } else if (qPrice != slot.getActivePrice() || qSize != slot.getRestingQty()) {
-            final long orderQty = slot.orderQtyForResting(qSize);
-            emitModify(exchangeId, securityId, slot, qPrice, orderQty, qFlags, handler);
-            slot.onModifySubmitted(qPrice, orderQty);
+            changeLiveOrder(exchangeId, securityId, slot, qPrice, qSize, qFlags, handler);
+        }
+    }
+
+    /**
+     * Moves a live order to {@code price} with {@code restingQty} left working. The slot's state advances
+     * before the action is emitted because a risk rejection reports back synchronously, and must find
+     * the slot pending to unwind it.
+     */
+    private void changeLiveOrder(
+            int exchangeId,
+            long securityId,
+            OrderSlot slot,
+            long price,
+            long restingQty,
+            short flags,
+            ActionSink handler) {
+        if (slot.supportsNativeModify()) {
+            final long orderQty = slot.orderQtyForResting(restingQty);
+            slot.onModifySubmitted(price, orderQty);
+            emitModify(exchangeId, securityId, slot, price, orderQty, flags, handler);
+        } else {
+            // The CANCEL branch of onExecutionReport submits the queued target as a new order. Sized as
+            // resting quantity, it is right whatever filled before the cancel landed.
+            slot.queueIntent(price, restingQty, flags);
+            slot.onCancelSubmitted();
+            emitCancel(exchangeId, securityId, slot, handler);
         }
     }
 
@@ -291,10 +323,10 @@ public final class IntentResolver {
         handler.onNewOrder(pendingOrder);
     }
 
-    private OrderSlot getOrCreateSlot(LongHashMap<OrderSlot> slots, long listingId) {
+    private OrderSlot getOrCreateSlot(LongHashMap<OrderSlot> slots, int listingId) {
         OrderSlot slot = slots.get(listingId);
         if (slot == null) {
-            slot = new OrderSlot();
+            slot = new OrderSlot(nativeModifyByListing.test(listingId));
             slots.put(listingId, slot);
         }
         return slot;

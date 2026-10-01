@@ -7,6 +7,7 @@ import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.oms.action.ActionSink;
 import group.gnometrading.oms.intent.IntentResolver;
+import group.gnometrading.oms.intent.VenueCapabilities;
 import group.gnometrading.oms.pnl.PriceSlotRegistry;
 import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.Position;
@@ -24,6 +25,7 @@ import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.schemas.OrderExecutionReportDecoder;
 import group.gnometrading.schemas.OrderStatus;
 import group.gnometrading.schemas.RejectReason;
+import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.ListingSpec;
 
 public final class OrderManagementSystem {
@@ -152,10 +154,16 @@ public final class OrderManagementSystem {
     public IntentResolver getOrCreateResolver(int strategyId) {
         IntentResolver resolver = resolvers.get(strategyId);
         if (resolver == null) {
-            resolver = new IntentResolver(this::nextOid, strategyId);
+            resolver = new IntentResolver(this::nextOid, strategyId, this::listingSupportsNativeModify);
             resolvers.put(strategyId, resolver);
         }
         return resolver;
+    }
+
+    private boolean listingSupportsNativeModify(final int listingId) {
+        final Listing listing = securityMaster.getListing(listingId);
+        return listing != null
+                && VenueCapabilities.supportsNativeModify(listing.exchange().exchangeCode());
     }
 
     private void checkMarketRisk(final int strategyId, final int listingId, final ActionSink sink) {
@@ -274,6 +282,9 @@ public final class OrderManagementSystem {
                     .fee(OrderExecutionReportDecoder.feeNullValue());
             syntheticReject.encoder.flags().clear();
             syntheticReject.encoder.liquidity(Liquidity.NULL_VAL);
+            // Published before the resolver sees it: anything the resolver does next can re-enter this
+            // sink and re-encode syntheticReject.
+            delegate.onExecReport(syntheticReject);
             final IntentResolver resolver = resolvers.get(order.getClientOidStrategyId());
             if (resolver != null) {
                 resolver.onExecutionReport(
@@ -282,9 +293,8 @@ public final class OrderManagementSystem {
                         listingId,
                         syntheticReject,
                         order.decoder.side(),
-                        delegate);
+                        this);
             }
-            delegate.onExecReport(syntheticReject);
         }
 
         @Override
@@ -350,6 +360,7 @@ public final class OrderManagementSystem {
                     .fee(OrderExecutionReportDecoder.feeNullValue());
             syntheticReject.encoder.flags().clear();
             syntheticReject.encoder.liquidity(Liquidity.NULL_VAL);
+            delegate.onExecReport(syntheticReject);
             final IntentResolver resolver = resolvers.get(original.getStrategyId());
             if (resolver != null) {
                 resolver.onExecutionReport(
@@ -358,9 +369,8 @@ public final class OrderManagementSystem {
                         listingId,
                         syntheticReject,
                         original.getSide(),
-                        delegate);
+                        this);
             }
-            delegate.onExecReport(syntheticReject);
         }
 
         private boolean passesExchangeConstraints(int listingId, long price, long size) {

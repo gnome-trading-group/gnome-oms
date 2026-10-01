@@ -11,7 +11,7 @@ class OrderSlotTest {
 
     @BeforeEach
     void setUp() {
-        slot = new OrderSlot();
+        slot = new OrderSlot(true);
     }
 
     // --- initial state ---
@@ -179,7 +179,7 @@ class OrderSlotTest {
 
     @Test
     void restingQty_IsOrderQtyLessFillsSeen() {
-        final OrderSlot slot = new OrderSlot();
+        final OrderSlot slot = new OrderSlot(true);
         slot.onNewSubmitted(1L, 100L, 10L, (short) 0);
         slot.onNewAcked();
         slot.onCumulativeQty(3L);
@@ -191,7 +191,7 @@ class OrderSlotTest {
 
     @Test
     void cumulativeQty_NeverRegresses() {
-        final OrderSlot slot = new OrderSlot();
+        final OrderSlot slot = new OrderSlot(true);
         slot.onNewSubmitted(1L, 100L, 10L, (short) 0);
         slot.onCumulativeQty(5L);
         slot.onCumulativeQty(3L); // a stale or replayed report
@@ -201,7 +201,7 @@ class OrderSlotTest {
 
     @Test
     void confirmedModify_KeepsFillsAndAdoptsNewOrderQty() {
-        final OrderSlot slot = new OrderSlot();
+        final OrderSlot slot = new OrderSlot(true);
         slot.onNewSubmitted(1L, 100L, 10L, (short) 0);
         slot.onNewAcked();
         slot.onCumulativeQty(3L);
@@ -214,7 +214,7 @@ class OrderSlotTest {
 
     @Test
     void newSubmissionAndTerminal_ResetFills() {
-        final OrderSlot slot = new OrderSlot();
+        final OrderSlot slot = new OrderSlot(true);
         slot.onNewSubmitted(1L, 100L, 10L, (short) 0);
         slot.onCumulativeQty(4L);
         slot.onTerminal();

@@ -80,13 +80,23 @@ class OmsModelBasedTest {
         final Map<Long, ModelOrder> orders = new HashMap<>();
         final Map<Long, ModelOrder> takeOrders = new HashMap<>();
         final Map<Integer, ModelPosition> positions = new HashMap<>();
+        final boolean nativeModify;
 
         ReferenceModel() {
-            this(new long[] {0});
+            this(new long[] {0}, true);
+        }
+
+        ReferenceModel(boolean nativeModify) {
+            this(new long[] {0}, nativeModify);
         }
 
         ReferenceModel(long[] sharedCounter) {
+            this(sharedCounter, true);
+        }
+
+        ReferenceModel(long[] sharedCounter, boolean nativeModify) {
             this.oidCounter = sharedCounter;
+            this.nativeModify = nativeModify;
         }
 
         void processTakeIntent(Side side, long securityId, int listingId, long size) {
@@ -143,6 +153,12 @@ class OmsModelBasedTest {
         // {@code restingQty} is what the strategy wants working; the modify carries the FIX order
         // quantity, which adds back the fills already seen.
         private void doModify(Side side, long price, long restingQty, ModelSlot slot) {
+            if (!nativeModify) {
+                // Cancel-then-new: the target waits in the queue until the cancel is confirmed.
+                slot.queue(price, restingQty);
+                slot.state = ModelSlot.State.PENDING_CANCEL;
+                return;
+            }
             ModelOrder order = orders.get(slot.activeOid);
             ModelPosition pos = getOrCreatePosition(order.listingId);
             pos.removeLeaves(side, order.leavesQty);
@@ -238,7 +254,11 @@ class OmsModelBasedTest {
                         if (slot.hasQueued) fireQueuedOnLive(side, slot, order);
                     } else if (slot.state == ModelSlot.State.PENDING_CANCEL) {
                         slot.state = ModelSlot.State.LIVE;
-                        if (slot.hasQueued) fireQueuedOnLive(side, slot, order);
+                        if (!nativeModify) {
+                            slot.clearQueue();
+                        } else if (slot.hasQueued) {
+                            fireQueuedOnLive(side, slot, order);
+                        }
                     }
                 }
                 default -> {
@@ -380,6 +400,14 @@ class OmsModelBasedTest {
     }
 
     @Test
+    void modelBased_cancelReplaceVenue_bothSides_300trials() {
+        Random rng = new Random(24680L);
+        for (int t = 0; t < 300; t++) {
+            runTrial(rng, 80, true, true, false, "cancelReplace trial=" + t);
+        }
+    }
+
+    @Test
     void modelBased_mixedMakeAndTake_200trials() {
         runMixedMakeAndTakeTrials(new Random(55123L), 200, 80);
     }
@@ -400,13 +428,22 @@ class OmsModelBasedTest {
 
     private void runTrials(Random rng, int trials, int events, boolean useBid, boolean useAsk) {
         for (int t = 0; t < trials; t++) {
-            runTrial(rng, events, useBid, useAsk, "trial=" + t);
+            runTrial(rng, events, useBid, useAsk, true, "trial=" + t);
         }
     }
 
-    private void runTrial(Random rng, int events, boolean useBid, boolean useAsk, String ctx) {
+    private void runTrial(Random rng, int events, boolean useBid, boolean useAsk, boolean nativeModify, String ctx) {
         OmsTestHarness h = new OmsTestHarness();
-        ReferenceModel model = new ReferenceModel();
+        if (!nativeModify) {
+            h.stubListing(
+                    OmsTestHarness.EXCHANGE_ID,
+                    OmsTestHarness.SECURITY_ID,
+                    OmsTestHarness.LISTING_ID,
+                    0,
+                    0,
+                    OmsTestHarness.CANCEL_REPLACE_EXCHANGE_CODE);
+        }
+        ReferenceModel model = new ReferenceModel(nativeModify);
         List<OutstandingOrder> outstanding = new ArrayList<>();
         Map<Long, OutstandingOrder> byOid = new HashMap<>();
 
@@ -499,6 +536,9 @@ class OmsModelBasedTest {
                     evCtx);
             assertLeavesMatchVenue(
                     outstanding, OmsTestHarness.LISTING_ID, h.getPosition(OmsTestHarness.LISTING_ID), evCtx);
+            if (!nativeModify) {
+                assertEquals(0, h.sink.modifies.size(), evCtx + " — modify sent to a venue without native modify");
+            }
         }
     }
 

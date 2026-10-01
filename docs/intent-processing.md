@@ -96,8 +96,9 @@ The queued intent fires as soon as the slot transitions back to LIVE:
 - On a **NEW ack**: if the slot was `PENDING_MODIFY`, it confirms the modify and moves to
   LIVE; otherwise it moves from `PENDING_NEW` to LIVE. Then the queued intent fires
   immediately — emitting a modify, cancel, or nothing depending on what was queued.
-- On a **CANCEL_REJECT**: the cancel was rejected by the exchange; the slot reverts to LIVE
-  and the queued intent fires.
+- On a **CANCEL_REJECT**: the cancel or modify was rejected by the exchange; the slot reverts
+  to LIVE and the queued intent fires. The exception is a refused cancel on a venue without
+  native modify (see below): its queued intent is dropped, and the strategy's next intent retries.
 
 If nothing is queued when the slot becomes LIVE, no action is taken.
 
@@ -115,20 +116,37 @@ Decision table by current slot state and desired outcome:
 |-----------------|-----------------------------------------------------------|--------------------------------------|
 | EMPTY           | Submit new order → PENDING_NEW                            | Nothing                              |
 | PENDING_NEW     | Queue intent (price, size)                                | Queue cancel intent (0, 0)           |
-| LIVE            | Same price and resting size as what is working → nothing. Different → modify (order qty = size + filled) → PENDING_MODIFY. | Cancel → PENDING_CANCEL |
+| LIVE            | Same price and resting size as what is working → nothing. Different → modify (order qty = size + filled) → PENDING_MODIFY; on a venue without native modify, queue (price, size) and cancel → PENDING_CANCEL. | Cancel → PENDING_CANCEL |
 | PENDING_MODIFY  | Queue intent (price, size)                                | Queue cancel intent (0, 0)           |
 | PENDING_CANCEL  | Queue intent (price, size)                                | Queue cancel intent (0, 0)           |
 
 When the slot is LIVE and a modify is warranted, `RiskCheckingSink.onModify` intercepts
 the modify before it reaches the action sink. If it passes risk checks, position leaves
 are updated immediately (remove the old leaves, add the new ones: order qty − filled) and
-`TrackedOrder` is updated.
+`TrackedOrder` is updated. If it fails, a synthetic `CANCEL_REJECT` is published and then
+injected back into the resolver, which fires any queued intent.
 
 Because the comparison is against what is still resting, a partial fill that leaves less
 working than the strategy asked for is topped back up the next time the strategy expresses that
 intent: with 3 of 10 filled, an unchanged intent for 10 sends a modify to order qty 13.
-If it fails, a synthetic `CANCEL_REJECT` is injected back into the resolver, which then
-fires any queued intent.
+
+### Venues without native modify
+
+Some venues cannot change a working order (Polymarket's CLOB: orders are signed and immutable).
+`VenueCapabilities.supportsNativeModify(exchangeCode)` says which venues can; each slot asks once,
+when it is created, via the listing's exchange. Unknown venues are treated as unable, since the
+fallback is correct everywhere.
+
+On those venues, where a modify would be sent the resolver instead queues the target (price,
+resting size) and cancels the order. When the `CANCEL` arrives, the existing CANCEL branch submits
+the target as a new order with a new client OID. The new order has nothing filled, so its size is
+simply the resting size the strategy wants, whatever filled before the cancel landed. It is an
+ordinary new order, so risk and exchange constraints apply to it. There is a gap with no order
+working between the cancel and the new order's acknowledgement.
+
+If the venue refuses the cancel, the slot returns to LIVE and the queued target is dropped rather
+than retried straight away. Retrying would re-send the cancel, and a venue that keeps refusing
+(e.g. a minimum order age) would turn that into a tight loop. The strategy's next intent retries.
 
 ---
 

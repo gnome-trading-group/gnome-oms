@@ -11,6 +11,9 @@ package group.gnometrading.oms.intent;
  * <p>State machine:
  * EMPTY → PENDING_NEW → LIVE → PENDING_MODIFY → LIVE
  *                            → PENDING_CANCEL → EMPTY
+ *
+ * <p>On a venue without native modify a slot never enters PENDING_MODIFY: changing a live order
+ * cancels it and submits the target as a new order once the cancel is confirmed.
  */
 public final class OrderSlot {
 
@@ -21,6 +24,8 @@ public final class OrderSlot {
         PENDING_MODIFY,
         PENDING_CANCEL
     }
+
+    private final boolean nativeModify;
 
     private State state = State.EMPTY;
     private long activeClientOid;
@@ -38,6 +43,14 @@ public final class OrderSlot {
     private long queuedSize;
     private short queuedFlags;
     private boolean hasQueuedIntent;
+
+    public OrderSlot(boolean nativeModify) {
+        this.nativeModify = nativeModify;
+    }
+
+    public boolean supportsNativeModify() {
+        return nativeModify;
+    }
 
     public State getState() {
         return state;

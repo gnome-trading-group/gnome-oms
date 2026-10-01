@@ -44,6 +44,8 @@ public final class OmsTestHarness {
     static final int SECURITY_ID = 42;
     static final int LISTING_ID = 100;
     static final int STRATEGY_ID = 7;
+    static final String NATIVE_MODIFY_EXCHANGE_CODE = "KALSHI";
+    static final String CANCEL_REPLACE_EXCHANGE_CODE = "POLYMARKET_INTL";
 
     final OrderManagementSystem oms;
     final RecordingSink sink;
@@ -78,18 +80,26 @@ public final class OmsTestHarness {
     }
 
     void stubListing(int exchangeId, int securityId, int listingId, long lotSize, long minNotional) {
+        stubListing(exchangeId, securityId, listingId, lotSize, minNotional, NATIVE_MODIFY_EXCHANGE_CODE);
+    }
+
+    void stubListing(
+            int exchangeId, int securityId, int listingId, long lotSize, long minNotional, String exchangeCode) {
         Listing listing = new Listing(
                 listingId,
-                new Exchange(exchangeId, "TEST", "US", null),
-                new Security(securityId, "SYM", 1),
+                new Exchange(exchangeId, exchangeCode, "Test", "US", null),
+                new Security(securityId, "SYM", null, null, null, null, null, null, false, false, 0L, 0L, true, 0),
                 "SYM",
                 "SYM");
         when(securityMaster.getListing(exchangeId, securityId)).thenReturn(listing);
-        when(securityMaster.getListingSpec(listingId)).thenReturn(new ListingSpec(listingId, 1, lotSize, minNotional));
+        when(securityMaster.getListing(listingId)).thenReturn(listing);
+        when(securityMaster.getListingSpec(listingId))
+                .thenReturn(new ListingSpec(listingId, 1, lotSize, minNotional, 1));
     }
 
     void stubListingSpec(int listingId, long lotSize, long minNotional) {
-        when(securityMaster.getListingSpec(listingId)).thenReturn(new ListingSpec(listingId, 1, lotSize, minNotional));
+        when(securityMaster.getListingSpec(listingId))
+                .thenReturn(new ListingSpec(listingId, 1, lotSize, minNotional, 1));
     }
 
     long submitBidIntent(long price, long size) {

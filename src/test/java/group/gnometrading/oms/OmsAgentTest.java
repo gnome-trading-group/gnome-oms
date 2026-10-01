@@ -2,6 +2,7 @@ package group.gnometrading.oms;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.when;
 
 import group.gnometrading.logging.NullLogger;
@@ -91,11 +92,12 @@ class OmsAgentTest {
 
         Listing listing = new Listing(
                 LISTING_ID,
-                new Exchange(EXCHANGE_ID, "TEST", "US", null),
-                new Security(SECURITY_ID, "SYM", 1),
+                new Exchange(EXCHANGE_ID, "KALSHI", "Test", "US", null),
+                new Security(SECURITY_ID, "SYM", null, null, null, null, null, null, false, false, 0L, 0L, true, 0),
                 "SYM",
                 "SYM");
         when(securityMaster.getListing(EXCHANGE_ID, SECURITY_ID)).thenReturn(listing);
+        lenient().when(securityMaster.getListing(LISTING_ID)).thenReturn(listing);
     }
 
     // --- doWork ---

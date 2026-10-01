@@ -33,7 +33,7 @@ class IntentResolverTest {
     @BeforeEach
     void setUp() {
         oidCounter = new AtomicLong(0);
-        resolver = new IntentResolver(oidCounter::incrementAndGet, STRATEGY_ID);
+        resolver = new IntentResolver(oidCounter::incrementAndGet, STRATEGY_ID, listingId -> true);
         sink = new CapturingSink();
     }
 
@@ -839,6 +839,184 @@ class IntentResolverTest {
 
     // --- helpers ---
 
+    // --- venues without native modify: cancel, then new order ---
+
+    @Test
+    void cancelReplace_priceChangeCancelsInsteadOfModifying() {
+        useCancelReplaceVenue();
+        long oid = goLiveReturningOid(100L, 10L);
+
+        resolve(101L, 10L, nullPrice(), 0L);
+
+        assertEquals(0, sink.modifies.size());
+        assertEquals(List.of(oid), sink.cancels);
+        assertEquals(0, sink.newOrders.size());
+    }
+
+    @Test
+    void cancelReplace_cancelAckSubmitsTargetAsNewOrder() {
+        useCancelReplaceVenue();
+        long oid = goLiveReturningOid(100L, 10L);
+        resolve(101L, 10L, nullPrice(), 0L);
+        sink.clear();
+
+        report(oid, ExecType.CANCEL, 0L);
+
+        assertEquals(1, sink.newOrders.size());
+        NewOrderCapture replacement = sink.newOrders.get(0);
+        assertNotEquals(oid, replacement.clientOidCounter);
+        assertEquals(101L, replacement.price);
+        assertEquals(10L, replacement.size);
+    }
+
+    @Test
+    void cancelReplace_afterPartialFillReplacementRestsDesiredSize() {
+        useCancelReplaceVenue();
+        long oid = goLiveReturningOid(100L, 10L);
+        report(oid, ExecType.PARTIAL_FILL, 4L);
+
+        resolve(101L, 10L, nullPrice(), 0L);
+        report(oid, ExecType.CANCEL, 4L);
+
+        // A fresh order has nothing filled, so its size is exactly the resting size the strategy wants.
+        assertEquals(1, sink.newOrders.size());
+        assertEquals(10L, sink.newOrders.get(0).size);
+    }
+
+    @Test
+    void cancelReplace_fillsRacingTheCancelDoNotResizeTheReplacement() {
+        useCancelReplaceVenue();
+        long oid = goLiveReturningOid(100L, 10L);
+        resolve(101L, 10L, nullPrice(), 0L);
+
+        report(oid, ExecType.PARTIAL_FILL, 3L);
+        report(oid, ExecType.CANCEL, 3L);
+
+        assertEquals(1, sink.newOrders.size());
+        assertEquals(10L, sink.newOrders.get(0).size);
+    }
+
+    @Test
+    void cancelReplace_sizeChangeAloneAlsoCancels() {
+        useCancelReplaceVenue();
+        long oid = goLiveReturningOid(100L, 10L);
+
+        resolve(100L, 5L, nullPrice(), 0L);
+
+        assertEquals(List.of(oid), sink.cancels);
+        assertEquals(0, sink.modifies.size());
+    }
+
+    @Test
+    void cancelReplace_latestIntentWhileCancelPendingWins() {
+        useCancelReplaceVenue();
+        long oid = goLiveReturningOid(100L, 10L);
+        resolve(101L, 10L, nullPrice(), 0L);
+        resolve(102L, 7L, nullPrice(), 0L);
+        sink.clear();
+
+        report(oid, ExecType.CANCEL, 0L);
+
+        assertEquals(1, sink.newOrders.size());
+        assertEquals(102L, sink.newOrders.get(0).price);
+        assertEquals(7L, sink.newOrders.get(0).size);
+    }
+
+    @Test
+    void cancelReplace_fullFillBeforeCancelLandsSubmitsNothing() {
+        useCancelReplaceVenue();
+        long oid = goLiveReturningOid(100L, 10L);
+        resolve(101L, 10L, nullPrice(), 0L);
+        sink.clear();
+
+        report(oid, ExecType.FILL, 10L);
+
+        assertEquals(0, sink.newOrders.size());
+        assertEquals(0, sink.cancels.size());
+    }
+
+    @Test
+    void cancelReplace_cancelRejectWaitsForNextIntent() {
+        useCancelReplaceVenue();
+        long oid = goLiveReturningOid(100L, 10L);
+        resolve(101L, 10L, nullPrice(), 0L);
+        sink.clear();
+
+        report(oid, ExecType.CANCEL_REJECT, 0L);
+
+        assertEquals(0, sink.cancels.size(), "a refused cancel must not be re-sent straight away");
+        assertEquals(0, sink.newOrders.size());
+
+        resolve(101L, 10L, nullPrice(), 0L);
+
+        assertEquals(List.of(oid), sink.cancels);
+    }
+
+    @Test
+    void cancelReplace_queuedIntentOnAckCancels() {
+        useCancelReplaceVenue();
+        resolve(100L, 10L, nullPrice(), 0L);
+        long oid = sink.newOrders.get(0).clientOidCounter;
+        resolve(101L, 10L, nullPrice(), 0L);
+        sink.clear();
+
+        ack(oid, Side.Bid);
+
+        assertEquals(List.of(oid), sink.cancels);
+        assertEquals(0, sink.modifies.size());
+    }
+
+    @Test
+    void cancelReplace_cancelToZeroSubmitsNothingAfterAck() {
+        useCancelReplaceVenue();
+        long oid = goLiveReturningOid(100L, 10L);
+        resolve(nullPrice(), 0L, nullPrice(), 0L);
+        sink.clear();
+
+        report(oid, ExecType.CANCEL, 0L);
+
+        assertEquals(0, sink.newOrders.size());
+    }
+
+    @Test
+    void nativeModifyCapabilityAskedOncePerSlot() {
+        AtomicLong lookups = new AtomicLong();
+        resolver = new IntentResolver(oidCounter::incrementAndGet, STRATEGY_ID, listingId -> {
+            lookups.incrementAndGet();
+            return true;
+        });
+
+        resolve(100L, 10L, 101L, 5L);
+        resolve(100L, 10L, 101L, 5L);
+        resolve(99L, 10L, 102L, 5L);
+
+        assertEquals(2, lookups.get(), "one lookup each for the bid and ask slot");
+    }
+
+    @Test
+    void modifyRejectedSynchronouslyFromQueuedIntentLeavesSlotLive() {
+        long oid = goLiveReturningOid(100L, 10L);
+        resolve(101L, 10L, nullPrice(), 0L);
+        resolve(102L, 10L, nullPrice(), 0L);
+        sink.clear();
+
+        // The venue refuses the first modify; the queued intent's modify is then refused synchronously,
+        // as a risk rejection would be.
+        resolver.onExecutionReport(
+                EXCHANGE_ID,
+                SECURITY_ID,
+                LISTING_ID,
+                buildReport(oid, ExecType.CANCEL_REJECT, 100L, 10L),
+                Side.Bid,
+                new RejectingOnModifySink(resolver, sink, oid));
+        sink.clear();
+
+        resolve(103L, 10L, nullPrice(), 0L);
+
+        assertEquals(1, sink.modifies.size(), "slot must be LIVE, not stuck PENDING_MODIFY");
+        assertEquals(103L, sink.modifies.get(0).price());
+    }
+
     private void resolve(long bidPrice, long bidSize, long askPrice, long askSize) {
         resolver.resolve(buildIntent(SECURITY_ID, bidPrice, bidSize, askPrice, askSize), LISTING_ID, sink);
     }
@@ -904,6 +1082,24 @@ class IntentResolverTest {
         sink.clear();
         ack(oid, Side.Bid);
         sink.clear();
+    }
+
+    private void useCancelReplaceVenue() {
+        resolver = new IntentResolver(oidCounter::incrementAndGet, STRATEGY_ID, listingId -> false);
+    }
+
+    private long goLiveReturningOid(long bidPrice, long bidSize) {
+        resolve(bidPrice, bidSize, nullPrice(), 0L);
+        long oid = sink.newOrders.get(0).clientOidCounter;
+        ack(oid, Side.Bid);
+        sink.clear();
+        return oid;
+    }
+
+    private void report(long clientOidCounter, ExecType type, long cumulativeQty) {
+        OrderExecutionReport report = buildReport(clientOidCounter, type, 100L, 0L);
+        report.encoder.cumulativeQty(cumulativeQty);
+        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, LISTING_ID, report, Side.Bid, sink);
     }
 
     private static long nullPrice() {

@@ -68,11 +68,12 @@ class OrderManagementSystemTest {
 
         Listing listing = new Listing(
                 LISTING_ID,
-                new Exchange(EXCHANGE_ID, "TEST", "US", null),
-                new Security(SECURITY_ID, "SYM", 1),
+                new Exchange(EXCHANGE_ID, "KALSHI", "Test", "US", null),
+                new Security(SECURITY_ID, "SYM", null, null, null, null, null, null, false, false, 0L, 0L, true, 0),
                 "SYM",
                 "SYM");
         lenient().when(securityMaster.getListing(EXCHANGE_ID, SECURITY_ID)).thenReturn(listing);
+        lenient().when(securityMaster.getListing(LISTING_ID)).thenReturn(listing);
     }
 
     // --- lotSize constraint ---
@@ -209,7 +210,7 @@ class OrderManagementSystemTest {
 
     private void stubSpec(long lotSize, long minNotional) {
         when(securityMaster.getListingSpec(LISTING_ID))
-                .thenReturn(new ListingSpec(LISTING_ID, 1, lotSize, minNotional));
+                .thenReturn(new ListingSpec(LISTING_ID, 1, lotSize, minNotional, 1));
     }
 
     private void submitIntent(long price, long size) {

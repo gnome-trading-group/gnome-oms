@@ -1,12 +1,15 @@
 package group.gnometrading.oms;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
 import group.gnometrading.oms.position.Position;
 import group.gnometrading.oms.risk.RiskEngine;
 import group.gnometrading.oms.risk.policy.MaxOrderSizePolicy;
 import group.gnometrading.schemas.Side;
+import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -282,5 +285,96 @@ class OmsScenarioTest {
         assertEquals(1, h2.sink.newOrders.size());
         assertEquals(102L, h2.sink.newOrders.get(0).price());
         assertEquals(8L, h2.sink.newOrders.get(0).size());
+    }
+
+    /** A venue without native modify: moving a live order cancels it, then submits the target fresh. */
+    @Test
+    void scenario_cancelReplaceVenue_moveCancelsThenSubmitsNewOrder() {
+        useCancelReplaceVenue();
+        long first = h.submitBidIntent(100L, 10L);
+        h.injectAck(first, 10);
+        h.sink.clear();
+
+        h.submitBidIntent(101L, 10L);
+        assertEquals(List.of(first), h.sink.cancels);
+        assertEquals(0, h.sink.modifies.size());
+        assertEquals(0, h.sink.newOrders.size());
+        assertEquals(10L, h.getPosition(OmsTestHarness.LISTING_ID).leavesBuyQty);
+
+        h.injectCancel(first);
+
+        assertEquals(1, h.sink.newOrders.size());
+        long second = h.sink.lastNewOrderCounter();
+        assertNotEquals(first, second);
+        assertEquals(101L, h.sink.newOrders.get(0).price());
+        assertEquals(10L, h.sink.newOrders.get(0).size());
+        assertNull(h.getTrackedOrder(first));
+        assertNotNull(h.getTrackedOrder(second));
+        assertEquals(10L, h.getPosition(OmsTestHarness.LISTING_ID).leavesBuyQty);
+    }
+
+    @Test
+    void scenario_cancelReplaceVenue_partialFillThenMoveRestsDesiredSize() {
+        useCancelReplaceVenue();
+        long first = h.submitBidIntent(100L, 10L);
+        h.injectAck(first, 10);
+        h.injectFill(first, 4, 100, 4, 6);
+        h.sink.clear();
+
+        h.submitBidIntent(101L, 10L);
+        h.injectCancel(first);
+
+        assertEquals(1, h.sink.newOrders.size());
+        assertEquals(10L, h.sink.newOrders.get(0).size());
+        Position pos = h.getPosition(OmsTestHarness.LISTING_ID);
+        assertEquals(4L, pos.netQuantity);
+        assertEquals(10L, pos.leavesBuyQty);
+    }
+
+    /** The replacement is an ordinary new order, so exchange constraints and risk still apply to it. */
+    @Test
+    void scenario_cancelReplaceVenue_replacementIsRiskChecked() {
+        useCancelReplaceVenue();
+        h.stubListingSpec(OmsTestHarness.LISTING_ID, 5, 0);
+        long first = h.submitBidIntent(100L, 10L);
+        h.injectAck(first, 10);
+        h.submitBidIntent(101L, 7L);
+        h.sink.clear();
+
+        h.injectCancel(first);
+
+        assertEquals(0, h.sink.newOrders.size(), "7 is not a multiple of the lot size");
+        assertEquals(0L, h.getPosition(OmsTestHarness.LISTING_ID).leavesBuyQty);
+
+        h.submitBidIntent(101L, 10L);
+        assertEquals(1, h.sink.newOrders.size(), "the rejected replacement must not wedge the slot");
+    }
+
+    @Test
+    void scenario_cancelReplaceVenue_cancelRejectWaitsForNextIntent() {
+        useCancelReplaceVenue();
+        long first = h.submitBidIntent(100L, 10L);
+        h.injectAck(first, 10);
+        h.submitBidIntent(101L, 10L);
+        h.sink.clear();
+
+        h.injectCancelReject(first);
+
+        assertEquals(0, h.sink.cancels.size());
+        assertEquals(0, h.sink.newOrders.size());
+        assertNotNull(h.getTrackedOrder(first));
+
+        h.submitBidIntent(101L, 10L);
+        assertEquals(List.of(first), h.sink.cancels);
+    }
+
+    private void useCancelReplaceVenue() {
+        h.stubListing(
+                OmsTestHarness.EXCHANGE_ID,
+                OmsTestHarness.SECURITY_ID,
+                OmsTestHarness.LISTING_ID,
+                0,
+                0,
+                OmsTestHarness.CANCEL_REPLACE_EXCHANGE_CODE);
     }
 }
