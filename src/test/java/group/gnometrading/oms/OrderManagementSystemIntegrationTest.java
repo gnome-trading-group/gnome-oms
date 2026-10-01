@@ -246,6 +246,77 @@ class OrderManagementSystemIntegrationTest {
     }
 
     @Test
+    void exchangeConstraint_offTickPrice_rejectsInvalidPrice() {
+        h.stubTickSize(OmsTestHarness.LISTING_ID, 10);
+
+        h.submitBidIntent(105L, 5L);
+
+        assertEquals(0, h.sink.newOrders.size());
+        assertEquals(1, h.sink.execReports.size());
+        assertEquals(ExecType.REJECT, h.sink.execReports.get(0).execType());
+        assertEquals(RejectReason.INVALID_PRICE, h.sink.execReports.get(0).rejectReason());
+        assertNull(h.getPosition(OmsTestHarness.LISTING_ID), "a rejected order adds no exposure");
+    }
+
+    @Test
+    void exchangeConstraint_onTickPrice_passes() {
+        h.stubTickSize(OmsTestHarness.LISTING_ID, 10);
+
+        h.submitBidIntent(110L, 5L);
+
+        assertEquals(1, h.sink.newOrders.size());
+        assertEquals(0, h.sink.execReports.size());
+    }
+
+    @Test
+    void exchangeConstraint_zeroTick_isNotChecked() {
+        h.stubTickSize(OmsTestHarness.LISTING_ID, 0);
+
+        h.submitBidIntent(105L, 5L);
+
+        assertEquals(1, h.sink.newOrders.size());
+    }
+
+    @Test
+    void exchangeConstraint_marketOrderHasNoPriceToCheck() {
+        h.stubTickSize(OmsTestHarness.LISTING_ID, 10);
+
+        h.submitTakeIntent(5L, Side.Bid);
+
+        assertEquals(1, h.sink.newOrders.size());
+        assertEquals(0, h.sink.execReports.size());
+    }
+
+    @Test
+    void exchangeConstraint_offTickModify_isRefusedAndOrderStaysWorking() {
+        h.stubTickSize(OmsTestHarness.LISTING_ID, 10);
+        final long counter = h.submitBidIntent(110L, 5L);
+        h.injectAck(counter, 5);
+        h.sink.clear();
+
+        h.submitBidIntent(115L, 5L);
+
+        assertEquals(0, h.sink.modifies.size());
+        assertEquals(1, h.sink.execReports.size());
+        assertEquals(ExecType.CANCEL_REJECT, h.sink.execReports.get(0).execType());
+        assertEquals(RejectReason.INVALID_PRICE, h.sink.execReports.get(0).rejectReason());
+
+        h.sink.clear();
+        h.submitBidIntent(120L, 5L);
+        assertEquals(1, h.sink.modifies.size(), "the slot is LIVE again, not stuck pending");
+        assertEquals(120L, h.sink.modifies.get(0).price());
+    }
+
+    @Test
+    void exchangeConstraint_lotFailureStillReportsInvalidSizeWhenPriceIsAlsoOffTick() {
+        h.stubListingSpec(OmsTestHarness.LISTING_ID, 10, 0);
+
+        h.submitBidIntent(105L, 7L);
+
+        assertEquals(RejectReason.INVALID_SIZE, h.sink.execReports.get(0).rejectReason());
+    }
+
+    @Test
     void exchangeConstraint_minNotional_rejectsLowNotional() {
         h.stubListingSpec(OmsTestHarness.LISTING_ID, 0, 1000);
 

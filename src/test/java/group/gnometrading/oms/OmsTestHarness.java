@@ -97,6 +97,10 @@ public final class OmsTestHarness {
                 .thenReturn(new ListingSpec(listingId, 1, lotSize, minNotional, 1));
     }
 
+    void stubTickSize(int listingId, long tickSize) {
+        when(securityMaster.getListingSpec(listingId)).thenReturn(new ListingSpec(listingId, tickSize, 0, 0, 1));
+    }
+
     void stubListingSpec(int listingId, long lotSize, long minNotional) {
         when(securityMaster.getListingSpec(listingId))
                 .thenReturn(new ListingSpec(listingId, 1, lotSize, minNotional, 1));

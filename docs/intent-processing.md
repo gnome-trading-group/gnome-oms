@@ -130,6 +130,22 @@ Because the comparison is against what is still resting, a partial fill that lea
 working than the strategy asked for is topped back up the next time the strategy expresses that
 intent: with 3 of 10 filled, an unchanged intent for 10 sends a modify to order qty 13.
 
+### Exchange constraints
+
+Before risk checks, every new order and modify (including a cancel-then-new replacement) is checked
+against the listing's `ListingSpec` from the security master. A zero field is not checked, and a
+listing with no spec passes everything.
+
+| Rule | Check | Reject reason |
+|---|---|---|
+| Lot size | size (a modify's: the new leaves) is a multiple of `lotSize` | `INVALID_SIZE` |
+| Tick size | price is a multiple of `tickSize`; market orders have no price and skip it | `INVALID_PRICE` |
+| Min notional | price × size ≥ `minNotional`; a market order uses the last trade price | `INVALID_SIZE` |
+
+The OMS does not round prices: strategies must send prices on the tick, and an off-tick intent is
+rejected like any other constraint failure. `tickSize` is the increment the venue accepts everywhere
+in its price range, so a price on it is never refused by the venue.
+
 ### Venues without native modify
 
 Some venues cannot change a working order (Polymarket's CLOB: orders are signed and immutable).

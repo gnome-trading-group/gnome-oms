@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import group.gnometrading.oms.position.Position;
 import group.gnometrading.oms.risk.RiskEngine;
 import group.gnometrading.oms.risk.policy.MaxOrderSizePolicy;
+import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.schemas.Side;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
@@ -348,6 +349,26 @@ class OmsScenarioTest {
 
         h.submitBidIntent(101L, 10L);
         assertEquals(1, h.sink.newOrders.size(), "the rejected replacement must not wedge the slot");
+    }
+
+    @Test
+    void scenario_cancelReplaceVenue_offTickReplacementIsRejectedWithoutWedgingTheSlot() {
+        useCancelReplaceVenue();
+        h.stubTickSize(OmsTestHarness.LISTING_ID, 10);
+        long first = h.submitBidIntent(100L, 10L);
+        h.injectAck(first, 10);
+        h.submitBidIntent(105L, 10L);
+        h.sink.clear();
+
+        h.injectCancel(first);
+
+        assertEquals(0, h.sink.newOrders.size(), "105 is not a multiple of the tick");
+        assertEquals(
+                RejectReason.INVALID_PRICE,
+                h.sink.execReports.get(h.sink.execReports.size() - 1).rejectReason());
+
+        h.submitBidIntent(110L, 10L);
+        assertEquals(1, h.sink.newOrders.size());
     }
 
     @Test

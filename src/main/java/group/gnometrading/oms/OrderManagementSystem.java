@@ -21,6 +21,7 @@ import group.gnometrading.schemas.Intent;
 import group.gnometrading.schemas.Liquidity;
 import group.gnometrading.schemas.ModifyOrder;
 import group.gnometrading.schemas.Order;
+import group.gnometrading.schemas.OrderDecoder;
 import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.schemas.OrderExecutionReportDecoder;
 import group.gnometrading.schemas.OrderStatus;
@@ -249,9 +250,11 @@ public final class OrderManagementSystem {
         public void onNewOrder(final Order order) {
             final int strategyId = order.getClientOidStrategyId();
             final int listingId = resolveListingId(order.decoder.exchangeId(), order.decoder.securityId());
-            if (!passesExchangeConstraints(listingId, order.decoder.price(), order.decoder.size())) {
+            final RejectReason violation =
+                    exchangeConstraintViolation(listingId, order.decoder.price(), order.decoder.size());
+            if (violation != null) {
                 logger.log(LogMessage.ORDER_REJECTED_EXCHANGE_CONSTRAINTS, order.getClientOidCounter());
-                emitNewOrderRejection(order, listingId, RejectReason.INVALID_SIZE);
+                emitNewOrderRejection(order, listingId, violation);
                 return;
             }
             if (riskEngine.check(order, positionTracker, orderStateManager, strategyId, listingId)) {
@@ -322,9 +325,10 @@ public final class OrderManagementSystem {
                     .orderType(original.getOrderType())
                     .timeInForce(original.getTimeInForce());
             final int listingId = resolveListingId(modify.decoder.exchangeId(), modify.decoder.securityId());
-            if (!passesExchangeConstraints(listingId, modify.decoder.price(), newLeaves)) {
+            final RejectReason violation = exchangeConstraintViolation(listingId, modify.decoder.price(), newLeaves);
+            if (violation != null) {
                 logger.log(LogMessage.ORDER_REJECTED_EXCHANGE_CONSTRAINTS, counter);
-                emitModifyRejection(modify, original, listingId, RejectReason.INVALID_SIZE);
+                emitModifyRejection(modify, original, listingId, violation);
                 return;
             }
             if (riskEngine.check(
@@ -373,12 +377,31 @@ public final class OrderManagementSystem {
             }
         }
 
-        private boolean passesExchangeConstraints(int listingId, long price, long size) {
+        /**
+         * The listing rule an order breaks, or null if it breaks none. A listing without a spec, or with a
+         * zero field, is not checked on that field.
+         */
+        private RejectReason exchangeConstraintViolation(int listingId, long price, long size) {
             ListingSpec spec = securityMaster.getListingSpec(listingId);
             if (spec == null) {
-                return true;
+                return null;
             }
             if (spec.lotSize() > 0 && size % spec.lotSize() != 0) {
+                return RejectReason.INVALID_SIZE;
+            }
+            if (isOffTick(spec, price)) {
+                return RejectReason.INVALID_PRICE;
+            }
+            return isBelowMinNotional(spec, listingId, price, size) ? RejectReason.INVALID_SIZE : null;
+        }
+
+        // A market order has no price to check.
+        private boolean isOffTick(ListingSpec spec, long price) {
+            return spec.tickSize() > 0 && price != OrderDecoder.priceNullValue() && price % spec.tickSize() != 0;
+        }
+
+        private boolean isBelowMinNotional(ListingSpec spec, int listingId, long price, long size) {
+            if (spec.minNotional() <= 0) {
                 return false;
             }
             long effectivePrice = price;
@@ -388,7 +411,7 @@ public final class OrderManagementSystem {
                     effectivePrice = priceBuffer.readSpinning(slot);
                 }
             }
-            return spec.minNotional() <= 0 || size > 0 && effectivePrice >= spec.minNotional() / size;
+            return size <= 0 || effectivePrice < spec.minNotional() / size;
         }
     }
 }
