@@ -263,7 +263,7 @@ public final class IntentResolver {
                 .exchangeId((short) exchangeId)
                 .securityId((int) securityId)
                 .price(price)
-                .size((int) orderQty)
+                .size(orderQty)
                 .orderType(OrderType.LIMIT)
                 .timeInForce(TimeInForce.GOOD_TILL_CANCELED);
         pendingModify.encoder.flags().clear();
@@ -287,7 +287,7 @@ public final class IntentResolver {
                 .exchangeId((short) exchangeId)
                 .securityId((int) securityId)
                 .price(price)
-                .size((int) size)
+                .size(size)
                 .side(side)
                 .orderType(OrderType.LIMIT)
                 .timeInForce(TimeInForce.GOOD_TILL_CANCELED);
@@ -315,7 +315,7 @@ public final class IntentResolver {
                 .exchangeId((short) exchangeId)
                 .securityId((int) securityId)
                 .price(price)
-                .size((int) takeSize)
+                .size(takeSize)
                 .side(takeSide)
                 .orderType(orderType)
                 .timeInForce(TimeInForce.IMMEDIATE_OR_CANCELED);

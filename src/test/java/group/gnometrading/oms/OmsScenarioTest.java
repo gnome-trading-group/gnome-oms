@@ -389,6 +389,21 @@ class OmsScenarioTest {
         assertEquals(List.of(first), h.sink.cancels);
     }
 
+    /** 10,000 shares at 1e6 scaling is past the old 32-bit size limit, which wrapped it silently. */
+    @Test
+    void scenario_orderLargerThanTheOld32BitLimitKeepsItsSize() {
+        final long tenThousandShares = 10_000_000_000L;
+        long counter = h.submitBidIntent(100L, tenThousandShares);
+        assertEquals(tenThousandShares, h.sink.newOrders.get(0).size());
+        h.injectAck(counter, tenThousandShares);
+
+        h.injectFill(counter, tenThousandShares, 100, tenThousandShares, 0);
+
+        Position pos = h.getPosition(OmsTestHarness.LISTING_ID);
+        assertEquals(tenThousandShares, pos.netQuantity);
+        assertEquals(0L, pos.leavesBuyQty);
+    }
+
     private void useCancelReplaceVenue() {
         h.stubListing(
                 OmsTestHarness.EXCHANGE_ID,
