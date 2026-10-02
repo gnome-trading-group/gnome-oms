@@ -8,5 +8,6 @@ package group.gnometrading.oms.position;
  */
 public interface PositionView {
 
+    /** @throws IllegalArgumentException if {@code listingId} was not registered when the view was created */
     Position getPosition(int listingId);
 }

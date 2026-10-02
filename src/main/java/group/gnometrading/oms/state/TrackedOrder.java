@@ -26,7 +26,6 @@ public final class TrackedOrder {
     private OrderState state;
     private long filledQty;
     private long leavesQty;
-    private long totalCost;
 
     public TrackedOrder() {
         reset();
@@ -46,7 +45,6 @@ public final class TrackedOrder {
         this.state = OrderState.PENDING_NEW;
         this.filledQty = 0;
         this.leavesQty = order.decoder.size();
-        this.totalCost = 0;
     }
 
     public void reset() {
@@ -63,39 +61,59 @@ public final class TrackedOrder {
         this.state = OrderState.PENDING_NEW;
         this.filledQty = 0;
         this.leavesQty = 0;
-        this.totalCost = 0;
     }
 
+    /**
+     * Applies a report the OMS has already validated: a fill carries its fill quantity and price, and moves the
+     * cumulative quantity forward. Optional quantities a venue leaves out are derived from what is known.
+     */
     public void applyExecutionReport(OrderExecutionReport report) {
         ExecType exec = report.decoder.execType();
         switch (exec) {
             case NEW -> {
                 state = OrderState.NEW;
-                leavesQty = report.decoder.leavesQty();
+                long leaves = report.decoder.leavesQty();
+                if (leaves != OrderExecutionReportDecoder.leavesQtyNullValue()) {
+                    leavesQty = leaves;
+                }
             }
             case PARTIAL_FILL -> {
                 state = OrderState.PARTIALLY_FILLED;
-                long fee =
-                        report.decoder.fee() == OrderExecutionReportDecoder.feeNullValue() ? 0 : report.decoder.fee();
-                totalCost += report.decoder.fillPrice() * report.decoder.filledQty() + fee;
-                filledQty = report.decoder.cumulativeQty();
-                leavesQty = report.decoder.leavesQty();
+                filledQty = cumulativeQtyAfter(report);
+                long leaves = report.decoder.leavesQty();
+                leavesQty = leaves != OrderExecutionReportDecoder.leavesQtyNullValue()
+                        ? leaves
+                        : Math.max(0, size - filledQty);
             }
             case FILL -> {
                 state = OrderState.FILLED;
-                long fee =
-                        report.decoder.fee() == OrderExecutionReportDecoder.feeNullValue() ? 0 : report.decoder.fee();
-                totalCost += report.decoder.fillPrice() * report.decoder.filledQty() + fee;
-                filledQty = report.decoder.cumulativeQty();
+                filledQty = cumulativeQtyAfter(report);
                 leavesQty = 0;
             }
-            case CANCEL -> state = OrderState.CANCELED;
-            case REJECT -> state = OrderState.REJECTED;
-            case EXPIRE -> state = OrderState.EXPIRED;
+            case CANCEL -> {
+                state = OrderState.CANCELED;
+                leavesQty = 0;
+            }
+            case REJECT -> {
+                state = OrderState.REJECTED;
+                leavesQty = 0;
+            }
+            case EXPIRE -> {
+                state = OrderState.EXPIRED;
+                leavesQty = 0;
+            }
             case CANCEL_REJECT, NULL_VAL -> {
                 /* no state change */
             }
         }
+    }
+
+    /** The cumulative filled quantity once {@code fill} is applied; a venue may report only the fill itself. */
+    public long cumulativeQtyAfter(OrderExecutionReport fill) {
+        long cumulative = fill.decoder.cumulativeQty();
+        return cumulative != OrderExecutionReportDecoder.cumulativeQtyNullValue()
+                ? cumulative
+                : filledQty + fill.decoder.filledQty();
     }
 
     /** {@code newOrderQty} is the FIX order quantity, so what remains working is that less the fills. */
@@ -155,9 +173,5 @@ public final class TrackedOrder {
 
     public boolean isActive() {
         return active;
-    }
-
-    public long getAvgFillPrice() {
-        return filledQty == 0 ? 0 : totalCost / filledQty;
     }
 }

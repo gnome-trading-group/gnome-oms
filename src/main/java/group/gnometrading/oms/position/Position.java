@@ -1,7 +1,13 @@
 package group.gnometrading.oms.position;
 
 import group.gnometrading.schemas.Side;
+import group.gnometrading.schemas.Statics;
+import group.gnometrading.utils.ScaledMath;
 
+/**
+ * Quantities are in size units (1e6 per unit); {@code totalCost}, {@code realizedPnl} and {@code totalFees} are money
+ * in price units (1e9 per dollar).
+ */
 public final class Position {
 
     public int listingId;
@@ -30,18 +36,18 @@ public final class Position {
 
         if (netQuantity == 0) {
             netQuantity = signedQty;
-            totalCost = price * qty;
+            totalCost = notional(price, qty);
         } else if (Long.signum(netQuantity) == Long.signum(signedQty)) {
-            totalCost += price * qty;
+            totalCost += notional(price, qty);
             netQuantity += signedQty;
         } else {
             long closeQty = Math.min(Math.abs(netQuantity), qty);
             long avgEntry = getAvgEntryPrice();
 
             if (netQuantity > 0) {
-                realizedPnl += closeQty * (price - avgEntry);
+                realizedPnl += notional(price - avgEntry, closeQty);
             } else {
-                realizedPnl += closeQty * (avgEntry - price);
+                realizedPnl += notional(avgEntry - price, closeQty);
             }
 
             long prevQty = netQuantity;
@@ -51,15 +57,17 @@ public final class Position {
                 totalCost = 0;
             } else if (Long.signum(netQuantity) != Long.signum(prevQty)) {
                 long remainder = Math.abs(netQuantity);
-                totalCost = price * remainder;
+                totalCost = notional(price, remainder);
             } else {
-                totalCost = avgEntry * Math.abs(netQuantity);
+                totalCost = notional(avgEntry, Math.abs(netQuantity));
             }
         }
     }
 
     public long getAvgEntryPrice() {
-        return netQuantity == 0 ? 0 : totalCost / Math.abs(netQuantity);
+        return netQuantity == 0
+                ? 0
+                : ScaledMath.multiplyDivide(totalCost, Statics.SIZE_SCALING_FACTOR, Math.abs(netQuantity));
     }
 
     public void addLeaves(Side side, long qty) {
@@ -85,6 +93,11 @@ public final class Position {
         this.totalFees = fees;
         this.leavesBuyQty = leavesBuy;
         this.leavesSellQty = leavesSell;
+    }
+
+    /** Money in price units for {@code qty} units at {@code price}. */
+    public static long notional(long price, long qty) {
+        return ScaledMath.multiplyDivide(price, qty, Statics.SIZE_SCALING_FACTOR);
     }
 
     /** Confirmed net quantity + inflight buy - inflight sell. */

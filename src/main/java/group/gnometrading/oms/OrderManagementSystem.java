@@ -88,6 +88,10 @@ public final class OrderManagementSystem {
             return;
         }
 
+        if (isFill(report) && !isApplicableFill(report, tracked, counter)) {
+            return;
+        }
+
         long leavesQtyBefore = tracked.getLeavesQty();
         int strategyId = tracked.getStrategyId();
         // TODO: Move this to when we get a generic market update
@@ -204,11 +208,45 @@ public final class OrderManagementSystem {
         });
     }
 
+    private static boolean isFill(OrderExecutionReport report) {
+        ExecType exec = report.decoder.execType();
+        return exec == ExecType.FILL || exec == ExecType.PARTIAL_FILL;
+    }
+
+    /**
+     * A fill without its quantity or price cannot be booked, and one that does not move the cumulative quantity
+     * forward was already booked (venues redeliver). Applying either would corrupt the position.
+     */
+    private boolean isApplicableFill(OrderExecutionReport report, TrackedOrder tracked, long counter) {
+        if (report.decoder.filledQty() == OrderExecutionReportDecoder.filledQtyNullValue()
+                || report.decoder.fillPrice() == OrderExecutionReportDecoder.fillPriceNullValue()) {
+            logger.log(LogMessage.INVALID_FILL_REPORT, counter);
+            return false;
+        }
+        if (tracked.cumulativeQtyAfter(report) <= tracked.getFilledQty()) {
+            logger.log(LogMessage.DUPLICATE_FILL_IGNORED, counter);
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * A partial fill takes its quantity off the working quantity; a terminal report takes off everything still
+     * working, since a venue may finish an order with less filled than was working. Leaves the venue reports
+     * mid-order are not used: during a pending modify they describe the order before the modify.
+     */
     private void updatePositionTracking(
             OrderExecutionReport report, TrackedOrder tracked, int strategyId, long leavesQtyBefore, int listingId) {
-        ExecType exec = report.decoder.execType();
-        if (exec == ExecType.FILL || exec == ExecType.PARTIAL_FILL) {
-            positionTracker.removeStrategyLeaves(strategyId, listingId, tracked.getSide(), report.decoder.filledQty());
+        long noLongerWorking;
+        if (tracked.getState().isTerminal()) {
+            noLongerWorking = isFill(report) ? Math.max(leavesQtyBefore, report.decoder.filledQty()) : leavesQtyBefore;
+        } else {
+            noLongerWorking = isFill(report) ? report.decoder.filledQty() : 0;
+        }
+        if (noLongerWorking > 0) {
+            positionTracker.removeStrategyLeaves(strategyId, listingId, tracked.getSide(), noLongerWorking);
+        }
+        if (isFill(report)) {
             long fee = report.decoder.fee() == OrderExecutionReportDecoder.feeNullValue() ? 0 : report.decoder.fee();
             positionTracker.applyStrategyFill(
                     strategyId,
@@ -217,10 +255,6 @@ public final class OrderManagementSystem {
                     report.decoder.filledQty(),
                     report.decoder.fillPrice(),
                     fee);
-        } else if (exec == ExecType.CANCEL || exec == ExecType.REJECT || exec == ExecType.EXPIRE) {
-            if (leavesQtyBefore > 0) {
-                positionTracker.removeStrategyLeaves(strategyId, listingId, tracked.getSide(), leavesQtyBefore);
-            }
         }
     }
 
@@ -315,6 +349,7 @@ public final class OrderManagementSystem {
             // modify.size is the FIX order quantity, filled portion included. Risk, exchange constraints
             // and position leaves all concern what can still execute, which is that less the fills.
             final long newLeaves = Math.max(0, modify.decoder.size() - original.getFilledQty());
+            riskCheckOrder.encodeClientOid(counter, original.getStrategyId());
             riskCheckOrder
                     .encoder
                     .exchangeId((short) modify.decoder.exchangeId())
@@ -411,7 +446,7 @@ public final class OrderManagementSystem {
                     effectivePrice = priceBuffer.readSpinning(slot);
                 }
             }
-            return size <= 0 || effectivePrice < spec.minNotional() / size;
+            return size <= 0 || Position.notional(effectivePrice, size) < spec.minNotional();
         }
     }
 }

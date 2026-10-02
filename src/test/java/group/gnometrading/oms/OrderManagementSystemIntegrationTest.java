@@ -14,11 +14,15 @@ import group.gnometrading.schemas.OrderExecutionReportDecoder;
 import group.gnometrading.schemas.OrderType;
 import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.schemas.Side;
+import group.gnometrading.schemas.Statics;
 import group.gnometrading.schemas.TimeInForce;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 class OrderManagementSystemIntegrationTest {
+
+    // Sizes here are raw size units (1e-6 of a unit); scaling prices by the same factor keeps money round.
+    private static final long PX = Statics.SIZE_SCALING_FACTOR;
 
     private OmsTestHarness h;
 
@@ -88,9 +92,9 @@ class OrderManagementSystemIntegrationTest {
 
     @Test
     void fill_updatesPositionCorrectly() {
-        long counter = h.submitBidIntent(100L, 10L);
+        long counter = h.submitBidIntent(100L * PX, 10L);
         h.injectAck(counter, 10);
-        h.injectFill(counter, 10, 100, 10, 0);
+        h.injectFill(counter, 10, 100 * PX, 10, 0);
 
         Position pos = h.getPosition(OmsTestHarness.LISTING_ID);
         assertEquals(10L, pos.netQuantity);
@@ -100,10 +104,10 @@ class OrderManagementSystemIntegrationTest {
 
     @Test
     void multiplePartialFills_accumulate() {
-        long counter = h.submitBidIntent(100L, 10L);
+        long counter = h.submitBidIntent(100L * PX, 10L);
         h.injectAck(counter, 10);
-        h.injectFill(counter, 3, 100, 3, 7);
-        h.injectFill(counter, 4, 110, 7, 3);
+        h.injectFill(counter, 3, 100 * PX, 3, 7);
+        h.injectFill(counter, 4, 110 * PX, 7, 3);
 
         Position pos = h.getPosition(OmsTestHarness.LISTING_ID);
         assertEquals(7L, pos.netQuantity);
@@ -131,14 +135,14 @@ class OrderManagementSystemIntegrationTest {
     @Test
     void positionFlip_longThenShort() {
         // Go long 10@100
-        long bidCounter = h.submitBidIntent(100L, 10L);
+        long bidCounter = h.submitBidIntent(100L * PX, 10L);
         h.injectAck(bidCounter, 10);
-        h.injectFill(bidCounter, 10, 100, 10, 0);
+        h.injectFill(bidCounter, 10, 100 * PX, 10, 0);
 
         // Go short 15@120 (closes 10 long, opens 5 short)
-        long askCounter = h.submitAskIntent(120L, 15L);
+        long askCounter = h.submitAskIntent(120L * PX, 15L);
         h.injectAck(askCounter, 15);
-        h.injectFill(askCounter, 15, 120, 15, 0);
+        h.injectFill(askCounter, 15, 120 * PX, 15, 0);
 
         Position pos = h.getPosition(OmsTestHarness.LISTING_ID);
         assertEquals(-5L, pos.netQuantity);
@@ -354,14 +358,14 @@ class OrderManagementSystemIntegrationTest {
         OmsTestHarness h2 = new OmsTestHarness(re);
 
         // Go long 10@200, then fill short 10@180 => realized loss = 10*(200-180) = 200
-        long bidCounter = h2.submitBidIntent(200L, 10L);
+        long bidCounter = h2.submitBidIntent(200L * PX, 10L);
         h2.injectAck(bidCounter, 10);
-        h2.injectFill(bidCounter, 10, 200, 10, 0);
+        h2.injectFill(bidCounter, 10, 200 * PX, 10, 0);
 
-        long askCounter = h2.submitAskIntent(180L, 10L);
+        long askCounter = h2.submitAskIntent(180L * PX, 10L);
         h2.injectAck(askCounter, 10);
         h2.sink.clear();
-        h2.injectFill(askCounter, 10, 180, 10, 0); // loss of 200 > maxLoss of 100
+        h2.injectFill(askCounter, 10, 180 * PX, 10, 0); // loss of 200 > maxLoss of 100
 
         assertTrue(re.isStrategyHalted(OmsTestHarness.STRATEGY_ID));
     }
@@ -377,11 +381,11 @@ class OrderManagementSystemIntegrationTest {
         h2.stubListing(OmsTestHarness.EXCHANGE_ID, 43, 101, 0, 0);
 
         // Open a bid order on security 42
-        long bidCounter = h2.submitBidIntent(200L, 10L);
+        long bidCounter = h2.submitBidIntent(200L * PX, 10L);
         h2.injectAck(bidCounter, 10);
 
         // Open an ask order on security 43
-        long askCounter = h2.submitAskIntent(OmsTestHarness.STRATEGY_ID, 43L, 200L, 10L);
+        long askCounter = h2.submitAskIntent(OmsTestHarness.STRATEGY_ID, 43L, 200L * PX, 10L);
         h2.injectExecReport(
                 OmsTestHarness.STRATEGY_ID,
                 askCounter,
@@ -394,13 +398,13 @@ class OrderManagementSystemIntegrationTest {
         h2.sink.clear();
 
         // Trigger loss: go short on security 42 with fill at much lower price
-        long closeAsk = h2.submitAskIntent(150L, 10L); // first close/cancel the bid, simulate loss differently
+        long closeAsk = h2.submitAskIntent(150L * PX, 10L); // first close/cancel the bid, simulate loss differently
         // Actually the simpler approach: inject fill that causes loss
-        h2.injectFill(bidCounter, 10, 200, 10, 0); // fills the bid (long)
-        long closeCounter = h2.submitAskIntent(100L, 10L); // short at 100
+        h2.injectFill(bidCounter, 10, 200 * PX, 10, 0); // fills the bid (long)
+        long closeCounter = h2.submitAskIntent(100L * PX, 10L); // short at 100
         h2.injectAck(closeCounter, 10);
         h2.sink.clear();
-        h2.injectFill(closeCounter, 10, 100, 10, 0); // loss = 10*(200-100) = 1000
+        h2.injectFill(closeCounter, 10, 100 * PX, 10, 0); // loss = 10*(200-100) = 1000
 
         // Cancel should have been sent for the open ask on security 43
         assertTrue(re.isStrategyHalted(OmsTestHarness.STRATEGY_ID));
@@ -416,12 +420,12 @@ class OrderManagementSystemIntegrationTest {
         OmsTestHarness h2 = new OmsTestHarness(re);
 
         // Trigger halt: loss of 200
-        long bidCounter = h2.submitBidIntent(200L, 10L);
+        long bidCounter = h2.submitBidIntent(200L * PX, 10L);
         h2.injectAck(bidCounter, 10);
-        h2.injectFill(bidCounter, 10, 200, 10, 0);
-        long askCounter = h2.submitAskIntent(180L, 10L);
+        h2.injectFill(bidCounter, 10, 200 * PX, 10, 0);
+        long askCounter = h2.submitAskIntent(180L * PX, 10L);
         h2.injectAck(askCounter, 10);
-        h2.injectFill(askCounter, 10, 180, 10, 0);
+        h2.injectFill(askCounter, 10, 180 * PX, 10, 0);
         assertTrue(re.isStrategyHalted(OmsTestHarness.STRATEGY_ID));
 
         // Now go long again at higher price, restoring PnL above threshold
@@ -473,7 +477,7 @@ class OrderManagementSystemIntegrationTest {
         assertEquals(Side.Bid, h.sink.newOrders.get(0).side());
 
         h.injectAck(counter, 5);
-        h.injectFill(counter, 5, 100, 5, 0);
+        h.injectFill(counter, 5, 100 * PX, 5, 0);
 
         Position pos = h.getPosition(OmsTestHarness.LISTING_ID);
         assertEquals(5L, pos.netQuantity);

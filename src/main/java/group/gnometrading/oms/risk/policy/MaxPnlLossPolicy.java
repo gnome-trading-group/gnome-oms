@@ -7,6 +7,7 @@ import group.gnometrading.oms.risk.util.PolicyParameters;
 import group.gnometrading.oms.state.OrderStateManager;
 import group.gnometrading.strings.GnomeString;
 
+/** Halts a strategy when its realized PnL falls below {@code -maxLoss}, in price units (1e9 per dollar). */
 public final class MaxPnlLossPolicy extends AbstractConfigurablePolicy implements MarketRiskPolicy {
 
     private long maxLoss;

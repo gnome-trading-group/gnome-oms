@@ -8,8 +8,12 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import group.gnometrading.oms.position.Position;
 import group.gnometrading.oms.risk.RiskEngine;
 import group.gnometrading.oms.risk.policy.MaxOrderSizePolicy;
+import group.gnometrading.oms.risk.policy.MaxPositionPolicy;
+import group.gnometrading.schemas.ExecType;
+import group.gnometrading.schemas.OrderExecutionReportDecoder;
 import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.schemas.Side;
+import group.gnometrading.schemas.Statics;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -19,6 +23,9 @@ import org.junit.jupiter.api.Test;
  * Each test asserts state after each step to pinpoint exactly where behavior diverges.
  */
 class OmsScenarioTest {
+
+    // Sizes here are raw size units (1e-6 of a unit); scaling prices by the same factor keeps money round.
+    private static final long PX = Statics.SIZE_SCALING_FACTOR;
 
     private OmsTestHarness h;
 
@@ -199,9 +206,9 @@ class OmsScenarioTest {
     @Test
     void scenario_longToShortFlip() {
         // Go long 10@100
-        long bidCounter = h.submitBidIntent(100L, 10L);
+        long bidCounter = h.submitBidIntent(100L * PX, 10L);
         h.injectAck(bidCounter, 10);
-        h.injectFill(bidCounter, 10, 100, 10, 0);
+        h.injectFill(bidCounter, 10, 100 * PX, 10, 0);
 
         Position pos = h.getPosition(OmsTestHarness.LISTING_ID);
         assertEquals(10L, pos.netQuantity);
@@ -209,9 +216,9 @@ class OmsScenarioTest {
         assertEquals(0L, pos.realizedPnl);
 
         // Go short 15@120: closes 10 long (realizes profit), opens 5 short
-        long askCounter = h.submitAskIntent(120L, 15L);
+        long askCounter = h.submitAskIntent(120L * PX, 15L);
         h.injectAck(askCounter, 15);
-        h.injectFill(askCounter, 15, 120, 15, 0);
+        h.injectFill(askCounter, 15, 120 * PX, 15, 0);
 
         assertEquals(-5L, pos.netQuantity);
         assertEquals(10L * (120L - 100L), pos.realizedPnl); // 200
@@ -412,5 +419,77 @@ class OmsScenarioTest {
                 0,
                 0,
                 OmsTestHarness.CANCEL_REPLACE_EXCHANGE_CODE);
+    }
+
+    @Test
+    void scenario_terminalFillSmallerThanWhatWasWorkingReleasesAllLeaves() {
+        long counter = h.submitBidIntent(100L, 10L);
+        h.injectAck(counter, 10);
+        h.injectFill(counter, 4, 100, 4, 6);
+        // The venue finishes the order having filled only 3 more of the 6 working.
+        h.injectFill(counter, 3, 100, 7, 0);
+
+        Position pos = h.getPosition(OmsTestHarness.LISTING_ID);
+        assertEquals(7L, pos.netQuantity);
+        assertEquals(0L, pos.leavesBuyQty);
+        assertEquals(7L, pos.getEffectiveQuantity());
+    }
+
+    @Test
+    void scenario_redeliveredFillIsAppliedOnce() {
+        long counter = h.submitBidIntent(100L, 10L);
+        h.injectAck(counter, 10);
+        h.injectFill(counter, 3, 100, 3, 7);
+        h.injectFill(counter, 3, 100, 3, 7);
+
+        Position pos = h.getPosition(OmsTestHarness.LISTING_ID);
+        assertEquals(3L, pos.netQuantity);
+        assertEquals(7L, pos.leavesBuyQty);
+        assertEquals(3L, h.getTrackedOrder(counter).getFilledQty());
+    }
+
+    @Test
+    void scenario_fillWithoutAPriceIsDropped() {
+        long counter = h.submitBidIntent(100L, 10L);
+        h.injectAck(counter, 10);
+        h.injectExecReport(
+                counter,
+                ExecType.PARTIAL_FILL,
+                3,
+                OrderExecutionReportDecoder.fillPriceNullValue(),
+                3,
+                7,
+                OrderExecutionReportDecoder.feeNullValue());
+
+        Position pos = h.getPosition(OmsTestHarness.LISTING_ID);
+        assertEquals(0L, pos.netQuantity);
+        assertEquals(10L, pos.leavesBuyQty);
+    }
+
+    @Test
+    void scenario_maxPositionCountsOrdersAlreadyWorking() {
+        OmsTestHarness h2 = new OmsTestHarness(RiskEngine.withOrderPolicies(new MaxPositionPolicy(10)));
+        long resting = h2.submitBidIntent(100L, 8L);
+        h2.injectAck(resting, 8);
+
+        // Filling both could leave the strategy long 13, past the limit of 10.
+        h2.submitTakeIntent(5, Side.Bid);
+        assertEquals(1, h2.sink.newOrders.size(), "only the resting bid reaches the venue");
+    }
+
+    @Test
+    void scenario_maxPositionChecksAModifyAsAReplacement() {
+        OmsTestHarness h2 = new OmsTestHarness(RiskEngine.withOrderPolicies(new MaxPositionPolicy(10)));
+        long counter = h2.submitBidIntent(100L, 10L);
+        h2.injectAck(counter, 10);
+
+        // Shrinking an order already at the limit must pass: its own 10 are replaced, not added to.
+        h2.submitBidIntent(100L, 8L);
+        assertEquals(1, h2.sink.modifies.size());
+        h2.injectAck(counter, 8);
+        h2.sink.clear();
+
+        h2.submitBidIntent(100L, 12L);
+        assertEquals(0, h2.sink.modifies.size(), "growing past the limit is rejected");
     }
 }

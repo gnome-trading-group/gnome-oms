@@ -1,5 +1,6 @@
 package group.gnometrading.oms.position;
 
+import group.gnometrading.collections.IntToIntHashMap;
 import group.gnometrading.collections.IntToIntMap;
 
 /**
@@ -26,6 +27,9 @@ public final class LivePositionView implements PositionView {
     @Override
     public Position getPosition(int listingId) {
         int slot = slotByListingId.get(listingId);
+        if (slot == IntToIntHashMap.MISSING) {
+            throw new IllegalArgumentException("Listing " + listingId + " has no position slot");
+        }
         buffer.readSpinning(slot, flyweight);
         return flyweight;
     }

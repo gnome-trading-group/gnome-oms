@@ -5,12 +5,16 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
 import group.gnometrading.schemas.Side;
+import group.gnometrading.schemas.Statics;
 import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 class DefaultPositionTrackerTest {
+
+    // Quantities in whole units; money then reads as price × units.
+    private static final long UNIT = Statics.SIZE_SCALING_FACTOR;
 
     private static final int STRATEGY_1 = 1;
     private static final int STRATEGY_2 = 2;
@@ -97,12 +101,12 @@ class DefaultPositionTrackerTest {
 
     @Test
     void applyStrategyFill_syncedToSharedBuffer() {
-        tracker.applyStrategyFill(STRATEGY_1, LISTING_A, Side.Bid, 10, 100, 5);
+        tracker.applyStrategyFill(STRATEGY_1, LISTING_A, Side.Bid, 10 * UNIT, 100, 5);
 
         PositionView view = tracker.createPositionView(STRATEGY_1);
         Position pos = view.getPosition(LISTING_A);
 
-        assertEquals(10, pos.netQuantity);
+        assertEquals(10 * UNIT, pos.netQuantity);
         assertEquals(1000, pos.totalCost);
         assertEquals(5, pos.totalFees);
     }

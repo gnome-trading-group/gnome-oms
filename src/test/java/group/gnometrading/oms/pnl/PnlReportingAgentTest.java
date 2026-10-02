@@ -23,6 +23,9 @@ import org.mockito.junit.jupiter.MockitoExtension;
 @ExtendWith(MockitoExtension.class)
 class PnlReportingAgentTest {
 
+    // Quantities in whole units; money then reads as price × units.
+    private static final long UNIT = Statics.SIZE_SCALING_FACTOR;
+
     private static final int MAX_SLOTS = 8;
     private static final int STRATEGY_ID = 3;
     private static final int LISTING_ID = 42;
@@ -72,12 +75,12 @@ class PnlReportingAgentTest {
     @Test
     void testSnapshotAndFlushSendsRegisteredPositions() {
         tracker.registerSlot(STRATEGY_ID, LISTING_ID);
-        tracker.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 10, 100, 5);
+        tracker.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 10 * UNIT, 100, 5);
 
         String json = triggerFlushAndCaptureJson(agent);
         assertTrue(json.contains("\"strategyId\":3"));
         assertTrue(json.contains("\"listingId\":42"));
-        assertTrue(json.contains("\"netQuantity\":10"));
+        assertTrue(json.contains("\"netQuantity\":" + 10 * UNIT));
     }
 
     @Test
@@ -97,8 +100,8 @@ class PnlReportingAgentTest {
     void testMultipleSlotsAllSnapshots() {
         tracker.registerSlot(STRATEGY_ID, LISTING_ID);
         tracker.registerSlot(STRATEGY_ID, LISTING_ID + 1);
-        tracker.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 5, 200, 0);
-        tracker.applyStrategyFill(STRATEGY_ID, LISTING_ID + 1, Side.Ask, 3, 150, 0);
+        tracker.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 5 * UNIT, 200, 0);
+        tracker.applyStrategyFill(STRATEGY_ID, LISTING_ID + 1, Side.Ask, 3 * UNIT, 150, 0);
 
         String json = triggerFlushAndCaptureJson(agent);
         assertEquals(2, countOccurrences(json, "\"strategyId\""));
@@ -107,7 +110,7 @@ class PnlReportingAgentTest {
     @Test
     void testDoesNotFlushBeforeInterval() {
         tracker.registerSlot(STRATEGY_ID, LISTING_ID);
-        tracker.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 1, 100, 0);
+        tracker.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 1 * UNIT, 100, 0);
 
         agent.onStart();
         mockTime = FLUSH_INTERVAL_MS - 1;
@@ -126,7 +129,7 @@ class PnlReportingAgentTest {
     void enrichment_longPosition_writesMarkPriceAndUnrealizedPnl() {
         // Long 10 @ avg 50, mark = 80 -> unrealizedPnl = 10 * (80 - 50) = 300
         tracker.registerSlot(STRATEGY_ID, LISTING_ID);
-        tracker.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 10, 50, 0);
+        tracker.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 10 * UNIT, 50, 0);
         int priceSlot = priceSlotRegistry.register(LISTING_ID);
         priceBuffer.write(priceSlot, 80L);
 
@@ -140,7 +143,7 @@ class PnlReportingAgentTest {
     void enrichment_shortPosition_negativePnl() {
         // Short -10 @ avg 100, mark = 130 -> unrealizedPnl = -10 * (130 - 100) = -300
         tracker.registerSlot(STRATEGY_ID, LISTING_ID);
-        tracker.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Ask, 10, 100, 0);
+        tracker.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Ask, 10 * UNIT, 100, 0);
         int priceSlot = priceSlotRegistry.register(LISTING_ID);
         priceBuffer.write(priceSlot, 130L);
 
@@ -154,8 +157,8 @@ class PnlReportingAgentTest {
     void enrichment_combinedRealizedAndUnrealized_totalPnlIsSum() {
         // Realize +200, then hold 5 long with mark moving against: unrealized = -100
         tracker.registerSlot(STRATEGY_ID, LISTING_ID);
-        tracker.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 10, 100, 0);
-        tracker.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Ask, 5, 140, 0);
+        tracker.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 10 * UNIT, 100, 0);
+        tracker.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Ask, 5 * UNIT, 140, 0);
         // realizedPnl = 5 * (140 - 100) = 200, remaining long 5 @ avg 100
         // mark = 80 -> unrealizedPnl = 5 * (80 - 100) = -100 -> totalPnl = 100
         int priceSlot = priceSlotRegistry.register(LISTING_ID);
@@ -169,7 +172,7 @@ class PnlReportingAgentTest {
     @Test
     void enrichment_noMarkPriceWritten_fieldsRemainZero() {
         tracker.registerSlot(STRATEGY_ID, LISTING_ID);
-        tracker.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 10, 50, 0);
+        tracker.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 10 * UNIT, 50, 0);
         priceSlotRegistry.register(LISTING_ID);
         // price never written — readSpinning returns 0
 
@@ -181,20 +184,20 @@ class PnlReportingAgentTest {
     @Test
     void enrichment_feeSubtractedFromTotalPnl() {
         // Long 10 @ avg 50, mark = 80 → unrealizedPnl = 300, fee = 1 (PRICE_SCALE unit)
-        // totalPnl = 0 + 300 - 1 * SIZE_SCALING_FACTOR
+        // totalPnl = 0 + 300 - 1; fees are in the same price units as PnL
         tracker.registerSlot(STRATEGY_ID, LISTING_ID);
-        tracker.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 10, 50, 1);
+        tracker.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 10 * UNIT, 50, 1);
         int priceSlot = priceSlotRegistry.register(LISTING_ID);
         priceBuffer.write(priceSlot, 80L);
 
         String json = triggerFlushAndCaptureJson(agent);
-        assertTrue(json.contains("\"totalPnl\":" + (300 - 1L * Statics.SIZE_SCALING_FACTOR)));
+        assertTrue(json.contains("\"totalPnl\":" + (300 - 1L)));
     }
 
     @Test
     void enrichment_listingNotInPriceRegistry_fieldsRemainZero() {
         tracker.registerSlot(STRATEGY_ID, LISTING_ID);
-        tracker.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 10, 50, 0);
+        tracker.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 10 * UNIT, 50, 0);
         // LISTING_ID not registered in priceSlotRegistry
 
         String json = triggerFlushAndCaptureJson(agent);

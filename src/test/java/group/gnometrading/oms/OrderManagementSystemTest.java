@@ -25,6 +25,7 @@ import group.gnometrading.schemas.IntentDecoder;
 import group.gnometrading.schemas.ModifyOrder;
 import group.gnometrading.schemas.Order;
 import group.gnometrading.schemas.OrderExecutionReport;
+import group.gnometrading.schemas.Statics;
 import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.ListingSpec;
@@ -39,6 +40,9 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 @ExtendWith(MockitoExtension.class)
 class OrderManagementSystemTest {
+
+    // Quantities in whole units; money then reads as price × units.
+    private static final long UNIT = Statics.SIZE_SCALING_FACTOR;
 
     private static final int EXCHANGE_ID = 1;
     private static final int SECURITY_ID = 42;
@@ -104,14 +108,14 @@ class OrderManagementSystemTest {
     @Test
     void testNewOrderAboveMinNotionalIsForwarded() {
         stubSpec(0, 1000);
-        submitIntent(100L, 10L); // notional=1000 >= 1000
+        submitIntent(100L, 10L * UNIT); // notional = 100 * 10 units = 1000 >= 1000
         assertEquals(1, delegate.newOrders.size());
     }
 
     @Test
     void testNewOrderBelowMinNotionalIsRejected() {
         stubSpec(0, 1000);
-        submitIntent(10L, 5L); // notional=50 < 1000
+        submitIntent(10L, 5L * UNIT); // notional = 50 < 1000
         assertEquals(0, delegate.newOrders.size());
     }
 
@@ -122,19 +126,35 @@ class OrderManagementSystemTest {
         assertEquals(1, delegate.newOrders.size());
     }
 
+    @Test
+    void testNotionalAboveTheOldOverflowPointPassesMinNotional() {
+        // $1 minimum; 20,000 contracts at $0.60 used to overflow price * size and fail the check.
+        stubSpec(0, Statics.PRICE_SCALING_FACTOR);
+        submitIntent(600_000_000L, 20_000L * UNIT);
+        assertEquals(1, delegate.newOrders.size());
+    }
+
+    @Test
+    void testMinNotionalIsNotLoosenedByIntegerDivision() {
+        // 0.5 units at $1.999999999 is just under a $1 minimum; dividing the minimum by the size first let it pass.
+        stubSpec(0, Statics.PRICE_SCALING_FACTOR);
+        submitIntent(1_999_999_999L, UNIT / 2);
+        assertEquals(0, delegate.newOrders.size());
+    }
+
     // --- both constraints ---
 
     @Test
     void testNewOrderPassingBothConstraintsIsForwarded() {
-        stubSpec(10, 1000);
-        submitIntent(100L, 10L); // 10%10==0, 100*10=1000>=1000
+        stubSpec(10 * UNIT, 1000);
+        submitIntent(100L, 10L * UNIT); // a whole lot, and notional 1000 >= 1000
         assertEquals(1, delegate.newOrders.size());
     }
 
     @Test
     void testNewOrderFailingBothConstraintsIsRejected() {
-        stubSpec(10, 1000);
-        submitIntent(1L, 3L); // 3%10!=0 and 1*3=3<1000
+        stubSpec(10 * UNIT, 1000);
+        submitIntent(1L, 3L * UNIT); // not a whole lot, and notional 3 < 1000
         assertEquals(0, delegate.newOrders.size());
     }
 
@@ -168,12 +188,12 @@ class OrderManagementSystemTest {
     @Test
     void testModifyBelowMinNotionalIsRejected() {
         stubSpec(0, 1000);
-        submitIntent(100L, 10L); // passes initial constraints
+        submitIntent(100L, 10L * UNIT); // passes initial constraints
         assertEquals(1, delegate.newOrders.size());
 
         ackOrder(delegate.newOrders.get(0));
 
-        submitIntent(1L, 1L); // notional=1 < 1000
+        submitIntent(1L, 1L * UNIT); // notional = 1 < 1000
         assertEquals(0, delegate.modifies.size());
     }
 

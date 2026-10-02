@@ -100,7 +100,6 @@ class RingBufferOrderStateManagerTest {
         assertEquals(OrderState.PARTIALLY_FILLED, tracked.getState());
         assertEquals(3L, tracked.getFilledQty());
         assertEquals(7L, tracked.getLeavesQty());
-        assertEquals(500L, tracked.getAvgFillPrice());
     }
 
     @Test

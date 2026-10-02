@@ -39,7 +39,7 @@ public final class PolicyFactory {
     public Configurable create(final RiskPolicyType type) {
         return switch (type) {
             case KILL_SWITCH -> new AutoDenyPolicy();
-            case MAX_NOTIONAL -> new MaxNotionalValuePolicy();
+            case MAX_NOTIONAL -> new MaxNotionalValuePolicy(priceBuffer, priceSlotRegistry);
             case MAX_ORDER_SIZE -> new MaxOrderSizePolicy();
             case MAX_POSITION -> new MaxPositionPolicy();
             case MAX_PNL_LOSS -> new MaxPnlLossPolicy();

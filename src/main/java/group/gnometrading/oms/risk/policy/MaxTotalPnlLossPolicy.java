@@ -8,13 +8,13 @@ import group.gnometrading.oms.position.PositionTracker;
 import group.gnometrading.oms.risk.MarketRiskPolicy;
 import group.gnometrading.oms.risk.util.PolicyParameters;
 import group.gnometrading.oms.state.OrderStateManager;
-import group.gnometrading.schemas.Statics;
 import group.gnometrading.strings.GnomeString;
 
 /**
- * Halts a strategy when its total PnL (realized + unrealized) falls below {@code -maxLoss}.
+ * Halts a strategy when its total PnL (realized + unrealized, net of fees) falls below {@code -maxLoss}, with
+ * {@code maxLoss} in price units (1e9 per dollar).
  *
- * <p>Unrealized PnL is computed as {@code netQuantity * (markPrice - avgEntryPrice)}, where the
+ * <p>Unrealized PnL is the notional of {@code netQuantity} at {@code markPrice - avgEntryPrice}, where the
  * mark price is the last trade price read from {@link SharedPriceBuffer}. If no mark price is
  * available for a listing, this policy conservatively returns {@code false} (not violated) to
  * avoid false halts on startup.
@@ -63,8 +63,8 @@ public final class MaxTotalPnlLossPolicy extends AbstractConfigurablePolicy impl
             return false;
         }
 
-        final long unrealizedPnl = pos.netQuantity * (markPrice - pos.getAvgEntryPrice());
-        final long totalPnl = pos.realizedPnl + unrealizedPnl - pos.totalFees * Statics.SIZE_SCALING_FACTOR;
+        final long unrealizedPnl = Position.notional(markPrice - pos.getAvgEntryPrice(), pos.netQuantity);
+        final long totalPnl = pos.realizedPnl + unrealizedPnl - pos.totalFees;
         return totalPnl < -maxLoss;
     }
 }

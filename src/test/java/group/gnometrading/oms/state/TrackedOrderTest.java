@@ -58,7 +58,6 @@ class TrackedOrderTest {
         assertEquals(0, order.getSecurityId());
         assertEquals(0, order.getFilledQty());
         assertEquals(0, order.getLeavesQty());
-        assertEquals(0, order.getAvgFillPrice());
     }
 
     // --- applyExecutionReport ---
@@ -82,8 +81,6 @@ class TrackedOrderTest {
         assertEquals(OrderState.PARTIALLY_FILLED, order.getState());
         assertEquals(3L, order.getFilledQty());
         assertEquals(7L, order.getLeavesQty());
-        // totalCost = 3*100 = 300; avgFillPrice = 300/3 = 100
-        assertEquals(100L, order.getAvgFillPrice());
     }
 
     @Test
@@ -94,8 +91,6 @@ class TrackedOrderTest {
 
         assertEquals(7L, order.getFilledQty());
         assertEquals(3L, order.getLeavesQty());
-        // totalCost = 3*100 + 4*110 = 740; avgFill = 740/7 = 105
-        assertEquals(740L / 7L, order.getAvgFillPrice());
     }
 
     @Test
@@ -108,20 +103,18 @@ class TrackedOrderTest {
         assertEquals(10L, order.getFilledQty());
         assertEquals(0L, order.getLeavesQty());
         assertTrue(order.getState().isTerminal());
-        // totalCost = 3*100 + 7*105 = 300+735 = 1035; avg = 1035/10 = 103
-        assertEquals(1035L / 10L, order.getAvgFillPrice());
     }
 
     @Test
-    void applyCancel_setsTerminalState_leavesQtyNotZeroed() {
+    void applyCancel_setsTerminalState_andZeroesLeaves() {
         initOrder(10L);
         applyReport(ExecType.NEW, 0, 0, 0, 10, OrderExecutionReportDecoder.feeNullValue());
         applyReport(ExecType.CANCEL, 0, 0, 0, 10, OrderExecutionReportDecoder.feeNullValue());
 
         assertEquals(OrderState.CANCELED, order.getState());
         assertTrue(order.getState().isTerminal());
-        // leavesQty is NOT zeroed on CANCEL — OMS reads leavesQtyBefore to track position correctly
-        assertEquals(10L, order.getLeavesQty());
+        // Nothing is working once cancelled; the OMS reads the leaves before applying the report.
+        assertEquals(0L, order.getLeavesQty());
     }
 
     @Test
@@ -153,22 +146,6 @@ class TrackedOrderTest {
     }
 
     @Test
-    void applyFillWithFee_includesFeeInTotalCost() {
-        initOrder(1L);
-        // qty=1 so avgFillPrice == totalCost, making fee visible without integer division loss
-        applyReport(ExecType.FILL, 1, 100, 1, 0, 5);
-
-        // totalCost = 1*100 + 5 = 105; avgFill = 105/1 = 105
-        assertEquals(105L, order.getAvgFillPrice());
-    }
-
-    @Test
-    void avgFillPrice_withZeroFilledQty_returnsZero() {
-        initOrder(10L);
-        assertEquals(0L, order.getAvgFillPrice());
-    }
-
-    @Test
     void modify_updatesPriceSizeAndLeavesQty() {
         initOrder(10L);
         applyReport(ExecType.NEW, 0, 0, 0, 10, OrderExecutionReportDecoder.feeNullValue());
@@ -180,14 +157,51 @@ class TrackedOrderTest {
     }
 
     @Test
-    void applyPartialFill_withNullFee_treatsNullAsZero() {
+    void applyRejectAndExpire_zeroLeaves() {
         initOrder(10L);
-        long nullFee = OrderExecutionReportDecoder.feeNullValue();
-        applyReport(ExecType.PARTIAL_FILL, 5, 100, 5, 5, nullFee);
+        applyReport(ExecType.REJECT, 0, 0, 0, 10, OrderExecutionReportDecoder.feeNullValue());
+        assertEquals(0L, order.getLeavesQty());
 
-        // Null fee sentinel must be treated as 0, not added as Long.MIN_VALUE.
-        // totalCost = 5*100 + 0 = 500; avgFillPrice = 500/5 = 100
-        assertEquals(100L, order.getAvgFillPrice());
+        initOrder(10L);
+        applyReport(ExecType.NEW, 0, 0, 0, 10, OrderExecutionReportDecoder.feeNullValue());
+        applyReport(ExecType.EXPIRE, 0, 0, 0, 10, OrderExecutionReportDecoder.feeNullValue());
+        assertEquals(0L, order.getLeavesQty());
+    }
+
+    @Test
+    void applyNew_withNullLeaves_keepsCurrentLeaves() {
+        initOrder(10L);
+        applyReport(ExecType.NEW, 0, 0, 0, OrderExecutionReportDecoder.leavesQtyNullValue(), 0);
+
+        assertEquals(OrderState.NEW, order.getState());
+        assertEquals(10L, order.getLeavesQty());
+    }
+
+    @Test
+    void applyPartialFill_withNullCumulative_addsTheFillToWhatWasFilled() {
+        initOrder(10L);
+        applyReport(ExecType.PARTIAL_FILL, 3, 100, 3, 7, 0);
+        applyReport(ExecType.PARTIAL_FILL, 2, 100, OrderExecutionReportDecoder.cumulativeQtyNullValue(), 5, 0);
+
+        assertEquals(5L, order.getFilledQty());
+    }
+
+    @Test
+    void applyPartialFill_withNullLeaves_derivesThemFromTheOrderSize() {
+        initOrder(10L);
+        applyReport(ExecType.PARTIAL_FILL, 4, 100, 4, OrderExecutionReportDecoder.leavesQtyNullValue(), 0);
+
+        assertEquals(6L, order.getLeavesQty());
+    }
+
+    @Test
+    void sizesBeyondTheOld32BitLimitAreKept() {
+        long size = 50_000L * 1_000_000L;
+        initOrder(size);
+        applyReport(ExecType.PARTIAL_FILL, size / 2, 600_000_000L, size / 2, size / 2, 0);
+
+        assertEquals(size / 2, order.getFilledQty());
+        assertEquals(size / 2, order.getLeavesQty());
     }
 
     // --- helpers ---
@@ -206,10 +220,10 @@ class TrackedOrderTest {
                 .orderId(0)
                 .execType(type)
                 .orderStatus(OrderStatus.NULL_VAL)
-                .filledQty((int) filledQty)
+                .filledQty(filledQty)
                 .fillPrice(fillPrice)
-                .cumulativeQty((int) cumQty)
-                .leavesQty((int) leavesQty)
+                .cumulativeQty(cumQty)
+                .leavesQty(leavesQty)
                 .timestampEvent(0)
                 .timestampRecv(0)
                 .fee(fee);

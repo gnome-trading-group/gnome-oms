@@ -3,10 +3,14 @@ package group.gnometrading.oms.position;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import group.gnometrading.schemas.Side;
+import group.gnometrading.schemas.Statics;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 class PositionTest {
+
+    // Quantities in whole units; money then reads as price × units.
+    private static final long UNIT = Statics.SIZE_SCALING_FACTOR;
 
     private Position position;
 
@@ -44,18 +48,18 @@ class PositionTest {
 
     @Test
     void applyFill_openLongFromFlat() {
-        position.applyFill(Side.Bid, 10, 100, 0);
+        position.applyFill(Side.Bid, 10 * UNIT, 100, 0);
 
-        assertEquals(10, position.netQuantity);
+        assertEquals(10 * UNIT, position.netQuantity);
         assertEquals(1000, position.totalCost);
         assertEquals(0, position.realizedPnl);
     }
 
     @Test
     void applyFill_openShortFromFlat() {
-        position.applyFill(Side.Ask, 10, 100, 0);
+        position.applyFill(Side.Ask, 10 * UNIT, 100, 0);
 
-        assertEquals(-10, position.netQuantity);
+        assertEquals(-10 * UNIT, position.netQuantity);
         assertEquals(1000, position.totalCost);
         assertEquals(0, position.realizedPnl);
     }
@@ -64,20 +68,20 @@ class PositionTest {
 
     @Test
     void applyFill_addToLong() {
-        position.applyFill(Side.Bid, 10, 100, 0);
-        position.applyFill(Side.Bid, 5, 120, 0);
+        position.applyFill(Side.Bid, 10 * UNIT, 100, 0);
+        position.applyFill(Side.Bid, 5 * UNIT, 120, 0);
 
-        assertEquals(15, position.netQuantity);
+        assertEquals(15 * UNIT, position.netQuantity);
         assertEquals(1600, position.totalCost);
         assertEquals(0, position.realizedPnl);
     }
 
     @Test
     void applyFill_addToShort() {
-        position.applyFill(Side.Ask, 10, 100, 0);
-        position.applyFill(Side.Ask, 5, 120, 0);
+        position.applyFill(Side.Ask, 10 * UNIT, 100, 0);
+        position.applyFill(Side.Ask, 5 * UNIT, 120, 0);
 
-        assertEquals(-15, position.netQuantity);
+        assertEquals(-15 * UNIT, position.netQuantity);
         assertEquals(1600, position.totalCost);
         assertEquals(0, position.realizedPnl);
     }
@@ -86,20 +90,20 @@ class PositionTest {
 
     @Test
     void applyFill_partialCloseLong() {
-        position.applyFill(Side.Bid, 10, 100, 0); // long 10 @ avg 100
-        position.applyFill(Side.Ask, 5, 120, 0); // sell 5 @ 120
+        position.applyFill(Side.Bid, 10 * UNIT, 100, 0); // long 10 @ avg 100
+        position.applyFill(Side.Ask, 5 * UNIT, 120, 0); // sell 5 @ 120
 
-        assertEquals(5, position.netQuantity);
+        assertEquals(5 * UNIT, position.netQuantity);
         assertEquals(500, position.totalCost); // avgEntry(100) * 5
         assertEquals(100, position.realizedPnl); // 5 * (120 - 100)
     }
 
     @Test
     void applyFill_partialCloseShort() {
-        position.applyFill(Side.Ask, 10, 100, 0); // short 10 @ avg 100
-        position.applyFill(Side.Bid, 5, 80, 0); // buy 5 @ 80
+        position.applyFill(Side.Ask, 10 * UNIT, 100, 0); // short 10 @ avg 100
+        position.applyFill(Side.Bid, 5 * UNIT, 80, 0); // buy 5 @ 80
 
-        assertEquals(-5, position.netQuantity);
+        assertEquals(-5 * UNIT, position.netQuantity);
         assertEquals(500, position.totalCost); // avgEntry(100) * 5
         assertEquals(100, position.realizedPnl); // 5 * (100 - 80)
     }
@@ -108,8 +112,8 @@ class PositionTest {
 
     @Test
     void applyFill_fullCloseLong() {
-        position.applyFill(Side.Bid, 10, 100, 0);
-        position.applyFill(Side.Ask, 10, 120, 0);
+        position.applyFill(Side.Bid, 10 * UNIT, 100, 0);
+        position.applyFill(Side.Ask, 10 * UNIT, 120, 0);
 
         assertEquals(0, position.netQuantity);
         assertEquals(0, position.totalCost);
@@ -118,8 +122,8 @@ class PositionTest {
 
     @Test
     void applyFill_fullCloseShort() {
-        position.applyFill(Side.Ask, 10, 100, 0);
-        position.applyFill(Side.Bid, 10, 80, 0);
+        position.applyFill(Side.Ask, 10 * UNIT, 100, 0);
+        position.applyFill(Side.Bid, 10 * UNIT, 80, 0);
 
         assertEquals(0, position.netQuantity);
         assertEquals(0, position.totalCost);
@@ -130,20 +134,20 @@ class PositionTest {
 
     @Test
     void applyFill_flipLongToShort() {
-        position.applyFill(Side.Bid, 10, 100, 0); // long 10 @ 100
-        position.applyFill(Side.Ask, 15, 120, 0); // sell 15 @ 120 -> close 10, open short 5
+        position.applyFill(Side.Bid, 10 * UNIT, 100, 0); // long 10 @ 100
+        position.applyFill(Side.Ask, 15 * UNIT, 120, 0); // sell 15 @ 120 -> close 10, open short 5
 
-        assertEquals(-5, position.netQuantity);
+        assertEquals(-5 * UNIT, position.netQuantity);
         assertEquals(600, position.totalCost); // 120 * 5 (new short opened at fill price)
         assertEquals(200, position.realizedPnl); // 10 * (120 - 100)
     }
 
     @Test
     void applyFill_flipShortToLong() {
-        position.applyFill(Side.Ask, 10, 100, 0); // short 10 @ 100
-        position.applyFill(Side.Bid, 15, 80, 0); // buy 15 @ 80 -> close 10, open long 5
+        position.applyFill(Side.Ask, 10 * UNIT, 100, 0); // short 10 @ 100
+        position.applyFill(Side.Bid, 15 * UNIT, 80, 0); // buy 15 @ 80 -> close 10, open long 5
 
-        assertEquals(5, position.netQuantity);
+        assertEquals(5 * UNIT, position.netQuantity);
         assertEquals(400, position.totalCost); // 80 * 5 (new long opened at fill price)
         assertEquals(200, position.realizedPnl); // 10 * (100 - 80)
     }
@@ -152,8 +156,8 @@ class PositionTest {
 
     @Test
     void applyFill_accumulatesFees() {
-        position.applyFill(Side.Bid, 10, 100, 3);
-        position.applyFill(Side.Ask, 5, 120, 7);
+        position.applyFill(Side.Bid, 10 * UNIT, 100, 3);
+        position.applyFill(Side.Ask, 5 * UNIT, 120, 7);
 
         assertEquals(10, position.totalFees);
     }
@@ -162,13 +166,13 @@ class PositionTest {
 
     @Test
     void applyFill_buildAndUnwindPosition() {
-        position.applyFill(Side.Bid, 10, 100, 1); // long 10 @ 100
-        position.applyFill(Side.Bid, 5, 110, 1); // long 15, avg = (1000+550)/15 = 103.33...
-        position.applyFill(Side.Ask, 8, 120, 1); // close 8 of 15
+        position.applyFill(Side.Bid, 10 * UNIT, 100, 1); // long 10 @ 100
+        position.applyFill(Side.Bid, 5 * UNIT, 110, 1); // long 15, avg = (1000+550)/15 = 103.33...
+        position.applyFill(Side.Ask, 8 * UNIT, 120, 1); // close 8 of 15
 
         // avgEntry after 2 buys = 1550/15 = 103
         long avgEntry = 1550 / 15;
-        assertEquals(7, position.netQuantity);
+        assertEquals(7 * UNIT, position.netQuantity);
         assertEquals(avgEntry * 7, position.totalCost);
         assertEquals(8 * (120 - avgEntry), position.realizedPnl);
         assertEquals(3, position.totalFees);
@@ -183,20 +187,20 @@ class PositionTest {
 
     @Test
     void getAvgEntryPrice_longPosition() {
-        position.applyFill(Side.Bid, 10, 100, 0);
+        position.applyFill(Side.Bid, 10 * UNIT, 100, 0);
         assertEquals(100, position.getAvgEntryPrice());
     }
 
     @Test
     void getAvgEntryPrice_shortPosition() {
-        position.applyFill(Side.Ask, 10, 100, 0);
+        position.applyFill(Side.Ask, 10 * UNIT, 100, 0);
         assertEquals(100, position.getAvgEntryPrice());
     }
 
     @Test
     void getAvgEntryPrice_weightedAfterMultipleBuys() {
-        position.applyFill(Side.Bid, 10, 100, 0);
-        position.applyFill(Side.Bid, 10, 200, 0);
+        position.applyFill(Side.Bid, 10 * UNIT, 100, 0);
+        position.applyFill(Side.Bid, 10 * UNIT, 200, 0);
         // totalCost = 3000, netQty = 20
         assertEquals(150, position.getAvgEntryPrice());
     }
@@ -235,16 +239,41 @@ class PositionTest {
 
     @Test
     void getEffectiveQuantity_noLeaves() {
-        position.applyFill(Side.Bid, 10, 100, 0);
-        assertEquals(10, position.getEffectiveQuantity());
+        position.applyFill(Side.Bid, 10 * UNIT, 100, 0);
+        assertEquals(10 * UNIT, position.getEffectiveQuantity());
     }
 
     @Test
     void getEffectiveQuantity_withLeaves() {
-        position.applyFill(Side.Bid, 10, 100, 0);
-        position.addLeaves(Side.Bid, 3);
-        position.addLeaves(Side.Ask, 2);
-        assertEquals(11, position.getEffectiveQuantity()); // 10 + 3 - 2
+        position.applyFill(Side.Bid, 10 * UNIT, 100, 0);
+        position.addLeaves(Side.Bid, 3 * UNIT);
+        position.addLeaves(Side.Ask, 2 * UNIT);
+        assertEquals(11 * UNIT, position.getEffectiveQuantity()); // 10 + 3 - 2
+    }
+
+    @Test
+    void largePositionCostAndPnlAreExact() {
+        // 50,000 contracts at $0.60 then sold at $0.75: price * size alone is past Long.MAX_VALUE.
+        position.applyFill(Side.Bid, 50_000 * UNIT, 600_000_000L, 0);
+
+        assertEquals(30_000L * Statics.PRICE_SCALING_FACTOR, position.totalCost);
+        assertEquals(600_000_000L, position.getAvgEntryPrice());
+
+        position.applyFill(Side.Ask, 50_000 * UNIT, 750_000_000L, 0);
+
+        assertEquals(7_500L * Statics.PRICE_SCALING_FACTOR, position.realizedPnl);
+        assertEquals(0, position.netQuantity);
+    }
+
+    @Test
+    void largePositionReversalThroughZeroKeepsTheRemainderAtTheNewPrice() {
+        position.applyFill(Side.Bid, 20_000 * UNIT, 500_000_000L, 0);
+        position.applyFill(Side.Ask, 30_000 * UNIT, 400_000_000L, 0);
+
+        assertEquals(-2_000L * Statics.PRICE_SCALING_FACTOR, position.realizedPnl);
+        assertEquals(-10_000 * UNIT, position.netQuantity);
+        assertEquals(4_000L * Statics.PRICE_SCALING_FACTOR, position.totalCost);
+        assertEquals(400_000_000L, position.getAvgEntryPrice());
     }
 
     // --- setFromBuffer ---

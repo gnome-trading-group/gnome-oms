@@ -6,6 +6,8 @@ import group.gnometrading.oms.position.Position;
 import group.gnometrading.schemas.ExecType;
 import group.gnometrading.schemas.OrderExecutionReportDecoder;
 import group.gnometrading.schemas.Side;
+import group.gnometrading.schemas.Statics;
+import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -20,10 +22,17 @@ import org.junit.jupiter.api.Test;
 class OmsModelBasedTest {
 
     // =========================================================================
-    // ModelPosition — exact replica of Position.applyFill (including integer division)
+    // ModelPosition — Position.applyFill's rules, with money computed independently in BigInteger
     // =========================================================================
 
+    // Random orders are a few multiples of these, so price * size passes Long.MAX_VALUE and only exact
+    // notional arithmetic keeps the model and the OMS in agreement.
+    static final long SIZE_STEP = 10_000L * Statics.SIZE_SCALING_FACTOR;
+    static final long PRICE_STEP = Statics.PRICE_SCALING_FACTOR / 100;
+
     static final class ModelPosition {
+        private static final BigInteger SIZE_SCALE = BigInteger.valueOf(Statics.SIZE_SCALING_FACTOR);
+
         long netQuantity;
         long totalCost;
         long realizedPnl;
@@ -31,31 +40,42 @@ class OmsModelBasedTest {
         long leavesBuyQty;
         long leavesSellQty;
 
-        // Must match Position.applyFill exactly (same integer division, same branches).
         void applyFill(Side side, long qty, long price, long fee) {
             long signedQty = (side == Side.Bid) ? qty : -qty;
             totalFees += fee;
             if (netQuantity == 0) {
                 netQuantity = signedQty;
-                totalCost = price * qty;
+                totalCost = notional(price, qty);
             } else if (Long.signum(netQuantity) == Long.signum(signedQty)) {
-                totalCost += price * qty;
+                totalCost += notional(price, qty);
                 netQuantity += signedQty;
             } else {
                 long closeQty = Math.min(Math.abs(netQuantity), qty);
                 long avgEntry = getAvgEntryPrice();
-                if (netQuantity > 0) realizedPnl += closeQty * (price - avgEntry);
-                else realizedPnl += closeQty * (avgEntry - price);
+                if (netQuantity > 0) realizedPnl += notional(price - avgEntry, closeQty);
+                else realizedPnl += notional(avgEntry - price, closeQty);
                 long prevQty = netQuantity;
                 netQuantity += signedQty;
                 if (netQuantity == 0) totalCost = 0;
-                else if (Long.signum(netQuantity) != Long.signum(prevQty)) totalCost = price * Math.abs(netQuantity);
-                else totalCost = avgEntry * Math.abs(netQuantity);
+                else if (Long.signum(netQuantity) != Long.signum(prevQty))
+                    totalCost = notional(price, Math.abs(netQuantity));
+                else totalCost = notional(avgEntry, Math.abs(netQuantity));
             }
         }
 
         long getAvgEntryPrice() {
-            return netQuantity == 0 ? 0 : totalCost / Math.abs(netQuantity);
+            if (netQuantity == 0) return 0;
+            return BigInteger.valueOf(totalCost)
+                    .multiply(SIZE_SCALE)
+                    .divide(BigInteger.valueOf(Math.abs(netQuantity)))
+                    .longValueExact();
+        }
+
+        private static long notional(long price, long qty) {
+            return BigInteger.valueOf(price)
+                    .multiply(BigInteger.valueOf(qty))
+                    .divide(SIZE_SCALE)
+                    .longValueExact();
         }
 
         void addLeaves(Side side, long qty) {
@@ -456,12 +476,12 @@ class OmsModelBasedTest {
             if (sendIntent) {
                 long bidPrice = 0, bidSize = 0, askPrice = 0, askSize = 0;
                 if (useBid && rng.nextInt(4) > 0) {
-                    bidPrice = 100L + rng.nextInt(5);
-                    bidSize = 1L + rng.nextInt(4);
+                    bidPrice = (100L + rng.nextInt(5)) * PRICE_STEP;
+                    bidSize = (1L + rng.nextInt(4)) * SIZE_STEP;
                 }
                 if (useAsk && rng.nextInt(4) > 0) {
-                    askPrice = 110L + rng.nextInt(5);
-                    askSize = 1L + rng.nextInt(4);
+                    askPrice = (110L + rng.nextInt(5)) * PRICE_STEP;
+                    askSize = (1L + rng.nextInt(4)) * SIZE_STEP;
                 }
                 h.submitBothIntent(bidPrice, bidSize, askPrice, askSize);
                 model.processIntent(bidPrice, bidSize, askPrice, askSize);
@@ -479,8 +499,8 @@ class OmsModelBasedTest {
                         o.acked = true;
                     }
                     case PARTIAL_FILL -> {
-                        filledQty = 1 + rng.nextInt((int) (o.leavesQty - 1));
-                        fillPrice = 100L + rng.nextInt(10);
+                        filledQty = (1 + rng.nextInt((int) (o.leavesQty / SIZE_STEP - 1))) * SIZE_STEP;
+                        fillPrice = (100L + rng.nextInt(10)) * PRICE_STEP;
                         fee = rng.nextInt(4) == 0 ? rng.nextInt(5) + 1L : 0L;
                         o.cumQty += filledQty;
                         o.leavesQty -= filledQty;
@@ -489,7 +509,7 @@ class OmsModelBasedTest {
                     }
                     case FILL -> {
                         filledQty = o.leavesQty;
-                        fillPrice = 100L + rng.nextInt(10);
+                        fillPrice = (100L + rng.nextInt(10)) * PRICE_STEP;
                         fee = rng.nextInt(4) == 0 ? rng.nextInt(5) + 1L : 0L;
                         cumQty = o.cumQty + filledQty;
                         leavesQty = 0;
@@ -570,12 +590,12 @@ class OmsModelBasedTest {
                 // Make intent
                 long bidPrice = 0, bidSize = 0, askPrice = 0, askSize = 0;
                 if (rng.nextInt(4) > 0) {
-                    bidPrice = 100L + rng.nextInt(5);
-                    bidSize = 1L + rng.nextInt(4);
+                    bidPrice = (100L + rng.nextInt(5)) * PRICE_STEP;
+                    bidSize = (1L + rng.nextInt(4)) * SIZE_STEP;
                 }
                 if (rng.nextInt(4) > 0) {
-                    askPrice = 110L + rng.nextInt(5);
-                    askSize = 1L + rng.nextInt(4);
+                    askPrice = (110L + rng.nextInt(5)) * PRICE_STEP;
+                    askSize = (1L + rng.nextInt(4)) * SIZE_STEP;
                 }
                 h.submitBothIntent(bidPrice, bidSize, askPrice, askSize);
                 model.processIntent(bidPrice, bidSize, askPrice, askSize);
@@ -591,7 +611,7 @@ class OmsModelBasedTest {
             } else if (action == 2) {
                 // Take intent
                 Side takeSide = rng.nextBoolean() ? Side.Bid : Side.Ask;
-                long takeSize = 1L + rng.nextInt(5);
+                long takeSize = (1L + rng.nextInt(5)) * SIZE_STEP;
                 long oid = h.submitTakeIntent(takeSize, takeSide);
                 model.processTakeIntent(takeSide, OmsTestHarness.SECURITY_ID, OmsTestHarness.LISTING_ID, takeSize);
                 OutstandingOrder o = new OutstandingOrder(
@@ -619,8 +639,8 @@ class OmsModelBasedTest {
                         o.acked = true;
                     }
                     case PARTIAL_FILL -> {
-                        filledQty = 1 + rng.nextInt((int) (o.leavesQty - 1));
-                        fillPrice = 100L + rng.nextInt(10);
+                        filledQty = (1 + rng.nextInt((int) (o.leavesQty / SIZE_STEP - 1))) * SIZE_STEP;
+                        fillPrice = (100L + rng.nextInt(10)) * PRICE_STEP;
                         fee = rng.nextInt(4) == 0 ? rng.nextInt(5) + 1L : 0L;
                         o.cumQty += filledQty;
                         o.leavesQty -= filledQty;
@@ -629,7 +649,7 @@ class OmsModelBasedTest {
                     }
                     case FILL -> {
                         filledQty = o.leavesQty;
-                        fillPrice = 100L + rng.nextInt(10);
+                        fillPrice = (100L + rng.nextInt(10)) * PRICE_STEP;
                         fee = rng.nextInt(4) == 0 ? rng.nextInt(5) + 1L : 0L;
                         cumQty = o.cumQty + filledQty;
                         leavesQty = 0;
@@ -716,12 +736,12 @@ class OmsModelBasedTest {
             if (sendIntent) {
                 long bidPrice = 0, bidSize = 0, askPrice = 0, askSize = 0;
                 if (rng.nextInt(4) > 0) {
-                    bidPrice = 100L + rng.nextInt(5);
-                    bidSize = 1L + rng.nextInt(4);
+                    bidPrice = (100L + rng.nextInt(5)) * PRICE_STEP;
+                    bidSize = (1L + rng.nextInt(4)) * SIZE_STEP;
                 }
                 if (rng.nextInt(4) > 0) {
-                    askPrice = 110L + rng.nextInt(5);
-                    askSize = 1L + rng.nextInt(4);
+                    askPrice = (110L + rng.nextInt(5)) * PRICE_STEP;
+                    askSize = (1L + rng.nextInt(4)) * SIZE_STEP;
                 }
                 h.submitBothIntent(OmsTestHarness.STRATEGY_ID, securityId, bidPrice, bidSize, askPrice, askSize);
                 model.processIntent(securityId, listingId, bidPrice, bidSize, askPrice, askSize);
@@ -741,8 +761,8 @@ class OmsModelBasedTest {
                         o.acked = true;
                     }
                     case PARTIAL_FILL -> {
-                        filledQty = 1 + rng.nextInt((int) (o.leavesQty - 1));
-                        fillPrice = 100L + rng.nextInt(10);
+                        filledQty = (1 + rng.nextInt((int) (o.leavesQty / SIZE_STEP - 1))) * SIZE_STEP;
+                        fillPrice = (100L + rng.nextInt(10)) * PRICE_STEP;
                         fee = rng.nextInt(4) == 0 ? rng.nextInt(5) + 1L : 0L;
                         o.cumQty += filledQty;
                         o.leavesQty -= filledQty;
@@ -751,7 +771,7 @@ class OmsModelBasedTest {
                     }
                     case FILL -> {
                         filledQty = o.leavesQty;
-                        fillPrice = 100L + rng.nextInt(10);
+                        fillPrice = (100L + rng.nextInt(10)) * PRICE_STEP;
                         fee = rng.nextInt(4) == 0 ? rng.nextInt(5) + 1L : 0L;
                         cumQty = o.cumQty + filledQty;
                         leavesQty = 0;
@@ -830,12 +850,12 @@ class OmsModelBasedTest {
             if (sendIntent) {
                 long bidPrice = 0, bidSize = 0, askPrice = 0, askSize = 0;
                 if (rng.nextInt(4) > 0) {
-                    bidPrice = 100L + rng.nextInt(5);
-                    bidSize = 1L + rng.nextInt(4);
+                    bidPrice = (100L + rng.nextInt(5)) * PRICE_STEP;
+                    bidSize = (1L + rng.nextInt(4)) * SIZE_STEP;
                 }
                 if (rng.nextInt(4) > 0) {
-                    askPrice = 110L + rng.nextInt(5);
-                    askSize = 1L + rng.nextInt(4);
+                    askPrice = (110L + rng.nextInt(5)) * PRICE_STEP;
+                    askSize = (1L + rng.nextInt(4)) * SIZE_STEP;
                 }
                 h.submitBothIntent(strategyId, OmsTestHarness.SECURITY_ID, bidPrice, bidSize, askPrice, askSize);
                 model.processIntent(bidPrice, bidSize, askPrice, askSize);
@@ -855,8 +875,8 @@ class OmsModelBasedTest {
                         o.acked = true;
                     }
                     case PARTIAL_FILL -> {
-                        filledQty = 1 + rng.nextInt((int) (o.leavesQty - 1));
-                        fillPrice = 100L + rng.nextInt(10);
+                        filledQty = (1 + rng.nextInt((int) (o.leavesQty / SIZE_STEP - 1))) * SIZE_STEP;
+                        fillPrice = (100L + rng.nextInt(10)) * PRICE_STEP;
                         fee = rng.nextInt(4) == 0 ? rng.nextInt(5) + 1L : 0L;
                         o.cumQty += filledQty;
                         o.leavesQty -= filledQty;
@@ -865,7 +885,7 @@ class OmsModelBasedTest {
                     }
                     case FILL -> {
                         filledQty = o.leavesQty;
-                        fillPrice = 100L + rng.nextInt(10);
+                        fillPrice = (100L + rng.nextInt(10)) * PRICE_STEP;
                         fee = rng.nextInt(4) == 0 ? rng.nextInt(5) + 1L : 0L;
                         cumQty = o.cumQty + filledQty;
                         leavesQty = 0;
@@ -1019,7 +1039,7 @@ class OmsModelBasedTest {
             if (roll < 9) return ExecType.REJECT;
             return ExecType.FILL;
         }
-        if (o.leavesQty <= 1) {
+        if (o.leavesQty <= SIZE_STEP) {
             int roll = rng.nextInt(o.isTake ? 4 : 5);
             if (roll < 2) return ExecType.FILL;
             if (roll < 4) return ExecType.CANCEL;
