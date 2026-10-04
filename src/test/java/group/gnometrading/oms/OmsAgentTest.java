@@ -11,7 +11,9 @@ import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.DefaultPositionTracker;
 import group.gnometrading.oms.position.SharedPositionBuffer;
 import group.gnometrading.oms.risk.RiskEngine;
+import group.gnometrading.oms.risk.RiskSnapshots;
 import group.gnometrading.oms.state.RingBufferOrderStateManager;
+import group.gnometrading.schemas.CancelOrderDecoder;
 import group.gnometrading.schemas.ExecType;
 import group.gnometrading.schemas.Intent;
 import group.gnometrading.schemas.IntentDecoder;
@@ -62,6 +64,7 @@ class OmsAgentTest {
     private SequencedPoller strategyPoller;
 
     private final List<DrainedMessage> outboundMessages = new ArrayList<>();
+    private RiskEngine riskEngine;
     private final List<DrainedExecReport> strategyExecReports = new ArrayList<>();
 
     @BeforeEach
@@ -77,7 +80,7 @@ class OmsAgentTest {
 
         RingBufferOrderStateManager orderStateManager = new RingBufferOrderStateManager(64);
         DefaultPositionTracker positionTracker = new DefaultPositionTracker(new SharedPositionBuffer(16));
-        RiskEngine riskEngine = new RiskEngine();
+        riskEngine = new RiskEngine();
         oms = new OrderManagementSystem(
                 new NullLogger(),
                 orderStateManager,
@@ -117,6 +120,24 @@ class OmsAgentTest {
         outboundPoller.poll();
         assertEquals(1, outboundMessages.size()); // new order from intent
         assertEquals(OrderDecoder.TEMPLATE_ID, outboundMessages.get(0).templateId);
+    }
+
+    @Test
+    void doWork_appliesAPublishedKillSwitch() throws Exception {
+        publishIntent(100L, 10L);
+        omsAgent.doWork();
+        outboundPoller.poll();
+        long counter = decodeFirstOutboundOrder().getClientOidCounter();
+        publishExecReport(counter, ExecType.NEW);
+        omsAgent.doWork();
+        outboundMessages.clear();
+
+        RiskSnapshots.publishKills(riskEngine, true, new int[] {}, new int[] {});
+        omsAgent.doWork();
+        outboundPoller.poll();
+
+        assertEquals(1, outboundMessages.size());
+        assertEquals(CancelOrderDecoder.TEMPLATE_ID, outboundMessages.get(0).templateId);
     }
 
     @Test

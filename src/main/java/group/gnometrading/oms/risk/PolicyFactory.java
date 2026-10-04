@@ -2,7 +2,6 @@ package group.gnometrading.oms.risk;
 
 import group.gnometrading.oms.pnl.PriceSlotRegistry;
 import group.gnometrading.oms.pnl.SharedPriceBuffer;
-import group.gnometrading.oms.risk.policy.AutoDenyPolicy;
 import group.gnometrading.oms.risk.policy.MaxNotionalValuePolicy;
 import group.gnometrading.oms.risk.policy.MaxOrderSizePolicy;
 import group.gnometrading.oms.risk.policy.MaxPnlLossPolicy;
@@ -38,7 +37,7 @@ public final class PolicyFactory {
      */
     public Configurable create(final RiskPolicyType type) {
         return switch (type) {
-            case KILL_SWITCH -> new AutoDenyPolicy();
+            case KILL_SWITCH -> throw new IllegalArgumentException("KILL_SWITCH is a kill scope, not a policy");
             case MAX_NOTIONAL -> new MaxNotionalValuePolicy(priceBuffer, priceSlotRegistry);
             case MAX_ORDER_SIZE -> new MaxOrderSizePolicy();
             case MAX_POSITION -> new MaxPositionPolicy();

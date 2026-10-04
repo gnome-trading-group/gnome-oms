@@ -10,13 +10,15 @@ import group.gnometrading.oms.risk.util.PolicyParameters;
 import group.gnometrading.oms.state.OrderStateManager;
 import group.gnometrading.schemas.Order;
 import group.gnometrading.schemas.OrderDecoder;
+import group.gnometrading.schemas.Side;
 import group.gnometrading.strings.GnomeString;
 
 /**
  * Rejects an order whose notional exceeds {@code maxNotionalValue}, in price units (1e9 per dollar).
  *
- * <p>A market order has no price, so it is valued at the listing's mark price. With no mark price (none
- * traded yet, or no price buffer, as in backtests) its notional is unknown and the order is rejected.
+ * <p>A market order has no price, so it is valued where it would execute: the best ask for a buy, the best bid
+ * for a sell, or the last trade when that side of the book is empty. With no price at all (an empty book and no
+ * trade yet, or no price buffer) its notional is unknown and the order is rejected.
  */
 public final class MaxNotionalValuePolicy extends AbstractConfigurablePolicy implements OrderRiskPolicy {
 
@@ -52,18 +54,20 @@ public final class MaxNotionalValuePolicy extends AbstractConfigurablePolicy imp
             final PositionTracker positions,
             final OrderStateManager orders) {
         final long price = order.decoder.price();
-        final long valuationPrice = price == OrderDecoder.priceNullValue() ? markPrice(listingId) : Math.abs(price);
+        final long valuationPrice = price == OrderDecoder.priceNullValue()
+                ? executionPrice(listingId, order.decoder.side())
+                : Math.abs(price);
         if (valuationPrice <= 0) {
             return true;
         }
         return Position.notional(valuationPrice, order.decoder.size()) > maxNotionalValue;
     }
 
-    private long markPrice(final int listingId) {
+    private long executionPrice(final int listingId, final Side side) {
         if (priceBuffer == null || priceSlotRegistry == null) {
             return 0;
         }
         final int slot = priceSlotRegistry.getSlot(listingId);
-        return slot == IntToIntHashMap.MISSING ? 0 : priceBuffer.readSpinning(slot);
+        return slot == IntToIntHashMap.MISSING ? 0 : priceBuffer.executionPrice(slot, side);
     }
 }

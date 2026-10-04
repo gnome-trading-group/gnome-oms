@@ -88,7 +88,7 @@ class RingBufferOrderStateManagerTest {
 
         assertNotNull(tracked);
         assertEquals(OrderState.NEW, tracked.getState());
-        assertEquals(10L, tracked.getLeavesQty());
+        assertEquals(10L, tracked.workingQty());
     }
 
     @Test
@@ -99,7 +99,7 @@ class RingBufferOrderStateManagerTest {
 
         assertEquals(OrderState.PARTIALLY_FILLED, tracked.getState());
         assertEquals(3L, tracked.getFilledQty());
-        assertEquals(7L, tracked.getLeavesQty());
+        assertEquals(7L, tracked.workingQty());
     }
 
     @Test
@@ -110,7 +110,7 @@ class RingBufferOrderStateManagerTest {
 
         assertEquals(OrderState.FILLED, tracked.getState());
         assertEquals(10L, tracked.getFilledQty());
-        assertEquals(0L, tracked.getLeavesQty());
+        assertEquals(0L, tracked.workingQty());
     }
 
     @Test

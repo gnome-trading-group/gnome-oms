@@ -1,6 +1,7 @@
 package group.gnometrading.oms.pnl;
 
 import group.gnometrading.SecurityMaster;
+import group.gnometrading.collections.IntToIntHashMap;
 import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.schemas.Action;
 import group.gnometrading.schemas.MboDecoder;
@@ -15,10 +16,10 @@ import group.gnometrading.sequencer.SequencedRingBuffer;
 import org.agrona.concurrent.UnsafeBuffer;
 
 /**
- * Reads market data from a ring buffer and writes last trade prices to {@link SharedPriceBuffer}.
+ * Reads market data from a ring buffer and writes prices to {@link SharedPriceBuffer}.
  *
- * <p>Handles MBO, MBP1, and MBP10 schemas. For each, when {@code action == Trade}, the
- * trade price is written as the mark price for that listing. Other actions are ignored.
+ * <p>MBP1 and MBP10 messages carry the top of book on every action, so each one writes the best bid and ask;
+ * a trade also writes the last trade price. MBO messages carry no book, so only their trades are written.
  *
  * <p>Run via {@link group.gnometrading.concurrent.GnomeAgentRunner} on its own thread.
  */
@@ -60,30 +61,43 @@ public final class PriceWriterAgent implements GnomeAgent, SequencedEventHandler
         if (templateId == MboDecoder.TEMPLATE_ID) {
             mbo.wrap(buf);
             if (mbo.decoder.action() == Action.Trade) {
-                writePrice(mbo.decoder.exchangeId(), (int) mbo.decoder.securityId(), mbo.decoder.price());
+                final int slot = slotFor(mbo.decoder.exchangeId(), (int) mbo.decoder.securityId());
+                writeTrade(slot, mbo.decoder.price());
             }
         } else if (templateId == Mbp1Decoder.TEMPLATE_ID) {
             mbp1.wrap(buf);
+            final int slot = slotFor(mbp1.decoder.exchangeId(), (int) mbp1.decoder.securityId());
+            writeQuote(slot, mbp1.decoder.bidPrice0(), mbp1.decoder.askPrice0());
             if (mbp1.decoder.action() == Action.Trade) {
-                writePrice(mbp1.decoder.exchangeId(), (int) mbp1.decoder.securityId(), mbp1.decoder.price());
+                writeTrade(slot, mbp1.decoder.price());
             }
         } else if (templateId == Mbp10Decoder.TEMPLATE_ID) {
             mbp10.wrap(buf);
+            final int slot = slotFor(mbp10.decoder.exchangeId(), (int) mbp10.decoder.securityId());
+            writeQuote(slot, mbp10.decoder.bidPrice0(), mbp10.decoder.askPrice0());
             if (mbp10.decoder.action() == Action.Trade) {
-                writePrice(mbp10.decoder.exchangeId(), (int) mbp10.decoder.securityId(), mbp10.decoder.price());
+                writeTrade(slot, mbp10.decoder.price());
             }
         }
     }
 
-    private void writePrice(final int exchangeId, final int securityId, final long price) {
-        if (price <= 0) {
+    private int slotFor(final int exchangeId, final int securityId) {
+        return priceSlotRegistry.getSlot(
+                securityMaster.getListing(exchangeId, securityId).listingId());
+    }
+
+    private void writeTrade(final int slot, final long price) {
+        if (slot == IntToIntHashMap.MISSING || price <= 0) {
             return;
         }
-        int listingId = securityMaster.getListing(exchangeId, securityId).listingId();
-        int slot = priceSlotRegistry.getSlot(listingId);
-        if (slot == group.gnometrading.collections.IntToIntHashMap.MISSING) {
+        priceBuffer.writeTrade(slot, price);
+    }
+
+    // An empty side arrives as the SBE null value, which is negative; readers treat 0 as unknown.
+    private void writeQuote(final int slot, final long bid, final long ask) {
+        if (slot == IntToIntHashMap.MISSING) {
             return;
         }
-        priceBuffer.write(slot, price);
+        priceBuffer.writeQuote(slot, Math.max(bid, 0), Math.max(ask, 0));
     }
 }

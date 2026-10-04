@@ -16,6 +16,7 @@ import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.Statics;
 import group.gnometrading.schemas.TimeInForce;
+import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -347,7 +348,7 @@ class OrderManagementSystemIntegrationTest {
         assertEquals(1, h2.sink.newOrders.size());
     }
 
-    // --- market risk / cancelAllOpenOrders ---
+    // --- market risk ---
 
     @Test
     void marketRisk_pnlViolation_haltsStrategy() {
@@ -367,7 +368,7 @@ class OrderManagementSystemIntegrationTest {
         h2.sink.clear();
         h2.injectFill(askCounter, 10, 180 * PX, 10, 0); // loss of 200 > maxLoss of 100
 
-        assertTrue(re.isStrategyHalted(OmsTestHarness.STRATEGY_ID));
+        assertTrue(re.isLatched(OmsTestHarness.STRATEGY_ID));
     }
 
     @Test
@@ -389,6 +390,8 @@ class OrderManagementSystemIntegrationTest {
         h2.injectExecReport(
                 OmsTestHarness.STRATEGY_ID,
                 askCounter,
+                OmsTestHarness.EXCHANGE_ID,
+                43,
                 ExecType.NEW,
                 0,
                 0,
@@ -407,33 +410,32 @@ class OrderManagementSystemIntegrationTest {
         h2.injectFill(closeCounter, 10, 100 * PX, 10, 0); // loss = 10*(200-100) = 1000
 
         // Cancel should have been sent for the open ask on security 43
-        assertTrue(re.isStrategyHalted(OmsTestHarness.STRATEGY_ID));
+        assertTrue(re.isLatched(OmsTestHarness.STRATEGY_ID));
         // At least one cancel should have been emitted for the remaining open order
-        assertTrue(h2.sink.cancels.size() > 0, "Expected cancel for open orders when market risk triggers");
+        assertEquals(List.of(askCounter), h2.sink.cancels, "the breach cancels the strategy's open order");
     }
 
     @Test
-    void marketRisk_resumesWhenPolicyClears() {
+    void marketRisk_haltOutlastsAReportThatPasses() {
         RiskEngine re = RiskEngine.withPolicies(
                 new group.gnometrading.oms.risk.OrderRiskPolicy[] {},
                 new group.gnometrading.oms.risk.MarketRiskPolicy[] {new MaxPnlLossPolicy(100L)});
         OmsTestHarness h2 = new OmsTestHarness(re);
+        h2.stubListing(OmsTestHarness.EXCHANGE_ID, 43, 101, 0, 0);
+        long otherListing = h2.submitBidIntent(OmsTestHarness.STRATEGY_ID, 43L, 50L * PX, 10L);
 
-        // Trigger halt: loss of 200
+        // Trigger halt: loss of 200 on listing 100
         long bidCounter = h2.submitBidIntent(200L * PX, 10L);
         h2.injectAck(bidCounter, 10);
         h2.injectFill(bidCounter, 10, 200 * PX, 10, 0);
         long askCounter = h2.submitAskIntent(180L * PX, 10L);
         h2.injectAck(askCounter, 10);
         h2.injectFill(askCounter, 10, 180 * PX, 10, 0);
-        assertTrue(re.isStrategyHalted(OmsTestHarness.STRATEGY_ID));
+        assertTrue(re.isLatched(OmsTestHarness.STRATEGY_ID));
 
-        // Now go long again at higher price, restoring PnL above threshold
-        // (In practice this would recover; here we just verify resume happens when policy clears)
-        // The market check runs after every exec report. If PnL recovers, strategy resumes.
-        // Since we can't easily invert realized PnL, we verify the mechanism works by checking
-        // that the strategy stays halted when policy is still violated.
-        assertTrue(re.isStrategyHalted(OmsTestHarness.STRATEGY_ID));
+        // A report on another listing passes the per-listing loss check; it used to clear the halt.
+        h2.injectAck(OmsTestHarness.STRATEGY_ID, otherListing, OmsTestHarness.EXCHANGE_ID, 43, 10);
+        assertTrue(re.isLatched(OmsTestHarness.STRATEGY_ID));
     }
 
     // --- multi-strategy ---

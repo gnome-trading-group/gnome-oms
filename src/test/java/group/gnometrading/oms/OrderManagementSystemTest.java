@@ -25,6 +25,8 @@ import group.gnometrading.schemas.IntentDecoder;
 import group.gnometrading.schemas.ModifyOrder;
 import group.gnometrading.schemas.Order;
 import group.gnometrading.schemas.OrderExecutionReport;
+import group.gnometrading.schemas.OrderType;
+import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.Statics;
 import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
@@ -54,20 +56,25 @@ class OrderManagementSystemTest {
 
     private OrderManagementSystem oms;
     private RecordingSink delegate;
+    private SharedPriceBuffer priceBuffer;
+    private int priceSlot;
 
     @BeforeEach
     void setUp() {
         RingBufferOrderStateManager orderStateManager = new RingBufferOrderStateManager(64);
         DefaultPositionTracker positionTracker = new DefaultPositionTracker(new SharedPositionBuffer(8));
         RiskEngine riskEngine = new RiskEngine();
+        priceBuffer = new SharedPriceBuffer(1);
+        PriceSlotRegistry priceSlotRegistry = new PriceSlotRegistry(1);
+        priceSlot = priceSlotRegistry.register(LISTING_ID);
         oms = new OrderManagementSystem(
                 new NullLogger(),
                 orderStateManager,
                 positionTracker,
                 riskEngine,
                 securityMaster,
-                new SharedPriceBuffer(1),
-                new PriceSlotRegistry(1));
+                priceBuffer,
+                priceSlotRegistry);
         delegate = new RecordingSink();
 
         Listing listing = new Listing(
@@ -140,6 +147,77 @@ class OrderManagementSystemTest {
         stubSpec(0, Statics.PRICE_SCALING_FACTOR);
         submitIntent(1_999_999_999L, UNIT / 2);
         assertEquals(0, delegate.newOrders.size());
+    }
+
+    // --- market order min notional uses the side it would execute against ---
+
+    @Test
+    void testMarketBuyIsValuedAtTheAsk() {
+        stubSpec(0, Statics.PRICE_SCALING_FACTOR);
+        priceBuffer.writeTrade(priceSlot, Statics.PRICE_SCALING_FACTOR / 100);
+        priceBuffer.writeQuote(priceSlot, Statics.PRICE_SCALING_FACTOR / 10, Statics.PRICE_SCALING_FACTOR / 4);
+        submitMarketIntent(Side.Bid, 4 * UNIT); // 4 at the $0.25 ask = $1.00
+        assertEquals(1, delegate.newOrders.size());
+    }
+
+    @Test
+    void testMarketSellIsValuedAtTheBid() {
+        stubSpec(0, Statics.PRICE_SCALING_FACTOR);
+        priceBuffer.writeQuote(priceSlot, Statics.PRICE_SCALING_FACTOR / 10, Statics.PRICE_SCALING_FACTOR / 4);
+        submitMarketIntent(Side.Ask, 4 * UNIT); // 4 at the $0.10 bid = $0.40
+        assertEquals(0, delegate.newOrders.size());
+    }
+
+    @Test
+    void testMarketOrderFallsBackToLastTradeWhenSideEmpty() {
+        stubSpec(0, Statics.PRICE_SCALING_FACTOR);
+        priceBuffer.writeTrade(priceSlot, Statics.PRICE_SCALING_FACTOR / 2);
+        priceBuffer.writeQuote(priceSlot, Statics.PRICE_SCALING_FACTOR / 10, 0);
+        submitMarketIntent(Side.Bid, 2 * UNIT); // no ask; 2 at the $0.50 last trade = $1.00
+        assertEquals(1, delegate.newOrders.size());
+    }
+
+    @Test
+    void testMarketOrderWithNoPriceIsRejected() {
+        stubSpec(0, Statics.PRICE_SCALING_FACTOR);
+        submitMarketIntent(Side.Bid, 100 * UNIT);
+        assertEquals(0, delegate.newOrders.size());
+    }
+
+    // --- minSize constraint ---
+
+    @Test
+    void testNewOrderAtMinSizeIsForwarded() {
+        // Polymarket: 5 shares at $0.10 is a valid resting order despite a notional under $1.
+        stubSpec(UNIT / 100, 0, 5 * UNIT);
+        submitIntent(Statics.PRICE_SCALING_FACTOR / 10, 5 * UNIT);
+        assertEquals(1, delegate.newOrders.size());
+    }
+
+    @Test
+    void testNewOrderBelowMinSizeIsRejected() {
+        stubSpec(UNIT / 100, 0, 5 * UNIT);
+        submitIntent(Statics.PRICE_SCALING_FACTOR / 2, 4 * UNIT + 99 * (UNIT / 100));
+        assertEquals(0, delegate.newOrders.size());
+    }
+
+    @Test
+    void testNewOrderWithMinSizeZeroIsNotConstrained() {
+        stubSpec(0, 0, 0);
+        submitIntent(100L, 1L);
+        assertEquals(1, delegate.newOrders.size());
+    }
+
+    @Test
+    void testModifyBelowMinSizeIsRejected() {
+        stubSpec(0, 0, 5 * UNIT);
+        submitIntent(100L, 10L * UNIT);
+        assertEquals(1, delegate.newOrders.size());
+
+        ackOrder(delegate.newOrders.get(0));
+
+        submitIntent(100L, 4L * UNIT);
+        assertEquals(0, delegate.modifies.size());
     }
 
     // --- both constraints ---
@@ -229,8 +307,12 @@ class OrderManagementSystemTest {
     // --- helpers ---
 
     private void stubSpec(long lotSize, long minNotional) {
+        stubSpec(lotSize, minNotional, 0);
+    }
+
+    private void stubSpec(long lotSize, long minNotional, long minSize) {
         when(securityMaster.getListingSpec(LISTING_ID))
-                .thenReturn(new ListingSpec(LISTING_ID, 1, lotSize, minNotional, 1));
+                .thenReturn(new ListingSpec(LISTING_ID, 1, lotSize, minNotional, 1, minSize));
     }
 
     private void submitIntent(long price, long size) {
@@ -243,6 +325,24 @@ class OrderManagementSystemTest {
                 .bidSize(size)
                 .askPrice(IntentDecoder.askPriceNullValue())
                 .askSize(IntentDecoder.askSizeNullValue());
+        delegate.clear();
+        oms.processIntent(intent, delegate);
+    }
+
+    private void submitMarketIntent(Side side, long size) {
+        Intent intent = new Intent();
+        intent.encoder
+                .strategyId(STRATEGY_ID)
+                .exchangeId(EXCHANGE_ID)
+                .securityId(SECURITY_ID)
+                .bidPrice(IntentDecoder.bidPriceNullValue())
+                .bidSize(IntentDecoder.bidSizeNullValue())
+                .askPrice(IntentDecoder.askPriceNullValue())
+                .askSize(IntentDecoder.askSizeNullValue())
+                .takeSize(size)
+                .takeSide(side)
+                .takeOrderType(OrderType.MARKET)
+                .takeLimitPrice(IntentDecoder.takeLimitPriceNullValue());
         delegate.clear();
         oms.processIntent(intent, delegate);
     }

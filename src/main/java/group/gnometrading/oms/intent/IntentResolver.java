@@ -14,10 +14,14 @@ import group.gnometrading.schemas.OrderFlagsDecoder;
 import group.gnometrading.schemas.OrderType;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.TimeInForce;
+import java.util.function.Consumer;
 import java.util.function.IntPredicate;
 import java.util.function.LongSupplier;
 
 public final class IntentResolver {
+
+    /** Passed to {@link #cancelAll} to cancel on every listing. */
+    public static final int ALL_LISTINGS = Integer.MIN_VALUE;
 
     private final LongSupplier oidSupplier;
     private final int strategyId;
@@ -29,6 +33,10 @@ public final class IntentResolver {
     // Slots keyed by listingId — one bid and one ask slot per (exchange, security) listing
     private final LongHashMap<OrderSlot> bidSlots = new LongHashMap<>(4);
     private final LongHashMap<OrderSlot> askSlots = new LongHashMap<>(4);
+    private final Consumer<OrderSlot> slotCanceller = this::cancelSlot;
+    private int cancelListing;
+    private boolean cancelPendingToo;
+    private ActionSink cancelHandler;
 
     /**
      * @param nativeModifyByListing whether a listing's venue can change a working order in place; asked
@@ -57,7 +65,7 @@ public final class IntentResolver {
                 bidPrice,
                 bidSize,
                 intentFlags,
-                getOrCreateSlot(bidSlots, listingId),
+                getOrCreateSlot(bidSlots, listingId, exchangeId, securityId),
                 handler);
 
         resolveSide(
@@ -67,7 +75,7 @@ public final class IntentResolver {
                 askPrice,
                 askSize,
                 intentFlags,
-                getOrCreateSlot(askSlots, listingId),
+                getOrCreateSlot(askSlots, listingId, exchangeId, securityId),
                 handler);
 
         long takeSize = intent.decoder.takeSize() == IntentDecoder.takeSizeNullValue() ? 0 : intent.decoder.takeSize();
@@ -323,12 +331,58 @@ public final class IntentResolver {
         handler.onNewOrder(pendingOrder);
     }
 
-    private OrderSlot getOrCreateSlot(LongHashMap<OrderSlot> slots, int listingId) {
+    private OrderSlot getOrCreateSlot(LongHashMap<OrderSlot> slots, int listingId, int exchangeId, long securityId) {
         OrderSlot slot = slots.get(listingId);
         if (slot == null) {
-            slot = new OrderSlot(nativeModifyByListing.test(listingId));
+            slot = new OrderSlot(nativeModifyByListing.test(listingId), listingId, exchangeId, securityId);
             slots.put(listingId, slot);
         }
         return slot;
+    }
+
+    /**
+     * Cancels every resting order on {@code listingId} (or on every listing, for {@link #ALL_LISTINGS}) and
+     * drops whatever the slots had queued, so nothing is placed again once the cancels are acknowledged. An order
+     * not yet acknowledged, or mid-modify, is cancelled as soon as its ack arrives; with {@code cancelAwaitingAck}
+     * one never acknowledged is also cancelled now, for when that ack never comes.
+     */
+    public void cancelAll(int listingId, ActionSink handler, boolean cancelAwaitingAck) {
+        cancelListing = listingId;
+        cancelHandler = handler;
+        cancelPendingToo = cancelAwaitingAck;
+        bidSlots.forEachValue(slotCanceller);
+        askSlots.forEachValue(slotCanceller);
+    }
+
+    /** Whether {@code clientOid} is the order this resolver's slot for that listing and side is working. */
+    public boolean ownsOrder(int listingId, Side side, long clientOid) {
+        final OrderSlot slot = (side == Side.Bid ? bidSlots : askSlots).get(listingId);
+        return slot != null && slot.getState() != OrderSlot.State.EMPTY && slot.getActiveClientOid() == clientOid;
+    }
+
+    private void cancelSlot(OrderSlot slot) {
+        if (cancelListing != ALL_LISTINGS && slot.getListingId() != cancelListing) {
+            return;
+        }
+        switch (slot.getState()) {
+            case LIVE -> {
+                slot.clearQueuedIntent();
+                emitCancel(slot.getExchangeId(), slot.getSecurityId(), slot, cancelHandler);
+                slot.onCancelSubmitted();
+            }
+            case PENDING_NEW -> {
+                slot.queueIntent(0, 0, (short) 0);
+                if (cancelPendingToo) {
+                    emitCancel(slot.getExchangeId(), slot.getSecurityId(), slot, cancelHandler);
+                }
+            }
+                // Already acknowledged, so it is cancelled when the modify is answered. A cancel sent now would be
+                // indistinguishable from the modify if the venue refused it.
+            case PENDING_MODIFY -> slot.queueIntent(0, 0, (short) 0);
+            case PENDING_CANCEL -> slot.clearQueuedIntent();
+            case EMPTY -> {
+                // nothing working
+            }
+        }
     }
 }

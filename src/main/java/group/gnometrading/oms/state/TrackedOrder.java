@@ -25,7 +25,9 @@ public final class TrackedOrder {
     private boolean active;
     private OrderState state;
     private long filledQty;
-    private long leavesQty;
+    private boolean modifyPending;
+    private long preModifyPrice;
+    private long preModifySize;
 
     public TrackedOrder() {
         reset();
@@ -44,7 +46,7 @@ public final class TrackedOrder {
         this.timeInForce = order.decoder.timeInForce();
         this.state = OrderState.PENDING_NEW;
         this.filledQty = 0;
-        this.leavesQty = order.decoder.size();
+        this.modifyPending = false;
     }
 
     public void reset() {
@@ -60,7 +62,7 @@ public final class TrackedOrder {
         this.timeInForce = null;
         this.state = OrderState.PENDING_NEW;
         this.filledQty = 0;
-        this.leavesQty = 0;
+        this.modifyPending = false;
     }
 
     /**
@@ -72,37 +74,34 @@ public final class TrackedOrder {
         switch (exec) {
             case NEW -> {
                 state = OrderState.NEW;
-                long leaves = report.decoder.leavesQty();
-                if (leaves != OrderExecutionReportDecoder.leavesQtyNullValue()) {
-                    leavesQty = leaves;
-                }
+                modifyPending = false;
             }
             case PARTIAL_FILL -> {
                 state = OrderState.PARTIALLY_FILLED;
                 filledQty = cumulativeQtyAfter(report);
-                long leaves = report.decoder.leavesQty();
-                leavesQty = leaves != OrderExecutionReportDecoder.leavesQtyNullValue()
-                        ? leaves
-                        : Math.max(0, size - filledQty);
             }
             case FILL -> {
                 state = OrderState.FILLED;
                 filledQty = cumulativeQtyAfter(report);
-                leavesQty = 0;
             }
             case CANCEL -> {
                 state = OrderState.CANCELED;
-                leavesQty = 0;
             }
             case REJECT -> {
                 state = OrderState.REJECTED;
-                leavesQty = 0;
             }
             case EXPIRE -> {
                 state = OrderState.EXPIRED;
-                leavesQty = 0;
             }
-            case CANCEL_REJECT, NULL_VAL -> {
+            case CANCEL_REJECT -> {
+                // While a modify is pending, the refusal is the modify's: the order keeps working as it was.
+                if (modifyPending) {
+                    price = preModifyPrice;
+                    size = preModifySize;
+                    modifyPending = false;
+                }
+            }
+            case NULL_VAL -> {
                 /* no state change */
             }
         }
@@ -118,9 +117,24 @@ public final class TrackedOrder {
 
     /** {@code newOrderQty} is the FIX order quantity, so what remains working is that less the fills. */
     public void modify(long newPrice, long newOrderQty) {
+        this.preModifyPrice = this.price;
+        this.preModifySize = this.size;
+        this.modifyPending = true;
         this.price = newPrice;
         this.size = newOrderQty;
-        this.leavesQty = Math.max(0, newOrderQty - filledQty);
+    }
+
+    /**
+     * What the OMS has working on this order: its quantity, as last requested, less what has filled. While a modify
+     * is pending either size could still fill, so the larger counts. Venue-reported leaves describe the order before
+     * a pending modify, so position accounting uses this instead.
+     */
+    public long workingQty() {
+        if (!active || state.isTerminal()) {
+            return 0;
+        }
+        final long workingSize = modifyPending ? Math.max(preModifySize, size) : size;
+        return Math.max(0, workingSize - filledQty);
     }
 
     public OrderState getState() {
@@ -165,10 +179,6 @@ public final class TrackedOrder {
 
     public long getFilledQty() {
         return filledQty;
-    }
-
-    public long getLeavesQty() {
-        return leavesQty;
     }
 
     public boolean isActive() {

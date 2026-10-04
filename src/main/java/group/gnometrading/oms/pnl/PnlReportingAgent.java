@@ -109,7 +109,7 @@ public final class PnlReportingAgent implements GnomeAgent, StrategyPositionCons
             if (slot == IntToIntHashMap.MISSING) {
                 continue;
             }
-            final long markPrice = priceBuffer.readSpinning(slot);
+            final long markPrice = priceBuffer.markPrice(slot);
             if (markPrice == 0) {
                 continue;
             }

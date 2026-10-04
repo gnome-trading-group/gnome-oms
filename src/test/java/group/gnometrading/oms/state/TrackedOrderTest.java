@@ -44,7 +44,7 @@ class TrackedOrderTest {
         assertEquals(TimeInForce.GOOD_TILL_CANCELED, order.getTimeInForce());
         assertEquals(OrderState.PENDING_NEW, order.getState());
         assertEquals(0L, order.getFilledQty());
-        assertEquals(50L, order.getLeavesQty());
+        assertEquals(50L, order.workingQty());
     }
 
     @Test
@@ -57,18 +57,18 @@ class TrackedOrderTest {
         assertEquals(0, order.getExchangeId());
         assertEquals(0, order.getSecurityId());
         assertEquals(0, order.getFilledQty());
-        assertEquals(0, order.getLeavesQty());
+        assertEquals(0, order.workingQty());
     }
 
     // --- applyExecutionReport ---
 
     @Test
-    void applyNew_setsStateAndLeavesQty() {
+    void applyNew_setsState_andVenueLeavesDoNotChangeWhatIsWorking() {
         initOrder(10L);
         applyReport(ExecType.NEW, 0, 0, 0, 8, OrderExecutionReportDecoder.feeNullValue());
 
         assertEquals(OrderState.NEW, order.getState());
-        assertEquals(8L, order.getLeavesQty());
+        assertEquals(10L, order.workingQty());
         assertEquals(0L, order.getFilledQty());
         assertFalse(order.getState().isTerminal());
     }
@@ -80,7 +80,7 @@ class TrackedOrderTest {
 
         assertEquals(OrderState.PARTIALLY_FILLED, order.getState());
         assertEquals(3L, order.getFilledQty());
-        assertEquals(7L, order.getLeavesQty());
+        assertEquals(7L, order.workingQty());
     }
 
     @Test
@@ -90,7 +90,7 @@ class TrackedOrderTest {
         applyReport(ExecType.PARTIAL_FILL, 4, 110, 7, 3, 0);
 
         assertEquals(7L, order.getFilledQty());
-        assertEquals(3L, order.getLeavesQty());
+        assertEquals(3L, order.workingQty());
     }
 
     @Test
@@ -101,7 +101,7 @@ class TrackedOrderTest {
 
         assertEquals(OrderState.FILLED, order.getState());
         assertEquals(10L, order.getFilledQty());
-        assertEquals(0L, order.getLeavesQty());
+        assertEquals(0L, order.workingQty());
         assertTrue(order.getState().isTerminal());
     }
 
@@ -114,7 +114,7 @@ class TrackedOrderTest {
         assertEquals(OrderState.CANCELED, order.getState());
         assertTrue(order.getState().isTerminal());
         // Nothing is working once cancelled; the OMS reads the leaves before applying the report.
-        assertEquals(0L, order.getLeavesQty());
+        assertEquals(0L, order.workingQty());
     }
 
     @Test
@@ -153,28 +153,28 @@ class TrackedOrderTest {
 
         assertEquals(200L, order.getPrice());
         assertEquals(20L, order.getSize());
-        assertEquals(20L, order.getLeavesQty());
+        assertEquals(20L, order.workingQty());
     }
 
     @Test
     void applyRejectAndExpire_zeroLeaves() {
         initOrder(10L);
         applyReport(ExecType.REJECT, 0, 0, 0, 10, OrderExecutionReportDecoder.feeNullValue());
-        assertEquals(0L, order.getLeavesQty());
+        assertEquals(0L, order.workingQty());
 
         initOrder(10L);
         applyReport(ExecType.NEW, 0, 0, 0, 10, OrderExecutionReportDecoder.feeNullValue());
         applyReport(ExecType.EXPIRE, 0, 0, 0, 10, OrderExecutionReportDecoder.feeNullValue());
-        assertEquals(0L, order.getLeavesQty());
+        assertEquals(0L, order.workingQty());
     }
 
     @Test
-    void applyNew_withNullLeaves_keepsCurrentLeaves() {
+    void applyNew_withNullLeaves_keepsWorkingTheOrderSize() {
         initOrder(10L);
         applyReport(ExecType.NEW, 0, 0, 0, OrderExecutionReportDecoder.leavesQtyNullValue(), 0);
 
         assertEquals(OrderState.NEW, order.getState());
-        assertEquals(10L, order.getLeavesQty());
+        assertEquals(10L, order.workingQty());
     }
 
     @Test
@@ -187,11 +187,11 @@ class TrackedOrderTest {
     }
 
     @Test
-    void applyPartialFill_withNullLeaves_derivesThemFromTheOrderSize() {
+    void applyPartialFill_withNullLeaves_worksTheRestOfTheOrder() {
         initOrder(10L);
         applyReport(ExecType.PARTIAL_FILL, 4, 100, 4, OrderExecutionReportDecoder.leavesQtyNullValue(), 0);
 
-        assertEquals(6L, order.getLeavesQty());
+        assertEquals(6L, order.workingQty());
     }
 
     @Test
@@ -201,10 +201,34 @@ class TrackedOrderTest {
         applyReport(ExecType.PARTIAL_FILL, size / 2, 600_000_000L, size / 2, size / 2, 0);
 
         assertEquals(size / 2, order.getFilledQty());
-        assertEquals(size / 2, order.getLeavesQty());
+        assertEquals(size / 2, order.workingQty());
     }
 
     // --- helpers ---
+
+    @Test
+    void pendingModifyCountsTheLargerSizeUntilTheVenueAnswers() {
+        initOrder(10L);
+        applyReport(ExecType.NEW, 0, 0, 0, 10, 0);
+        order.modify(100L, 5L);
+        applyReport(ExecType.PARTIAL_FILL, 7, 100, 7, 3, 0); // the original 10 filled 7 before the modify landed
+
+        assertEquals(3L, order.workingQty(), "the original order may still have 3 working");
+
+        applyReport(ExecType.NEW, 0, 0, 7, 0, 0); // the modify to 5 is confirmed: already more than filled
+        assertEquals(0L, order.workingQty());
+    }
+
+    @Test
+    void refusedModifyRestoresTheOriginalSize() {
+        initOrder(10L);
+        applyReport(ExecType.NEW, 0, 0, 0, 10, 0);
+        order.modify(100L, 20L);
+        assertEquals(20L, order.workingQty());
+
+        applyReport(ExecType.CANCEL_REJECT, 0, 0, 0, 10, 0);
+        assertEquals(10L, order.workingQty());
+    }
 
     private void initOrder(long size) {
         Order src = OmsTestHarness.buildOrder(7, 1L, 1, 42, Side.Bid, 100L, size);

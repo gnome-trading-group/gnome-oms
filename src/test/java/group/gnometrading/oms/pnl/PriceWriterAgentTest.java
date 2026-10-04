@@ -11,6 +11,7 @@ import group.gnometrading.schemas.Action;
 import group.gnometrading.schemas.MboDecoder;
 import group.gnometrading.schemas.MboSchema;
 import group.gnometrading.schemas.Mbp10Decoder;
+import group.gnometrading.schemas.Mbp10Encoder;
 import group.gnometrading.schemas.Mbp10Schema;
 import group.gnometrading.schemas.Mbp1Decoder;
 import group.gnometrading.schemas.Mbp1Schema;
@@ -53,7 +54,7 @@ class PriceWriterAgentTest {
         slot = priceSlotRegistry.register(LISTING_ID);
 
         when(ringBuffer.createPoller(any())).thenReturn(poller);
-        // getListing is stubbed as lenient — only called for Trade events
+        // getListing is stubbed as lenient — MBO messages only look it up for trades
         lenient()
                 .when(securityMaster.getListing(anyInt(), anyInt()))
                 .thenReturn(new Listing(LISTING_ID, null, null, null, null));
@@ -93,7 +94,7 @@ class PriceWriterAgentTest {
 
         agent.onSequencedEvent(0, MboDecoder.TEMPLATE_ID, externalBufferFrom(schema), schema.totalMessageSize());
 
-        assertEquals(12345L, priceBuffer.readSpinning(slot));
+        assertEquals(12345L, priceBuffer.markPrice(slot));
     }
 
     @Test
@@ -118,7 +119,7 @@ class PriceWriterAgentTest {
         // Pass the external buffer; if agent wraps correctly it reads 99999, not 1
         agent.onSequencedEvent(0, MboDecoder.TEMPLATE_ID, externalBufferFrom(external), external.totalMessageSize());
 
-        assertEquals(99999L, priceBuffer.readSpinning(slot));
+        assertEquals(99999L, priceBuffer.markPrice(slot));
     }
 
     @Test
@@ -132,7 +133,7 @@ class PriceWriterAgentTest {
 
         agent.onSequencedEvent(0, MboDecoder.TEMPLATE_ID, externalBufferFrom(schema), schema.totalMessageSize());
 
-        assertEquals(0L, priceBuffer.readSpinning(slot));
+        assertEquals(0L, priceBuffer.markPrice(slot));
     }
 
     @Test
@@ -146,7 +147,7 @@ class PriceWriterAgentTest {
 
         agent.onSequencedEvent(0, MboDecoder.TEMPLATE_ID, externalBufferFrom(schema), schema.totalMessageSize());
 
-        assertEquals(0L, priceBuffer.readSpinning(slot));
+        assertEquals(0L, priceBuffer.markPrice(slot));
     }
 
     // --- MBP1 ---
@@ -164,7 +165,7 @@ class PriceWriterAgentTest {
 
         agent.onSequencedEvent(0, Mbp1Decoder.TEMPLATE_ID, externalBufferFrom(schema), schema.totalMessageSize());
 
-        assertEquals(5000L, priceBuffer.readSpinning(slot));
+        assertEquals(5000L, priceBuffer.markPrice(slot));
     }
 
     @Test
@@ -180,11 +181,11 @@ class PriceWriterAgentTest {
 
         agent.onSequencedEvent(0, Mbp1Decoder.TEMPLATE_ID, externalBufferFrom(schema), schema.totalMessageSize());
 
-        assertEquals(7777L, priceBuffer.readSpinning(slot));
+        assertEquals(7777L, priceBuffer.markPrice(slot));
     }
 
     @Test
-    void mbp1_nonTradeAction_doesNotWritePrice() throws Exception {
+    void mbp1_nonTradeAction_writesQuoteButNotTrade() throws Exception {
         final Mbp1Schema schema = new Mbp1Schema();
         schema.encoder
                 .exchangeId(EXCHANGE_ID)
@@ -192,11 +193,15 @@ class PriceWriterAgentTest {
                 .price(5000L)
                 .action(Action.Modify)
                 .side(Side.Bid)
-                .sequence(1L);
+                .sequence(1L)
+                .bidPrice0(4000L)
+                .askPrice0(4200L);
 
         agent.onSequencedEvent(0, Mbp1Decoder.TEMPLATE_ID, externalBufferFrom(schema), schema.totalMessageSize());
 
-        assertEquals(0L, priceBuffer.readSpinning(slot));
+        assertEquals(4200L, priceBuffer.executionPrice(slot, Side.Bid));
+        assertEquals(4000L, priceBuffer.executionPrice(slot, Side.Ask));
+        assertEquals(4100L, priceBuffer.markPrice(slot));
     }
 
     // --- MBP10 ---
@@ -214,7 +219,7 @@ class PriceWriterAgentTest {
 
         agent.onSequencedEvent(0, Mbp10Decoder.TEMPLATE_ID, externalBufferFrom(schema), schema.totalMessageSize());
 
-        assertEquals(7500L, priceBuffer.readSpinning(slot));
+        assertEquals(7500L, priceBuffer.markPrice(slot));
     }
 
     @Test
@@ -230,11 +235,30 @@ class PriceWriterAgentTest {
 
         agent.onSequencedEvent(0, Mbp10Decoder.TEMPLATE_ID, externalBufferFrom(schema), schema.totalMessageSize());
 
-        assertEquals(8888L, priceBuffer.readSpinning(slot));
+        assertEquals(8888L, priceBuffer.markPrice(slot));
     }
 
     @Test
-    void mbp10_nonTradeAction_doesNotWritePrice() throws Exception {
+    void mbp10_nonTradeAction_writesQuoteButNotTrade() throws Exception {
+        final Mbp10Schema schema = new Mbp10Schema();
+        schema.encoder
+                .exchangeId(EXCHANGE_ID)
+                .securityId(SECURITY_ID)
+                .price(7500L)
+                .action(Action.Cancel)
+                .side(Side.Bid)
+                .sequence(1L)
+                .bidPrice0(7000L)
+                .askPrice0(7400L);
+
+        agent.onSequencedEvent(0, Mbp10Decoder.TEMPLATE_ID, externalBufferFrom(schema), schema.totalMessageSize());
+
+        assertEquals(7400L, priceBuffer.executionPrice(slot, Side.Bid));
+        assertEquals(7000L, priceBuffer.executionPrice(slot, Side.Ask));
+    }
+
+    @Test
+    void mbp10_nonTradeAction_withoutQuoteLeavesNoPrice() throws Exception {
         final Mbp10Schema schema = new Mbp10Schema();
         schema.encoder
                 .exchangeId(EXCHANGE_ID)
@@ -246,7 +270,44 @@ class PriceWriterAgentTest {
 
         agent.onSequencedEvent(0, Mbp10Decoder.TEMPLATE_ID, externalBufferFrom(schema), schema.totalMessageSize());
 
-        assertEquals(0L, priceBuffer.readSpinning(slot));
+        assertEquals(0L, priceBuffer.markPrice(slot));
+    }
+
+    @Test
+    void mbp10_emptySide_isStoredAsUnknown() throws Exception {
+        final Mbp10Schema schema = new Mbp10Schema();
+        schema.encoder
+                .exchangeId(EXCHANGE_ID)
+                .securityId(SECURITY_ID)
+                .action(Action.Add)
+                .side(Side.Bid)
+                .sequence(1L)
+                .bidPrice0(7000L)
+                .askPrice0(Mbp10Encoder.askPrice0NullValue());
+
+        agent.onSequencedEvent(0, Mbp10Decoder.TEMPLATE_ID, externalBufferFrom(schema), schema.totalMessageSize());
+
+        assertEquals(0L, priceBuffer.executionPrice(slot, Side.Bid));
+        assertEquals(7000L, priceBuffer.executionPrice(slot, Side.Ask));
+    }
+
+    @Test
+    void mbp10_tradeAction_writesQuoteAndTrade() throws Exception {
+        final Mbp10Schema schema = new Mbp10Schema();
+        schema.encoder
+                .exchangeId(EXCHANGE_ID)
+                .securityId(SECURITY_ID)
+                .price(7300L)
+                .action(Action.Trade)
+                .side(Side.Ask)
+                .sequence(1L)
+                .bidPrice0(7000L)
+                .askPrice0(Mbp10Encoder.askPrice0NullValue());
+
+        agent.onSequencedEvent(0, Mbp10Decoder.TEMPLATE_ID, externalBufferFrom(schema), schema.totalMessageSize());
+
+        assertEquals(7300L, priceBuffer.executionPrice(slot, Side.Bid));
+        assertEquals(7000L, priceBuffer.executionPrice(slot, Side.Ask));
     }
 
     // --- successive events update the price ---
@@ -269,7 +330,7 @@ class PriceWriterAgentTest {
                 .action(Action.Trade);
         agent.onSequencedEvent(1, MboDecoder.TEMPLATE_ID, externalBufferFrom(second), second.totalMessageSize());
 
-        assertEquals(200L, priceBuffer.readSpinning(slot));
+        assertEquals(200L, priceBuffer.markPrice(slot));
     }
 
     // --- edge cases ---
@@ -290,13 +351,13 @@ class PriceWriterAgentTest {
         agentWithEmptyRegistry.onSequencedEvent(
                 0, MboDecoder.TEMPLATE_ID, externalBufferFrom(schema), schema.totalMessageSize());
 
-        assertEquals(0L, priceBuffer.readSpinning(slot));
+        assertEquals(0L, priceBuffer.markPrice(slot));
     }
 
     @Test
     void unknownTemplateId_isIgnored() throws Exception {
         final UnsafeBuffer buf = new UnsafeBuffer(new byte[64]);
         agent.onSequencedEvent(0, 999, buf, 64);
-        assertEquals(0L, priceBuffer.readSpinning(slot));
+        assertEquals(0L, priceBuffer.markPrice(slot));
     }
 }

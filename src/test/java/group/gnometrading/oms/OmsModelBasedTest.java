@@ -181,9 +181,12 @@ class OmsModelBasedTest {
             }
             ModelOrder order = orders.get(slot.activeOid);
             ModelPosition pos = getOrCreatePosition(order.listingId);
-            pos.removeLeaves(side, order.leavesQty);
-            pos.addLeaves(side, restingQty);
+            long workingBefore = order.working();
+            order.preModifySize = order.size;
+            order.modifyPending = true;
+            order.size = restingQty + slot.filledQty;
             order.leavesQty = restingQty;
+            adjustLeaves(pos, side, order.working() - workingBefore);
             slot.pendingPrice = price;
             slot.pendingOrderQty = restingQty + slot.filledQty;
             slot.state = ModelSlot.State.PENDING_MODIFY;
@@ -200,16 +203,36 @@ class OmsModelBasedTest {
             ModelSlot slot = isTake ? null : (side == Side.Bid ? bidSlots : askSlots).get((long) order.listingId);
             if (!isTake && (slot == null || slot.activeOid != oid)) return;
 
-            long leavesQtyBefore = order.leavesQty;
+            // mirrors OrderManagementSystem: a fill that adds nothing is never booked, and only a final one is applied
+            boolean isFillReport = type == ExecType.FILL || type == ExecType.PARTIAL_FILL;
+            boolean advances = isFillReport && cumQty > order.filledQty;
+            if (isFillReport && !advances && type == ExecType.PARTIAL_FILL) return;
+
+            long workingBefore = order.working();
             ModelPosition pos = getOrCreatePosition(order.listingId);
             long effFee = (fee == OrderExecutionReportDecoder.feeNullValue()) ? 0 : fee;
 
-            // mirrors OrderManagementSystem.updatePositionTracking
-            if (type == ExecType.FILL || type == ExecType.PARTIAL_FILL) {
-                pos.removeLeaves(side, filledQty);
+            // mirrors TrackedOrder: fills, a confirmed or refused modify, and terminal reports move what's working
+            switch (type) {
+                case PARTIAL_FILL, FILL -> order.filledQty = cumQty;
+                case NEW -> order.modifyPending = false;
+                case CANCEL_REJECT -> {
+                    if (order.modifyPending) {
+                        order.size = order.preModifySize;
+                        order.modifyPending = false;
+                    }
+                }
+                default -> {}
+            }
+            if (type == ExecType.FILL
+                    || type == ExecType.CANCEL
+                    || type == ExecType.REJECT
+                    || type == ExecType.EXPIRE) {
+                order.terminal = true;
+            }
+            adjustLeaves(pos, side, order.working() - workingBefore);
+            if (advances) {
                 pos.applyFill(side, filledQty, fillPrice, effFee);
-            } else if (type == ExecType.CANCEL || type == ExecType.REJECT || type == ExecType.EXPIRE) {
-                if (leavesQtyBefore > 0) pos.removeLeaves(side, leavesQtyBefore);
             }
 
             // Take orders have no slot state machine — just update order tracking and return
@@ -287,6 +310,14 @@ class OmsModelBasedTest {
             }
         }
 
+        private static void adjustLeaves(ModelPosition pos, Side side, long change) {
+            if (change > 0) {
+                pos.addLeaves(side, change);
+            } else if (change < 0) {
+                pos.removeLeaves(side, -change);
+            }
+        }
+
         private void fireQueuedOnLive(Side side, ModelSlot slot, ModelOrder order) {
             long qp = slot.queuedPrice;
             long qs = slot.queuedSize;
@@ -360,12 +391,25 @@ class OmsModelBasedTest {
         final int listingId;
         long leavesQty;
         long filledQty;
+        long size;
+        boolean modifyPending;
+        long preModifySize;
+        boolean terminal;
 
         ModelOrder(Side side, long securityId, int listingId, long size) {
             this.side = side;
             this.securityId = securityId;
             this.listingId = listingId;
+            this.size = size;
             leavesQty = size;
+        }
+
+        // What the OMS has working: the size it last asked for, less fills, counting the larger size while a modify is
+        // pending; venue leaves don't count.
+        long working() {
+            if (terminal) return 0;
+            long workingSize = modifyPending ? Math.max(preModifySize, size) : size;
+            return Math.max(0, workingSize - filledQty);
         }
     }
 
@@ -398,8 +442,30 @@ class OmsModelBasedTest {
             this.isTake = isTake;
             leavesQty = size;
         }
-    }
 
+        boolean modifyPending;
+        long preModifyOrderQty;
+
+        // The stand-in venue applies a modify when it's sent and undoes it if it then refuses it, as a real venue
+        // keeps an order unchanged when an amend fails.
+        void modifySent(long orderQty) {
+            preModifyOrderQty = leavesQty + cumQty;
+            modifyPending = true;
+            leavesQty = orderQty - cumQty;
+        }
+
+        // Either the old or the new order quantity could still fill until the venue answers the modify.
+        long worstCaseLeaves() {
+            return modifyPending ? Math.max(leavesQty, Math.max(0, preModifyOrderQty - cumQty)) : leavesQty;
+        }
+
+        void modifyRefused() {
+            if (modifyPending) {
+                leavesQty = Math.max(0, preModifyOrderQty - cumQty);
+                modifyPending = false;
+            }
+        }
+    }
     // =========================================================================
     // Test methods
     // =========================================================================
@@ -497,6 +563,7 @@ class OmsModelBasedTest {
                     case NEW -> {
                         leavesQty = o.leavesQty;
                         o.acked = true;
+                        o.modifyPending = false;
                     }
                     case PARTIAL_FILL -> {
                         filledQty = (1 + rng.nextInt((int) (o.leavesQty / SIZE_STEP - 1))) * SIZE_STEP;
@@ -517,7 +584,8 @@ class OmsModelBasedTest {
                     }
                     case CANCEL, REJECT, EXPIRE -> terminal = true;
                     case CANCEL_REJECT -> {
-                        /* no tracking change */
+                        o.modifyRefused();
+                        leavesQty = o.leavesQty;
                     }
                     default -> {}
                 }
@@ -637,6 +705,7 @@ class OmsModelBasedTest {
                     case NEW -> {
                         leavesQty = o.leavesQty;
                         o.acked = true;
+                        o.modifyPending = false;
                     }
                     case PARTIAL_FILL -> {
                         filledQty = (1 + rng.nextInt((int) (o.leavesQty / SIZE_STEP - 1))) * SIZE_STEP;
@@ -656,7 +725,10 @@ class OmsModelBasedTest {
                         terminal = true;
                     }
                     case CANCEL, REJECT, EXPIRE -> terminal = true;
-                    case CANCEL_REJECT -> {}
+                    case CANCEL_REJECT -> {
+                        o.modifyRefused();
+                        leavesQty = o.leavesQty;
+                    }
                     default -> {}
                 }
 
@@ -759,6 +831,7 @@ class OmsModelBasedTest {
                     case NEW -> {
                         leavesQty = o.leavesQty;
                         o.acked = true;
+                        o.modifyPending = false;
                     }
                     case PARTIAL_FILL -> {
                         filledQty = (1 + rng.nextInt((int) (o.leavesQty / SIZE_STEP - 1))) * SIZE_STEP;
@@ -779,7 +852,8 @@ class OmsModelBasedTest {
                     }
                     case CANCEL, REJECT, EXPIRE -> terminal = true;
                     case CANCEL_REJECT -> {
-                        /* no tracking change */
+                        o.modifyRefused();
+                        leavesQty = o.leavesQty;
                     }
                     default -> {}
                 }
@@ -873,6 +947,7 @@ class OmsModelBasedTest {
                     case NEW -> {
                         leavesQty = o.leavesQty;
                         o.acked = true;
+                        o.modifyPending = false;
                     }
                     case PARTIAL_FILL -> {
                         filledQty = (1 + rng.nextInt((int) (o.leavesQty / SIZE_STEP - 1))) * SIZE_STEP;
@@ -893,18 +968,15 @@ class OmsModelBasedTest {
                     }
                     case CANCEL, REJECT, EXPIRE -> terminal = true;
                     case CANCEL_REJECT -> {
-                        /* no tracking change */
+                        o.modifyRefused();
+                        leavesQty = o.leavesQty;
                     }
                     default -> {}
                 }
 
                 // Also update firm model for fills
                 if (type == ExecType.FILL || type == ExecType.PARTIAL_FILL) {
-                    long effFee = fee;
-                    firmModel.removeLeaves(o.side, filledQty);
-                    firmModel.applyFill(o.side, filledQty, fillPrice, effFee);
-                } else if (type == ExecType.CANCEL || type == ExecType.REJECT || type == ExecType.EXPIRE) {
-                    firmModel.removeLeaves(o.side, o.leavesQty);
+                    firmModel.applyFill(o.side, filledQty, fillPrice, fee);
                 }
 
                 h.injectExecReport(
@@ -926,18 +998,7 @@ class OmsModelBasedTest {
                 }
             }
 
-            // Sync firm model leaves for modifies BEFORE captureNewOrders updates o.leavesQty
-            for (int j = prevMod; j < h.sink.modifies.size(); j++) {
-                OmsTestHarness.ModifyCapture mod = h.sink.modifies.get(j);
-                OutstandingOrder oo = byOid.get(mod.clientOidCounter());
-                if (oo != null) {
-                    firmModel.removeLeaves(oo.side, oo.leavesQty);
-                    firmModel.addLeaves(oo.side, mod.size() - oo.cumQty);
-                }
-            }
-
-            // Capture new orders and update firm model leaves for new orders
-            int prevNewSize = outstanding.size();
+            // Capture new orders
             captureNewOrders(
                     h,
                     prevNew,
@@ -947,10 +1008,6 @@ class OmsModelBasedTest {
                     captureStrategyId,
                     OmsTestHarness.SECURITY_ID,
                     OmsTestHarness.LISTING_ID);
-            for (int j = prevNewSize; j < outstanding.size(); j++) {
-                OutstandingOrder oo = outstanding.get(j);
-                firmModel.addLeaves(oo.side, oo.leavesQty);
-            }
 
             // Assert per-strategy positions
             assertPositionMatches(
@@ -968,8 +1025,10 @@ class OmsModelBasedTest {
             long fBuy = firmPos == null ? 0 : firmPos.leavesBuyQty;
             long fSell = firmPos == null ? 0 : firmPos.leavesSellQty;
             assertEquals(firmModel.netQuantity, fNet, evCtx + " firm netQuantity");
-            assertEquals(firmModel.leavesBuyQty, fBuy, evCtx + " firm leavesBuyQty");
-            assertEquals(firmModel.leavesSellQty, fSell, evCtx + " firm leavesSellQty");
+            ModelPosition aPos = modelA.getOrCreatePosition(OmsTestHarness.LISTING_ID);
+            ModelPosition bPos = modelB.getOrCreatePosition(OmsTestHarness.LISTING_ID);
+            assertEquals(aPos.leavesBuyQty + bPos.leavesBuyQty, fBuy, evCtx + " firm leavesBuyQty");
+            assertEquals(aPos.leavesSellQty + bPos.leavesSellQty, fSell, evCtx + " firm leavesSellQty");
         }
     }
 
@@ -996,7 +1055,7 @@ class OmsModelBasedTest {
         for (int j = prevMod; j < h.sink.modifies.size(); j++) {
             OmsTestHarness.ModifyCapture mod = h.sink.modifies.get(j);
             OutstandingOrder o = byOid.get(mod.clientOidCounter());
-            if (o != null) o.leavesQty = mod.size() - o.cumQty; // FIX: leaves = order qty - cum qty
+            if (o != null) o.modifySent(mod.size()); // FIX: leaves = order qty - cum qty
         }
     }
 
@@ -1010,8 +1069,8 @@ class OmsModelBasedTest {
         long venueSell = 0;
         for (OutstandingOrder o : outstanding) {
             if (o.listingId != listingId) continue;
-            if (o.side == Side.Bid) venueBuy += o.leavesQty;
-            else venueSell += o.leavesQty;
+            if (o.side == Side.Bid) venueBuy += o.worstCaseLeaves();
+            else venueSell += o.worstCaseLeaves();
         }
         assertEquals(venueBuy, rp == null ? 0 : rp.leavesBuyQty, ctx + " venue vs OMS leavesBuyQty");
         assertEquals(venueSell, rp == null ? 0 : rp.leavesSellQty, ctx + " venue vs OMS leavesSellQty");

@@ -68,6 +68,7 @@ public final class OmsAgent implements GnomeAgent, SequencedEventHandler, Action
 
     @Override
     public int doWork() throws Exception {
+        oms.applyRiskChanges(this, nanoClock);
         int work = 0;
         work += execReportPoller.poll();
         work += intentPoller.poll();

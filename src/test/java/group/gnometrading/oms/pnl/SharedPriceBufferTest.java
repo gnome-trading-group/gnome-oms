@@ -1,8 +1,8 @@
 package group.gnometrading.oms.pnl;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
+import group.gnometrading.schemas.Side;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -28,26 +28,59 @@ class SharedPriceBufferTest {
     }
 
     @Test
-    void writeAndRead_roundTripsPrice() {
+    void freshSlot_hasNoPrice() {
         int slot = buffer.register();
-        buffer.write(slot, 12345L);
-
-        assertEquals(12345L, buffer.readSpinning(slot));
+        assertEquals(0L, buffer.executionPrice(slot, Side.Bid));
+        assertEquals(0L, buffer.executionPrice(slot, Side.Ask));
+        assertEquals(0L, buffer.markPrice(slot));
     }
 
     @Test
-    void read_onFreshSlot_returnsZero() {
+    void executionPrice_buyUsesAsk_sellUsesBid() {
         int slot = buffer.register();
-        assertEquals(0L, buffer.readSpinning(slot));
+        buffer.writeQuote(slot, 40L, 44L);
+        buffer.writeTrade(slot, 10L);
+
+        assertEquals(44L, buffer.executionPrice(slot, Side.Bid));
+        assertEquals(40L, buffer.executionPrice(slot, Side.Ask));
     }
 
     @Test
-    void write_updatesExistingSlot() {
+    void executionPrice_fallsBackToLastTradeWhenSideEmpty() {
         int slot = buffer.register();
-        buffer.write(slot, 100L);
-        buffer.write(slot, 200L);
+        buffer.writeQuote(slot, 40L, 0L);
+        buffer.writeTrade(slot, 42L);
 
-        assertEquals(200L, buffer.readSpinning(slot));
+        assertEquals(42L, buffer.executionPrice(slot, Side.Bid));
+        assertEquals(40L, buffer.executionPrice(slot, Side.Ask));
+    }
+
+    @Test
+    void markPrice_isMidWhenBothSidesQuoted() {
+        int slot = buffer.register();
+        buffer.writeQuote(slot, 40L, 45L);
+        buffer.writeTrade(slot, 10L);
+
+        assertEquals(42L, buffer.markPrice(slot));
+    }
+
+    @Test
+    void markPrice_fallsBackToLastTradeWhenEitherSideEmpty() {
+        int slot = buffer.register();
+        buffer.writeTrade(slot, 30L);
+        buffer.writeQuote(slot, 0L, 45L);
+
+        assertEquals(30L, buffer.markPrice(slot));
+    }
+
+    @Test
+    void writeQuote_replacesPreviousQuote() {
+        int slot = buffer.register();
+        buffer.writeQuote(slot, 40L, 44L);
+        buffer.writeQuote(slot, 41L, 43L);
+
+        assertEquals(43L, buffer.executionPrice(slot, Side.Bid));
+        assertEquals(41L, buffer.executionPrice(slot, Side.Ask));
     }
 
     @Test
@@ -55,18 +88,10 @@ class SharedPriceBufferTest {
         int slot0 = buffer.register();
         int slot1 = buffer.register();
 
-        buffer.write(slot0, 1000L);
-        buffer.write(slot1, 2000L);
+        buffer.writeQuote(slot0, 1000L, 1002L);
+        buffer.writeQuote(slot1, 2000L, 2002L);
 
-        assertEquals(1000L, buffer.readSpinning(slot0));
-        assertEquals(2000L, buffer.readSpinning(slot1));
-    }
-
-    @Test
-    void read_returnsSentinelWhenVersionOdd() {
-        // Version is even (0) on a fresh slot — read should return 0 (not sentinel)
-        int slot = buffer.register();
-        assertEquals(0L, buffer.readSpinning(slot));
-        assertNotEquals(Long.MIN_VALUE, buffer.readSpinning(slot));
+        assertEquals(1001L, buffer.markPrice(slot0));
+        assertEquals(2001L, buffer.markPrice(slot1));
     }
 }

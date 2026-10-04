@@ -1,10 +1,17 @@
 package group.gnometrading.oms.risk;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import group.gnometrading.logging.NullLogger;
 import group.gnometrading.oms.position.DefaultPositionTracker;
 import group.gnometrading.oms.position.SharedPositionBuffer;
 import group.gnometrading.oms.state.OrderStateManager;
@@ -28,12 +35,13 @@ class RiskSyncAgentTest {
     private static final int STRATEGY_ID = 1;
     private static final int LISTING_ID = 100;
     private static final Duration INTERVAL = Duration.ofMillis(1);
+    private static final Duration STALE_AFTER = Duration.ofSeconds(30);
 
     @Mock
     private RiskMaster riskMaster;
 
-    @Mock
-    private EpochClock clock;
+    private final long[] now = {0};
+    private final EpochClock clock = () -> now[0];
 
     @Mock
     private OrderStateManager orders;
@@ -45,20 +53,36 @@ class RiskSyncAgentTest {
 
     @BeforeEach
     void setUp() {
-        riskEngine = new RiskEngine();
-        agent = new RiskSyncAgent(riskMaster, riskEngine, clock, INTERVAL);
+        riskEngine = RiskEngine.syncedFromRegistry(clock, STALE_AFTER, 1);
+        agent = new RiskSyncAgent(riskMaster, riskEngine, clock, INTERVAL, new NullLogger());
         positions = new DefaultPositionTracker(new SharedPositionBuffer(8));
         order = new Order();
         order.encoder.side(Side.Bid).size(1).price(100);
-
-        // clock returns 0 on start, then 10 on doWork() — fires the schedule
-        when(clock.time()).thenReturn(0L, 10L);
     }
 
+    // The OMS thread applies what the sync thread published, as it would on its next loop pass.
     private void triggerSync() {
         agent.onStart();
         agent.doWork();
+        riskEngine.applyChanges(IGNORE_KILLS);
     }
+
+    private void advance(final long millis) {
+        now[0] += millis;
+        agent.doWork();
+        riskEngine.applyChanges(IGNORE_KILLS);
+    }
+
+    private static final RiskEngine.KillHandler IGNORE_KILLS = new RiskEngine.KillHandler() {
+        @Override
+        public void onEverythingKilled() {}
+
+        @Override
+        public void onStrategyKilled(final int strategyId) {}
+
+        @Override
+        public void onListingKilled(final int listingId) {}
+    };
 
     private static RiskPolicyRecord createRecord(
             final int policyId,
@@ -114,12 +138,12 @@ class RiskSyncAgentTest {
         setupRiskMaster(createRecord(1, "KILL_SWITCH", PolicyScope.GLOBAL, 0, 0, "{}", false));
         triggerSync();
 
-        // KillSwitch disabled — engine should pass all orders
+        // Disabled kill switch — everything trades
         assertTrue(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID));
     }
 
     @Test
-    void testRefreshAndPublishWithStrategyOrderPolicy() {
+    void testStrategyKillSwitchBlocksOnlyThatStrategy() {
         setupRiskMaster(createRecord(1, "KILL_SWITCH", PolicyScope.STRATEGY, STRATEGY_ID, 0, "{}", true));
         triggerSync();
 
@@ -128,7 +152,7 @@ class RiskSyncAgentTest {
     }
 
     @Test
-    void testRefreshAndPublishWithListingOrderPolicy() {
+    void testListingKillSwitchBlocksOnlyThatListing() {
         setupRiskMaster(createRecord(1, "KILL_SWITCH", PolicyScope.LISTING, 0, LISTING_ID, "{}", true));
         triggerSync();
 
@@ -137,14 +161,33 @@ class RiskSyncAgentTest {
     }
 
     @Test
-    void testRefreshAndPublishThrowsOnUnknownPolicyType() {
-        setupRiskMaster(createRecord(1, "UNKNOWN_TYPE", PolicyScope.GLOBAL, 0, 0, "{}", true));
+    void testPolicyThatCantBeBuiltKillsItsScopeAndLeavesOthersTrading() {
+        setupRiskMaster(
+                createRecord(1, "UNKNOWN_TYPE", PolicyScope.STRATEGY, STRATEGY_ID, 0, "{}", true),
+                createRecord(2, "MAX_ORDER_SIZE", PolicyScope.LISTING, 0, LISTING_ID, "{}", true),
+                createRecord(3, "MAX_ORDER_SIZE", PolicyScope.GLOBAL, 0, 0, "{\"maxOrderSize\": 10}", true));
+        triggerSync();
 
-        assertThrows(IllegalStateException.class, this::triggerSync);
+        assertTrue(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID + 1), "unknown type kills its strategy");
+        assertTrue(riskEngine.isBlocked(STRATEGY_ID + 1, LISTING_ID), "unreadable parameters kill their listing");
+        order.encoder.size(5);
+        assertTrue(riskEngine.check(order, positions, orders, STRATEGY_ID + 1, LISTING_ID + 1));
+        order.encoder.size(11);
+        assertFalse(riskEngine.check(order, positions, orders, STRATEGY_ID + 1, LISTING_ID + 1));
     }
 
     @Test
-    void testPolicyCacheReusesExistingPolicyWithUpdatedParameters() {
+    void testKillSwitchAppliesEvenWhenAnotherPolicyCantBeBuilt() {
+        setupRiskMaster(
+                createRecord(1, "MAX_ORDER_SIZE", PolicyScope.LISTING, 0, LISTING_ID, "{}", true),
+                createRecord(2, "KILL_SWITCH", PolicyScope.GLOBAL, 0, 0, "{}", true));
+        triggerSync();
+
+        assertTrue(riskEngine.isBlocked(STRATEGY_ID + 1, LISTING_ID + 1));
+    }
+
+    @Test
+    void testChangedParametersPublishAFreshPolicy() {
         final RiskPolicyRecord record =
                 createRecord(1, "MAX_ORDER_SIZE", PolicyScope.GLOBAL, 0, 0, "{\"maxOrderSize\": 100}", true);
         setupRiskMaster(record);
@@ -156,9 +199,7 @@ class RiskSyncAgentTest {
 
         // Second sync: update same policyId to maxOrderSize = 10
         record.parametersJson.copy(new ViewString("{\"maxOrderSize\": 10}"));
-        when(clock.time()).thenReturn(20L, 30L);
-        agent.onStart();
-        agent.doWork();
+        advance(10);
 
         order.encoder.size(50);
         assertFalse(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID));
@@ -187,5 +228,127 @@ class RiskSyncAgentTest {
 
         assertTrue(riskEngine.checkMarketPolicies(STRATEGY_ID, LISTING_ID, positions, orders));
         assertFalse(riskEngine.checkMarketPolicies(STRATEGY_ID, LISTING_ID + 1, positions, orders));
+    }
+
+    // --- load, staleness and escalation ---
+
+    @Test
+    void testPoliciesLoadImmediatelyAtStart() {
+        setupRiskMaster();
+        assertTrue(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID), "nothing trades before the first load");
+
+        triggerSync();
+
+        assertFalse(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID));
+    }
+
+    @Test
+    void testGlobalKillSwitchAndUnreadableScopeBlockEverything() {
+        setupRiskMaster(createRecord(1, "KILL_SWITCH", null, 0, 0, "{}", true));
+        triggerSync();
+
+        assertTrue(riskEngine.isBlocked(STRATEGY_ID + 5, LISTING_ID + 5));
+    }
+
+    @Test
+    void testFailedRefreshKeepsTheLastPolicies() {
+        setupRiskMaster(createRecord(1, "MAX_ORDER_SIZE", PolicyScope.GLOBAL, 0, 0, "{\"maxOrderSize\": 10}", true));
+        triggerSync();
+        doThrow(new RuntimeException("registry down")).when(riskMaster).refresh();
+
+        advance(1_000);
+
+        order.encoder.size(5);
+        assertTrue(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID));
+        order.encoder.size(11);
+        assertFalse(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID));
+    }
+
+    @Test
+    void testNoRefreshForTheStaleWindowBlocksNewOrdersUntilOneSucceeds() {
+        setupRiskMaster();
+        triggerSync();
+        doThrow(new RuntimeException("registry down")).when(riskMaster).refresh();
+
+        advance(29_000);
+        assertFalse(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID), "still inside the window");
+        advance(2_000);
+        assertTrue(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID));
+        assertFalse(riskEngine.hasKills(), "stale blocks new orders but cancels nothing");
+
+        doNothing().when(riskMaster).refresh();
+        advance(1);
+        assertFalse(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID));
+    }
+
+    @Test
+    void testUnchangedPoliciesPublishNothing() {
+        setupRiskMaster(createRecord(1, "MAX_ORDER_SIZE", PolicyScope.GLOBAL, 0, 0, "{\"maxOrderSize\": 10}", true));
+        triggerSync();
+        final RiskEngineSnapshot first = riskEngine.publishedSnapshot();
+
+        advance(10);
+        assertSame(first, riskEngine.publishedSnapshot());
+    }
+
+    @Test
+    void testLatchedHaltIsRecordedAsAStrategyKillAndRetriedOnFailure() {
+        setupRiskMaster();
+        triggerSync();
+        doThrow(new RuntimeException("registry down"))
+                .doNothing()
+                .when(riskMaster)
+                .requestHalt(eq(7), anyString());
+        riskEngine.latch(7);
+
+        advance(1);
+        advance(1);
+
+        verify(riskMaster, times(2)).requestHalt(eq(7), anyString());
+        advance(1);
+        verify(riskMaster, times(2)).requestHalt(eq(7), anyString());
+    }
+
+    @Test
+    void testOneHaltFailingDoesNotHoldUpAnother() {
+        setupRiskMaster();
+        triggerSync();
+        doThrow(new RuntimeException("rejected")).when(riskMaster).requestHalt(eq(7), anyString());
+        riskEngine.latch(7);
+        riskEngine.latch(8);
+
+        advance(1);
+
+        verify(riskMaster).requestHalt(eq(8), anyString());
+    }
+
+    @Test
+    void testRecordedHaltReachesTheOmsEvenIfTheOperatorAlreadyResumedIt() {
+        setupRiskMaster();
+        triggerSync();
+        riskEngine.latch(7);
+
+        advance(1); // records the halt and forces a refresh
+        advance(1); // that refresh, with policies unchanged, still publishes the confirmation
+
+        assertFalse(riskEngine.isLatched(7));
+    }
+
+    @Test
+    void testConfirmationKeepsRidingSnapshotsTheOmsSkipped() {
+        setupRiskMaster();
+        triggerSync();
+        riskEngine.latch(7);
+
+        now[0] += 1;
+        agent.doWork(); // records the halt
+        now[0] += 1;
+        agent.doWork(); // publishes the confirmation; the OMS doesn't look before the policies change
+        setupRiskMaster(createRecord(1, "MAX_ORDER_SIZE", PolicyScope.GLOBAL, 0, 0, "{\"maxOrderSize\": 10}", true));
+        now[0] += 1;
+        agent.doWork(); // so the snapshot it does see must carry the confirmation again
+        riskEngine.applyChanges(IGNORE_KILLS);
+
+        assertFalse(riskEngine.isLatched(7));
     }
 }

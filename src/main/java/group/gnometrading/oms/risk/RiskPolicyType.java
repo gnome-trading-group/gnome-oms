@@ -3,7 +3,7 @@ package group.gnometrading.oms.risk;
 import group.gnometrading.strings.GnomeString;
 
 public enum RiskPolicyType {
-    KILL_SWITCH(Category.ORDER),
+    KILL_SWITCH(Category.KILL),
     MAX_NOTIONAL(Category.ORDER),
     MAX_ORDER_SIZE(Category.ORDER),
     MAX_POSITION(Category.ORDER),
@@ -12,7 +12,9 @@ public enum RiskPolicyType {
 
     public enum Category {
         ORDER,
-        MARKET
+        MARKET,
+        /** Not a policy: an enabled row blocks its scope and cancels everything in it. */
+        KILL
     }
 
     private final Category category;

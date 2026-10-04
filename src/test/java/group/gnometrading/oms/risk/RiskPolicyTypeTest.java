@@ -34,7 +34,7 @@ class RiskPolicyTypeTest {
 
     private static Stream<Arguments> testCategoryArguments() {
         return Stream.of(
-                Arguments.of(RiskPolicyType.KILL_SWITCH, RiskPolicyType.Category.ORDER),
+                Arguments.of(RiskPolicyType.KILL_SWITCH, RiskPolicyType.Category.KILL),
                 Arguments.of(RiskPolicyType.MAX_NOTIONAL, RiskPolicyType.Category.ORDER),
                 Arguments.of(RiskPolicyType.MAX_ORDER_SIZE, RiskPolicyType.Category.ORDER),
                 Arguments.of(RiskPolicyType.MAX_POSITION, RiskPolicyType.Category.ORDER),

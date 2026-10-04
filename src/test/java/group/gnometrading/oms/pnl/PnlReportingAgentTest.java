@@ -131,7 +131,7 @@ class PnlReportingAgentTest {
         tracker.registerSlot(STRATEGY_ID, LISTING_ID);
         tracker.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 10 * UNIT, 50, 0);
         int priceSlot = priceSlotRegistry.register(LISTING_ID);
-        priceBuffer.write(priceSlot, 80L);
+        priceBuffer.writeTrade(priceSlot, 80L);
 
         String json = triggerFlushAndCaptureJson(agent);
         assertTrue(json.contains("\"markPrice\":80"));
@@ -145,7 +145,7 @@ class PnlReportingAgentTest {
         tracker.registerSlot(STRATEGY_ID, LISTING_ID);
         tracker.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Ask, 10 * UNIT, 100, 0);
         int priceSlot = priceSlotRegistry.register(LISTING_ID);
-        priceBuffer.write(priceSlot, 130L);
+        priceBuffer.writeTrade(priceSlot, 130L);
 
         String json = triggerFlushAndCaptureJson(agent);
         assertTrue(json.contains("\"markPrice\":130"));
@@ -162,7 +162,7 @@ class PnlReportingAgentTest {
         // realizedPnl = 5 * (140 - 100) = 200, remaining long 5 @ avg 100
         // mark = 80 -> unrealizedPnl = 5 * (80 - 100) = -100 -> totalPnl = 100
         int priceSlot = priceSlotRegistry.register(LISTING_ID);
-        priceBuffer.write(priceSlot, 80L);
+        priceBuffer.writeTrade(priceSlot, 80L);
 
         String json = triggerFlushAndCaptureJson(agent);
         assertTrue(json.contains("\"unrealizedPnl\":-100"));
@@ -174,7 +174,7 @@ class PnlReportingAgentTest {
         tracker.registerSlot(STRATEGY_ID, LISTING_ID);
         tracker.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 10 * UNIT, 50, 0);
         priceSlotRegistry.register(LISTING_ID);
-        // price never written — readSpinning returns 0
+        // price never written — markPrice returns 0
 
         String json = triggerFlushAndCaptureJson(agent);
         assertTrue(json.contains("\"markPrice\":0"));
@@ -188,7 +188,7 @@ class PnlReportingAgentTest {
         tracker.registerSlot(STRATEGY_ID, LISTING_ID);
         tracker.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 10 * UNIT, 50, 1);
         int priceSlot = priceSlotRegistry.register(LISTING_ID);
-        priceBuffer.write(priceSlot, 80L);
+        priceBuffer.writeTrade(priceSlot, 80L);
 
         String json = triggerFlushAndCaptureJson(agent);
         assertTrue(json.contains("\"totalPnl\":" + (300 - 1L)));

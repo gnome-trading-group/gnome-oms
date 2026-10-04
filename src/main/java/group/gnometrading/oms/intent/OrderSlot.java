@@ -25,6 +25,9 @@ public final class OrderSlot {
         PENDING_CANCEL
     }
 
+    private final int listingId;
+    private final int exchangeId;
+    private final long securityId;
     private final boolean nativeModify;
 
     private State state = State.EMPTY;
@@ -44,8 +47,23 @@ public final class OrderSlot {
     private short queuedFlags;
     private boolean hasQueuedIntent;
 
-    public OrderSlot(boolean nativeModify) {
+    public OrderSlot(boolean nativeModify, int listingId, int exchangeId, long securityId) {
         this.nativeModify = nativeModify;
+        this.listingId = listingId;
+        this.exchangeId = exchangeId;
+        this.securityId = securityId;
+    }
+
+    public int getListingId() {
+        return listingId;
+    }
+
+    public int getExchangeId() {
+        return exchangeId;
+    }
+
+    public long getSecurityId() {
+        return securityId;
     }
 
     public boolean supportsNativeModify() {

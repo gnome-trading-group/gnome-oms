@@ -43,7 +43,7 @@ public final class MaxPositionPolicy extends AbstractConfigurablePolicy implemen
         // A modify is checked as the replacement for its order, whose leaves are already counted.
         final TrackedOrder replaced = orders.getOrder(order.getClientOidCounter());
         if (replaced != null) {
-            openSameSide -= replaced.getLeavesQty();
+            openSameSide -= replaced.workingQty();
         }
         // Every open order on this side could fill, so the worst case counts all of them.
         final long worstCase =

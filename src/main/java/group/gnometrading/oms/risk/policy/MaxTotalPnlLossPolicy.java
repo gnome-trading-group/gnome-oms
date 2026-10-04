@@ -15,8 +15,8 @@ import group.gnometrading.strings.GnomeString;
  * {@code maxLoss} in price units (1e9 per dollar).
  *
  * <p>Unrealized PnL is the notional of {@code netQuantity} at {@code markPrice - avgEntryPrice}, where the
- * mark price is the last trade price read from {@link SharedPriceBuffer}. If no mark price is
- * available for a listing, this policy conservatively returns {@code false} (not violated) to
+ * mark price is the mid of the book, or the last trade when a side is empty, read from {@link SharedPriceBuffer}.
+ * If no mark price is available for a listing, this policy conservatively returns {@code false} (not violated) to
  * avoid false halts on startup.
  */
 public final class MaxTotalPnlLossPolicy extends AbstractConfigurablePolicy implements MarketRiskPolicy {
@@ -58,7 +58,7 @@ public final class MaxTotalPnlLossPolicy extends AbstractConfigurablePolicy impl
             return false;
         }
 
-        final long markPrice = priceBuffer.readSpinning(slot);
+        final long markPrice = priceBuffer.markPrice(slot);
         if (markPrice == 0) {
             return false;
         }

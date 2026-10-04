@@ -492,4 +492,47 @@ class OmsScenarioTest {
         h2.submitBidIntent(100L, 12L);
         assertEquals(0, h2.sink.modifies.size(), "growing past the limit is rejected");
     }
+
+    @Test
+    void scenario_aRefusedModifyLeavesTheOriginalOrderWorking() {
+        long counter = h.submitBidIntent(100L, 10L);
+        h.injectAck(counter, 10);
+        h.submitBidIntent(100L, 20L); // modify up to 20
+        h.injectCancelReject(counter); // the venue refuses it: still 10
+
+        h.injectFill(counter, 4, 100, 4, 6);
+        h.injectFill(counter, 6, 100, 10, 0);
+
+        Position pos = h.getPosition(OmsTestHarness.LISTING_ID);
+        assertEquals(10L, pos.netQuantity);
+        assertEquals(0L, pos.leavesBuyQty);
+    }
+
+    @Test
+    void scenario_aFillReportedBeforeTheModifyAckLeavesNoPhantomLeaves() {
+        long counter = h.submitBidIntent(100L, 10L);
+        h.injectAck(counter, 10);
+        h.submitBidIntent(100L, 20L); // modify up to 20, not yet acknowledged
+        h.injectFill(counter, 5, 100, 5, 5); // the venue's leaves still describe the 10-lot
+        h.injectCancel(counter);
+
+        Position pos = h.getPosition(OmsTestHarness.LISTING_ID);
+        assertEquals(5L, pos.netQuantity);
+        assertEquals(0L, pos.leavesBuyQty);
+    }
+
+    @Test
+    void scenario_aFinalFillWithNothingNewStillEndsTheOrder() {
+        long counter = h.submitBidIntent(100L, 10L);
+        h.injectAck(counter, 10);
+        h.submitBidIntent(100L, 20L); // modify up to 20
+        h.injectFill(counter, 10, 100, 10, 10); // all of the original 10, reported as partial against the 20
+        h.injectCancelReject(counter); // the amend fails: the order was only ever 10
+        h.injectFill(counter, 0, 100, 10, 0); // the venue closes it with nothing new
+
+        Position pos = h.getPosition(OmsTestHarness.LISTING_ID);
+        assertEquals(10L, pos.netQuantity, "the closing report books no second fill");
+        assertEquals(0L, pos.leavesBuyQty);
+        assertNull(h.getTrackedOrder(counter), "the order is finished");
+    }
 }

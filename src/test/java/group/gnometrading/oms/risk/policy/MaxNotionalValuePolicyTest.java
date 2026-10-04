@@ -10,6 +10,7 @@ import group.gnometrading.oms.state.OrderStateManager;
 import group.gnometrading.schemas.Order;
 import group.gnometrading.schemas.OrderDecoder;
 import group.gnometrading.schemas.OrderType;
+import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.Statics;
 import group.gnometrading.strings.ViewString;
 import org.junit.jupiter.api.Test;
@@ -65,10 +66,30 @@ class MaxNotionalValuePolicyTest {
     }
 
     @Test
-    void testMarketOrderIsValuedAtTheMarkPrice() {
+    void testMarketOrderIsValuedAtTheSideItWouldExecuteAgainst() {
         final SharedPriceBuffer priceBuffer = new SharedPriceBuffer(4);
         final PriceSlotRegistry registry = new PriceSlotRegistry(4);
-        priceBuffer.write(registry.register(LISTING_ID), 100 * DOLLAR);
+        final int slot = registry.register(LISTING_ID);
+        priceBuffer.writeTrade(slot, 10 * DOLLAR);
+        priceBuffer.writeQuote(slot, 90 * DOLLAR, 110 * DOLLAR);
+        final MaxNotionalValuePolicy policy = new MaxNotionalValuePolicy(priceBuffer, registry);
+        policy.reconfigure(new ViewString("{\"maxNotionalValue\": " + 10_000 * DOLLAR + "}"));
+
+        order.encoder
+                .orderType(OrderType.MARKET)
+                .price(OrderDecoder.priceNullValue())
+                .size(91 * UNIT);
+        order.encoder.side(Side.Bid);
+        assertTrue(policy.isViolated(0, LISTING_ID, order, positions, orders)); // 91 at the $110 ask
+        order.encoder.side(Side.Ask);
+        assertFalse(policy.isViolated(0, LISTING_ID, order, positions, orders)); // 91 at the $90 bid
+    }
+
+    @Test
+    void testMarketOrderFallsBackToLastTradeWithoutAQuote() {
+        final SharedPriceBuffer priceBuffer = new SharedPriceBuffer(4);
+        final PriceSlotRegistry registry = new PriceSlotRegistry(4);
+        priceBuffer.writeTrade(registry.register(LISTING_ID), 100 * DOLLAR);
         final MaxNotionalValuePolicy policy = new MaxNotionalValuePolicy(priceBuffer, registry);
         policy.reconfigure(new ViewString("{\"maxNotionalValue\": " + 10_000 * DOLLAR + "}"));
 

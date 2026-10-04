@@ -33,6 +33,7 @@ import group.gnometrading.sm.ListingSpec;
 import group.gnometrading.sm.Security;
 import java.util.ArrayList;
 import java.util.List;
+import org.agrona.concurrent.EpochNanoClock;
 
 /**
  * Reusable test harness that wires a complete OMS with real components.
@@ -53,6 +54,8 @@ public final class OmsTestHarness {
     final DefaultPositionTracker positionTracker;
     final RingBufferOrderStateManager orderStateManager;
     final RiskEngine riskEngine;
+    private long nowNanos = 1;
+    private final EpochNanoClock clock = () -> nowNanos;
 
     OmsTestHarness() {
         this(new RiskEngine());
@@ -75,6 +78,18 @@ public final class OmsTestHarness {
         stubDefaultListing();
     }
 
+    /** What the OMS agent does at the top of its loop, over enough passes to reach the periodic re-sweep check. */
+    void applyRiskChanges() {
+        for (int pass = 0; pass < OrderManagementSystem.RESWEEP_CHECK_PASSES; pass++) {
+            oms.applyRiskChanges(sink, clock);
+        }
+    }
+
+    /** Moves the OMS's clock on, e.g. past a kill re-sweep. */
+    void advanceNanos(long nanos) {
+        nowNanos += nanos;
+    }
+
     void stubDefaultListing() {
         stubListing(EXCHANGE_ID, SECURITY_ID, LISTING_ID, 0, 0);
     }
@@ -94,16 +109,16 @@ public final class OmsTestHarness {
         when(securityMaster.getListing(exchangeId, securityId)).thenReturn(listing);
         when(securityMaster.getListing(listingId)).thenReturn(listing);
         when(securityMaster.getListingSpec(listingId))
-                .thenReturn(new ListingSpec(listingId, 1, lotSize, minNotional, 1));
+                .thenReturn(new ListingSpec(listingId, 1, lotSize, minNotional, 1, 0));
     }
 
     void stubTickSize(int listingId, long tickSize) {
-        when(securityMaster.getListingSpec(listingId)).thenReturn(new ListingSpec(listingId, tickSize, 0, 0, 1));
+        when(securityMaster.getListingSpec(listingId)).thenReturn(new ListingSpec(listingId, tickSize, 0, 0, 1, 0));
     }
 
     void stubListingSpec(int listingId, long lotSize, long minNotional) {
         when(securityMaster.getListingSpec(listingId))
-                .thenReturn(new ListingSpec(listingId, 1, lotSize, minNotional, 1));
+                .thenReturn(new ListingSpec(listingId, 1, lotSize, minNotional, 1, 0));
     }
 
     long submitBidIntent(long price, long size) {
