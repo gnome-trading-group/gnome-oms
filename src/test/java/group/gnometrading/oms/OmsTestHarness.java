@@ -14,7 +14,7 @@ import group.gnometrading.oms.position.DefaultPositionTracker;
 import group.gnometrading.oms.position.Position;
 import group.gnometrading.oms.position.SharedPositionBuffer;
 import group.gnometrading.oms.risk.RiskEngine;
-import group.gnometrading.oms.state.RingBufferOrderStateManager;
+import group.gnometrading.oms.state.PooledOrderStateManager;
 import group.gnometrading.oms.state.TrackedOrder;
 import group.gnometrading.schemas.CancelOrder;
 import group.gnometrading.schemas.ExecType;
@@ -56,7 +56,7 @@ public final class OmsTestHarness {
     final RecordingSink sink;
     final SecurityMaster securityMaster;
     final DefaultPositionTracker positionTracker;
-    final RingBufferOrderStateManager orderStateManager;
+    final PooledOrderStateManager orderStateManager;
     final RiskEngine riskEngine;
     private long nowNanos = 1;
     private final EpochNanoClock clock = () -> nowNanos;
@@ -72,7 +72,7 @@ public final class OmsTestHarness {
     OmsTestHarness(RiskEngine riskEngine, SharedPriceBuffer priceBuffer, PriceSlotRegistry priceSlots) {
         this.riskEngine = riskEngine;
         this.securityMaster = mock(SecurityMaster.class);
-        this.orderStateManager = new RingBufferOrderStateManager(64);
+        this.orderStateManager = new PooledOrderStateManager(64);
         this.positionTracker = new DefaultPositionTracker(new SharedPositionBuffer(16));
         this.oms = new OrderManagementSystem(
                 new NullLogger(),
@@ -81,7 +81,8 @@ public final class OmsTestHarness {
                 riskEngine,
                 securityMaster,
                 priceBuffer,
-                priceSlots);
+                priceSlots,
+                clock);
         this.sink = new RecordingSink();
         stubDefaultListing();
     }
@@ -89,7 +90,7 @@ public final class OmsTestHarness {
     /** What the OMS agent does at the top of its loop, over enough passes to reach the periodic re-sweep check. */
     void applyRiskChanges() {
         for (int pass = 0; pass < OrderManagementSystem.RESWEEP_CHECK_PASSES; pass++) {
-            oms.applyRiskChanges(sink, clock);
+            oms.applyRiskChanges(sink);
         }
     }
 

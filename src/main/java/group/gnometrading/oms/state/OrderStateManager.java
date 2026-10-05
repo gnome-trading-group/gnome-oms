@@ -6,6 +6,9 @@ import java.util.function.Consumer;
 
 public interface OrderStateManager {
 
+    /** True when no more orders can be tracked until one is released. */
+    boolean isFull();
+
     TrackedOrder trackOrder(Order order);
 
     TrackedOrder applyExecutionReport(OrderExecutionReport report);

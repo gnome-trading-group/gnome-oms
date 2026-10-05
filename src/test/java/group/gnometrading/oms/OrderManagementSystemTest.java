@@ -17,7 +17,7 @@ import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.DefaultPositionTracker;
 import group.gnometrading.oms.position.SharedPositionBuffer;
 import group.gnometrading.oms.risk.RiskEngine;
-import group.gnometrading.oms.state.RingBufferOrderStateManager;
+import group.gnometrading.oms.state.PooledOrderStateManager;
 import group.gnometrading.schemas.CancelOrder;
 import group.gnometrading.schemas.ExecType;
 import group.gnometrading.schemas.Intent;
@@ -26,6 +26,7 @@ import group.gnometrading.schemas.ModifyOrder;
 import group.gnometrading.schemas.Order;
 import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.schemas.OrderType;
+import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.Statics;
 import group.gnometrading.sm.Exchange;
@@ -61,7 +62,7 @@ class OrderManagementSystemTest {
 
     @BeforeEach
     void setUp() {
-        RingBufferOrderStateManager orderStateManager = new RingBufferOrderStateManager(64);
+        PooledOrderStateManager orderStateManager = new PooledOrderStateManager(64);
         DefaultPositionTracker positionTracker = new DefaultPositionTracker(new SharedPositionBuffer(8));
         RiskEngine riskEngine = new RiskEngine();
         priceBuffer = new SharedPriceBuffer(1);
@@ -74,7 +75,8 @@ class OrderManagementSystemTest {
                 riskEngine,
                 securityMaster,
                 priceBuffer,
-                priceSlotRegistry);
+                priceSlotRegistry,
+                () -> 0L);
         delegate = new RecordingSink();
 
         Listing listing = new Listing(
@@ -276,16 +278,60 @@ class OrderManagementSystemTest {
     }
 
     @Test
-    void testCancelRejectForUnknownOrderIsDiscardedSilently() {
-        Logger mockLogger = mock(Logger.class);
-        OrderManagementSystem testOms = new OrderManagementSystem(
-                mockLogger,
-                new RingBufferOrderStateManager(64),
+    void testNewOrderIsRejectedWhenEveryOrderSlotIsOpen() {
+        OrderManagementSystem fullOms = new OrderManagementSystem(
+                new NullLogger(),
+                new PooledOrderStateManager(1),
                 new DefaultPositionTracker(new SharedPositionBuffer(8)),
                 new RiskEngine(),
                 securityMaster,
                 new SharedPriceBuffer(1),
-                new PriceSlotRegistry(1));
+                new PriceSlotRegistry(1),
+                () -> 5_000L);
+        stubSpec(0, 0);
+
+        Intent bidOnly = new Intent();
+        bidOnly.encoder
+                .strategyId(STRATEGY_ID)
+                .exchangeId(EXCHANGE_ID)
+                .securityId(SECURITY_ID)
+                .bidPrice(100L)
+                .bidSize(UNIT)
+                .askPrice(IntentDecoder.askPriceNullValue())
+                .askSize(IntentDecoder.askSizeNullValue());
+        fullOms.processIntent(bidOnly, delegate);
+        assertEquals(1, delegate.newOrders.size());
+
+        Intent addAsk = new Intent();
+        addAsk.encoder
+                .strategyId(STRATEGY_ID)
+                .exchangeId(EXCHANGE_ID)
+                .securityId(SECURITY_ID)
+                .bidPrice(100L)
+                .bidSize(UNIT)
+                .askPrice(110L)
+                .askSize(UNIT);
+        delegate.clear();
+        fullOms.processIntent(addAsk, delegate);
+
+        assertEquals(0, delegate.newOrders.size());
+        assertEquals(List.of(RejectReason.RISK_LIMIT_EXCEEDED), delegate.rejects);
+        // The OMS stamps its own rejects with its clock rather than leaving the venue-time fields empty.
+        assertEquals(List.of(5_000L), delegate.rejectTimestamps);
+    }
+
+    @Test
+    void testCancelRejectForUnknownOrderIsDiscardedSilently() {
+        Logger mockLogger = mock(Logger.class);
+        OrderManagementSystem testOms = new OrderManagementSystem(
+                mockLogger,
+                new PooledOrderStateManager(64),
+                new DefaultPositionTracker(new SharedPositionBuffer(8)),
+                new RiskEngine(),
+                securityMaster,
+                new SharedPriceBuffer(1),
+                new PriceSlotRegistry(1),
+                () -> 0L);
 
         OrderExecutionReport cancelReject = new OrderExecutionReport();
         cancelReject.encodeClientOid(1L, STRATEGY_ID);
@@ -366,11 +412,23 @@ class OrderManagementSystemTest {
         final List<Order> newOrders = new ArrayList<>();
         final List<ModifyOrder> modifies = new ArrayList<>();
         final List<CancelOrder> cancels = new ArrayList<>();
+        final List<RejectReason> rejects = new ArrayList<>();
+        final List<Long> rejectTimestamps = new ArrayList<>();
 
         void clear() {
             newOrders.clear();
             modifies.clear();
             cancels.clear();
+            rejects.clear();
+            rejectTimestamps.clear();
+        }
+
+        @Override
+        public void onExecReport(OrderExecutionReport report) {
+            if (report.decoder.execType() == ExecType.REJECT) {
+                rejects.add(report.decoder.rejectReason());
+                rejectTimestamps.add(report.decoder.timestampRecv());
+            }
         }
 
         @Override

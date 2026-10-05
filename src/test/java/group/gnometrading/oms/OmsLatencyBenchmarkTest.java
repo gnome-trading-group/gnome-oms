@@ -10,7 +10,7 @@ import group.gnometrading.oms.risk.MarketRiskPolicy;
 import group.gnometrading.oms.risk.OrderRiskPolicy;
 import group.gnometrading.oms.risk.RiskEngine;
 import group.gnometrading.oms.risk.policy.MaxTotalPnlLossPolicy;
-import group.gnometrading.oms.state.RingBufferOrderStateManager;
+import group.gnometrading.oms.state.PooledOrderStateManager;
 import group.gnometrading.schemas.CancelOrder;
 import group.gnometrading.schemas.ExecType;
 import group.gnometrading.schemas.Intent;
@@ -57,17 +57,18 @@ class OmsLatencyBenchmarkTest {
                 new MarketRiskPolicy[] {new MaxTotalPnlLossPolicy(prices, slots, Long.MAX_VALUE / 4)});
         oms = new OrderManagementSystem(
                 new NullLogger(),
-                new RingBufferOrderStateManager(64),
+                new PooledOrderStateManager(64),
                 new DefaultPositionTracker(new SharedPositionBuffer(16)),
                 engine,
                 OmsTestHarness.cachedSecurityMaster(EXCHANGE_ID, SECURITY_ID, LISTING_ID),
                 prices,
-                slots);
+                slots,
+                clock);
         holdAPositionWithARestingBid();
         final Intent unchanged = OmsTestHarness.buildIntent(
                 STRATEGY_ID, EXCHANGE_ID, SECURITY_ID, PRICE, 5 * UNIT, IntentDecoder.askPriceNullValue(), 0);
 
-        final double riskChanges = nanosPer(() -> oms.applyRiskChanges(sink, clock));
+        final double riskChanges = nanosPer(() -> oms.applyRiskChanges(sink));
         final double intent = nanosPer(() -> oms.processIntent(unchanged, sink));
         final double quoteWrite = nanosPer(this::tick);
         final double markCheckIdle = nanosPer(() -> oms.checkMarkMoves(sink));

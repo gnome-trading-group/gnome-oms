@@ -14,7 +14,7 @@ import group.gnometrading.oms.risk.RiskEngine;
 import group.gnometrading.oms.risk.policy.MaxNotionalValuePolicy;
 import group.gnometrading.oms.risk.policy.MaxOrderSizePolicy;
 import group.gnometrading.oms.risk.policy.MaxTotalPnlLossPolicy;
-import group.gnometrading.oms.state.RingBufferOrderStateManager;
+import group.gnometrading.oms.state.PooledOrderStateManager;
 import group.gnometrading.schemas.CancelOrder;
 import group.gnometrading.schemas.ExecType;
 import group.gnometrading.schemas.Intent;
@@ -56,13 +56,14 @@ class OmsLifecycleAllocationTest {
                 new MarketRiskPolicy[] {new MaxTotalPnlLossPolicy(prices, slots, Long.MAX_VALUE / 4)});
         final OrderManagementSystem oms = new OrderManagementSystem(
                 new NullLogger(),
-                new RingBufferOrderStateManager(64),
+                new PooledOrderStateManager(64),
                 new DefaultPositionTracker(new SharedPositionBuffer(16)),
                 engine,
                 OmsTestHarness.cachedSecurityMaster(
                         OmsTestHarness.EXCHANGE_ID, OmsTestHarness.SECURITY_ID, OmsTestHarness.LISTING_ID),
                 prices,
-                slots);
+                slots,
+                () -> 1L);
         final LastOrderSink sink = new LastOrderSink();
         final Reports reports = new Reports(oms, sink);
         final Intent bid = bidIntent(price, 10 * unit);
@@ -82,7 +83,7 @@ class OmsLifecycleAllocationTest {
         final Runnable lifecycle = () -> {
             final long move = (tick[0]++ & 1) * unit;
             prices.writeQuote(slot, price - unit + move, price + unit + move);
-            oms.applyRiskChanges(sink, () -> 1L);
+            oms.applyRiskChanges(sink);
             oms.processIntent(bid, sink);
             final long buy = sink.lastOrderCounter;
             reports.send(buy, ExecType.NEW, 0, 0, 0, 10 * unit);

@@ -12,7 +12,7 @@ import group.gnometrading.oms.position.DefaultPositionTracker;
 import group.gnometrading.oms.position.SharedPositionBuffer;
 import group.gnometrading.oms.risk.RiskEngine;
 import group.gnometrading.oms.risk.RiskSnapshots;
-import group.gnometrading.oms.state.RingBufferOrderStateManager;
+import group.gnometrading.oms.state.PooledOrderStateManager;
 import group.gnometrading.schemas.CancelOrderDecoder;
 import group.gnometrading.schemas.ExecType;
 import group.gnometrading.schemas.Intent;
@@ -78,7 +78,7 @@ class OmsAgentTest {
         outboundPoller = orderOutboundBuffer.createPoller(this::onOutboundEvent);
         strategyPoller = strategyExecReportBuffer.createPoller(this::onStrategyExecReport);
 
-        RingBufferOrderStateManager orderStateManager = new RingBufferOrderStateManager(64);
+        PooledOrderStateManager orderStateManager = new PooledOrderStateManager(64);
         DefaultPositionTracker positionTracker = new DefaultPositionTracker(new SharedPositionBuffer(16));
         riskEngine = new RiskEngine();
         oms = new OrderManagementSystem(
@@ -88,7 +88,8 @@ class OmsAgentTest {
                 riskEngine,
                 securityMaster,
                 new SharedPriceBuffer(1),
-                new PriceSlotRegistry(1));
+                new PriceSlotRegistry(1),
+                () -> 0L);
 
         omsAgent = new OmsAgent(
                 oms, intentBuffer, execReportBuffer, orderOutboundBuffer, strategyExecReportBuffer, () -> 0L);

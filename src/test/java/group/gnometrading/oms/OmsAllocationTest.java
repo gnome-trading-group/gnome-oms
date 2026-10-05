@@ -65,7 +65,7 @@ class OmsAllocationTest {
             final long move = (tick[0]++ & 1) * px;
             prices.writeQuote(slot, 99 * px + move, 101 * px + move);
             prices.writeQuote(otherSlot, 99 * px - move, 101 * px - move);
-            h.oms.applyRiskChanges(h.sink, () -> 1L);
+            h.oms.applyRiskChanges(h.sink);
             h.oms.checkMarkMoves(h.sink);
         };
         allocatedBy(pass);
@@ -74,7 +74,7 @@ class OmsAllocationTest {
 
     // The first run pays for class loading and JIT compilation; the second shows what each pass costs.
     private long steadyStateAllocation(final OmsTestHarness h) {
-        final Runnable pass = () -> h.oms.applyRiskChanges(h.sink, () -> 1L);
+        final Runnable pass = () -> h.oms.applyRiskChanges(h.sink);
         allocatedBy(pass);
         return allocatedBy(pass);
     }

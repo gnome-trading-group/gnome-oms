@@ -59,6 +59,8 @@ public final class OrderManagementSystem {
     private long nextResweepNanos;
     private int passesUntilResweepCheck;
     private long oidCounter;
+    // Stamps the reports the OMS writes itself; simulated time in a backtest.
+    private final EpochNanoClock clock;
 
     public OrderManagementSystem(
             Logger logger,
@@ -67,8 +69,10 @@ public final class OrderManagementSystem {
             RiskEngine riskEngine,
             SecurityMaster securityMaster,
             SharedPriceBuffer priceBuffer,
-            PriceSlotRegistry priceSlotRegistry) {
+            PriceSlotRegistry priceSlotRegistry,
+            EpochNanoClock clock) {
         this.logger = logger;
+        this.clock = clock;
         this.orderStateManager = orderStateManager;
         this.positionTracker = positionTracker;
         this.riskEngine = riskEngine;
@@ -106,7 +110,7 @@ public final class OrderManagementSystem {
      * with nothing killed it costs the engine's checks; while killed, the clock is read once every
      * {@link #RESWEEP_CHECK_PASSES} passes.
      */
-    public void applyRiskChanges(ActionSink sink, EpochNanoClock clock) {
+    public void applyRiskChanges(ActionSink sink) {
         riskCheckingSink.delegate = sink;
         riskEngine.applyChanges(scopeCanceller);
         if (!riskEngine.hasKills()) {
@@ -446,7 +450,9 @@ public final class OrderManagementSystem {
                 emitNewOrderRejection(order, listingId, violation);
                 return;
             }
-            if (riskEngine.check(order, positionTracker, orderStateManager, strategyId, listingId)) {
+            // A full order book is a limit like any other: refuse the order rather than fail the OMS.
+            if (!orderStateManager.isFull()
+                    && riskEngine.check(order, positionTracker, orderStateManager, strategyId, listingId)) {
                 onOrderAccepted(order);
                 delegate.onNewOrder(order);
             } else {
@@ -456,6 +462,7 @@ public final class OrderManagementSystem {
         }
 
         private void emitNewOrderRejection(final Order order, final int listingId, final RejectReason reason) {
+            final long now = clock.nanoTime();
             syntheticReject.encodeClientOid(order.getClientOidCounter(), order.getClientOidStrategyId());
             syntheticReject
                     .encoder
@@ -469,8 +476,8 @@ public final class OrderManagementSystem {
                     .fillPrice(OrderExecutionReportDecoder.fillPriceNullValue())
                     .cumulativeQty(0)
                     .leavesQty(0)
-                    .timestampEvent(0)
-                    .timestampRecv(0)
+                    .timestampEvent(now)
+                    .timestampRecv(now)
                     .fee(OrderExecutionReportDecoder.feeNullValue());
             syntheticReject.encoder.flags().clear();
             syntheticReject.encoder.liquidity(Liquidity.NULL_VAL);
@@ -537,6 +544,7 @@ public final class OrderManagementSystem {
 
         private void emitModifyRejection(
                 final ModifyOrder modify, final TrackedOrder original, final int listingId, final RejectReason reason) {
+            final long now = clock.nanoTime();
             syntheticReject.encodeClientOid(original.getClientOidCounter(), original.getStrategyId());
             syntheticReject
                     .encoder
@@ -550,8 +558,8 @@ public final class OrderManagementSystem {
                     .fillPrice(OrderExecutionReportDecoder.fillPriceNullValue())
                     .cumulativeQty(0)
                     .leavesQty(original.workingQty())
-                    .timestampEvent(0)
-                    .timestampRecv(0)
+                    .timestampEvent(now)
+                    .timestampRecv(now)
                     .fee(OrderExecutionReportDecoder.feeNullValue());
             syntheticReject.encoder.flags().clear();
             syntheticReject.encoder.liquidity(Liquidity.NULL_VAL);

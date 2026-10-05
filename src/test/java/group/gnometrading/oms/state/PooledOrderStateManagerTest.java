@@ -1,9 +1,11 @@
 package group.gnometrading.oms.state;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import group.gnometrading.schemas.ExecType;
 import group.gnometrading.schemas.Order;
@@ -16,15 +18,15 @@ import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-class RingBufferOrderStateManagerTest {
+class PooledOrderStateManagerTest {
 
     private static final int CAPACITY = 4;
 
-    private RingBufferOrderStateManager manager;
+    private PooledOrderStateManager manager;
 
     @BeforeEach
     void setUp() {
-        manager = new RingBufferOrderStateManager(CAPACITY);
+        manager = new PooledOrderStateManager(CAPACITY);
     }
 
     private Order buildOrder(long counter, int strategyId) {
@@ -135,7 +137,6 @@ class RingBufferOrderStateManagerTest {
 
         assertNull(manager.getOrder(1));
 
-        // counter=5 maps to same slot (5 & 3 == 1)
         Order order2 = buildOrder(5, 0);
         manager.trackOrder(order2);
         assertNull(manager.getOrder(1));
@@ -161,12 +162,46 @@ class RingBufferOrderStateManagerTest {
     }
 
     @Test
-    void testCollisionThrowsWhenSlotStillActive() {
-        // capacity=4, so counters 1 and 5 map to slot index 1
+    void testLongLivedOrderDoesNotBlockOrdersCyclingAroundIt() {
+        // The old ring buffer threw once the counter wrapped onto a still-open order's index.
         manager.trackOrder(buildOrder(1, 0));
+        for (long counter = 2; counter < 1_000; counter++) {
+            TrackedOrder tracked = manager.trackOrder(buildOrder(counter, 0));
+            manager.releaseOrder(tracked);
+        }
+        assertNotNull(manager.getOrder(1));
+        assertEquals(1L, manager.getOrder(1).getClientOidCounter());
+    }
 
-        Order order2 = buildOrder(5, 0);
-        assertThrows(IllegalStateException.class, () -> manager.trackOrder(order2));
+    @Test
+    void testFullWhenEverySlotIsOpen() {
+        for (long counter = 1; counter <= CAPACITY; counter++) {
+            assertFalse(manager.isFull());
+            manager.trackOrder(buildOrder(counter, 0));
+        }
+        assertTrue(manager.isFull());
+        assertThrows(IllegalStateException.class, () -> manager.trackOrder(buildOrder(CAPACITY + 1, 0)));
+
+        manager.releaseOrder(manager.getOrder(2));
+        assertFalse(manager.isFull());
+        assertNotNull(manager.trackOrder(buildOrder(CAPACITY + 1, 0)));
+    }
+
+    @Test
+    void testTrackingTheSameOrderTwiceThrows() {
+        manager.trackOrder(buildOrder(1, 0));
+        assertThrows(IllegalStateException.class, () -> manager.trackOrder(buildOrder(1, 0)));
+    }
+
+    @Test
+    void testReleasingTwiceFreesOneSlot() {
+        TrackedOrder tracked = manager.trackOrder(buildOrder(1, 0));
+        manager.releaseOrder(tracked);
+        manager.releaseOrder(tracked);
+        for (long counter = 2; counter < 2 + CAPACITY; counter++) {
+            manager.trackOrder(buildOrder(counter, 0));
+        }
+        assertTrue(manager.isFull());
     }
 
     @Test
@@ -185,16 +220,15 @@ class RingBufferOrderStateManagerTest {
     }
 
     @Test
-    void testNonPowerOfTwoCapacityThrows() {
-        assertThrows(IllegalArgumentException.class, () -> new RingBufferOrderStateManager(3));
-        assertThrows(IllegalArgumentException.class, () -> new RingBufferOrderStateManager(100));
-        assertThrows(IllegalArgumentException.class, () -> new RingBufferOrderStateManager(0));
-        assertThrows(IllegalArgumentException.class, () -> new RingBufferOrderStateManager(-1));
+    void testNonPositiveCapacityThrows() {
+        assertThrows(IllegalArgumentException.class, () -> new PooledOrderStateManager(0));
+        assertThrows(IllegalArgumentException.class, () -> new PooledOrderStateManager(-1));
+        assertNotNull(new PooledOrderStateManager(3));
     }
 
     @Test
     void testDefaultCapacityIsUsable() {
-        RingBufferOrderStateManager defaultManager = new RingBufferOrderStateManager();
+        PooledOrderStateManager defaultManager = new PooledOrderStateManager();
         Order order = buildOrder(1, 0);
         defaultManager.trackOrder(order);
         assertNotNull(defaultManager.getOrder(1));
