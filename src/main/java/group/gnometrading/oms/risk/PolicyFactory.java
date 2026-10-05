@@ -4,7 +4,6 @@ import group.gnometrading.oms.pnl.PriceSlotRegistry;
 import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.risk.policy.MaxNotionalValuePolicy;
 import group.gnometrading.oms.risk.policy.MaxOrderSizePolicy;
-import group.gnometrading.oms.risk.policy.MaxPnlLossPolicy;
 import group.gnometrading.oms.risk.policy.MaxPositionPolicy;
 import group.gnometrading.oms.risk.policy.MaxTotalPnlLossPolicy;
 
@@ -41,7 +40,6 @@ public final class PolicyFactory {
             case MAX_NOTIONAL -> new MaxNotionalValuePolicy(priceBuffer, priceSlotRegistry);
             case MAX_ORDER_SIZE -> new MaxOrderSizePolicy();
             case MAX_POSITION -> new MaxPositionPolicy();
-            case MAX_PNL_LOSS -> new MaxPnlLossPolicy();
             case MAX_TOTAL_PNL_LOSS -> {
                 if (priceBuffer == null || priceSlotRegistry == null) {
                     throw new IllegalArgumentException(

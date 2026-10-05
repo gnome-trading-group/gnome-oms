@@ -4,10 +4,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import group.gnometrading.oms.pnl.PriceSlotRegistry;
+import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.DefaultPositionTracker;
 import group.gnometrading.oms.position.SharedPositionBuffer;
 import group.gnometrading.oms.risk.policy.MaxOrderSizePolicy;
-import group.gnometrading.oms.risk.policy.MaxPnlLossPolicy;
+import group.gnometrading.oms.risk.policy.MaxTotalPnlLossPolicy;
 import group.gnometrading.oms.state.OrderStateManager;
 import group.gnometrading.schemas.Order;
 import group.gnometrading.schemas.Side;
@@ -305,7 +307,8 @@ class RiskEngineTest {
     @Test
     void testCheckMarketPoliciesReturnsTrueWhenGlobalMarketPolicyViolated() {
         final OrderPolicyGroup globalOrder = new OrderPolicyGroup(RiskEngineSnapshot.MAX_POLICIES_PER_GROUP);
-        final MarketPolicyGroup globalMarket = buildMarketGroup(new MaxPnlLossPolicy(100L));
+        final MarketPolicyGroup globalMarket =
+                buildMarketGroup(new MaxTotalPnlLossPolicy(new SharedPriceBuffer(1), new PriceSlotRegistry(1), 100L));
         final RiskEngine engine = new RiskEngine(globalOrder, globalMarket);
 
         positions.applyStrategyFill(1, 100, Side.Bid, 1, 100, 0);
@@ -317,13 +320,85 @@ class RiskEngineTest {
     @Test
     void testCheckMarketPoliciesReturnsFalseWhenNoPolicyViolated() {
         final OrderPolicyGroup globalOrder = new OrderPolicyGroup(RiskEngineSnapshot.MAX_POLICIES_PER_GROUP);
-        final MarketPolicyGroup globalMarket = buildMarketGroup(new MaxPnlLossPolicy(1000L));
+        final MarketPolicyGroup globalMarket =
+                buildMarketGroup(new MaxTotalPnlLossPolicy(new SharedPriceBuffer(1), new PriceSlotRegistry(1), 1000L));
         final RiskEngine engine = new RiskEngine(globalOrder, globalMarket);
 
         positions.applyStrategyFill(1, 100, Side.Bid, 1, 100, 0);
         positions.getStrategyPosition(1, 100).realizedPnl = -50L;
 
         assertFalse(engine.checkMarketPolicies(1, 100, positions, orders));
+    }
+
+    @Test
+    void testStrategyScopedLossLimitJudgesTheStrategyTotal() {
+        final RiskEngine engine = new RiskEngine();
+        final RiskEngineSnapshot snapshot = new RiskEngineSnapshot();
+        snapshot.strategyMarketGroups.put(
+                1,
+                buildMarketGroup(new MaxTotalPnlLossPolicy(new SharedPriceBuffer(1), new PriceSlotRegistry(1), 100L)));
+        engine.publishSnapshot(snapshot);
+        realize(1, 100, -60L);
+        realize(1, 200, -60L);
+
+        assertTrue(engine.checkMarketPolicies(1, 100, positions, orders));
+        assertTrue(engine.hasMarketPolicies());
+    }
+
+    @Test
+    void testGlobalLossLimitJudgesEachStrategyTotalSeparately() {
+        final RiskEngine engine = new RiskEngine(
+                new OrderPolicyGroup(RiskEngineSnapshot.MAX_POLICIES_PER_GROUP),
+                buildMarketGroup(new MaxTotalPnlLossPolicy(new SharedPriceBuffer(1), new PriceSlotRegistry(1), 100L)));
+        realize(1, 100, -60L);
+        realize(2, 100, -60L);
+
+        assertFalse(engine.checkMarketPolicies(1, 100, positions, orders));
+        assertFalse(engine.checkMarketPolicies(2, 100, positions, orders));
+        realize(2, 200, -60L);
+        assertTrue(engine.checkMarketPolicies(2, 100, positions, orders));
+    }
+
+    @Test
+    void testListingScopedLossLimitJudgesOnlyItsPosition() {
+        final RiskEngine engine = new RiskEngine();
+        final RiskEngineSnapshot snapshot = new RiskEngineSnapshot();
+        snapshot.listingMarketGroups.put(
+                100,
+                buildMarketGroup(new MaxTotalPnlLossPolicy(new SharedPriceBuffer(1), new PriceSlotRegistry(1), 100L)));
+        engine.publishSnapshot(snapshot);
+        realize(1, 100, -60L);
+        realize(1, 200, -500L);
+
+        assertFalse(engine.checkMarketPolicies(1, 100, positions, orders));
+        realize(1, 100, -150L);
+        assertTrue(engine.checkMarketPolicies(1, 100, positions, orders));
+    }
+
+    @Test
+    void testHasMarketPoliciesIsFalseWithOnlyOrderPolicies() {
+        assertFalse(new RiskEngine().hasMarketPolicies());
+    }
+
+    @Test
+    void testAStrategyIsHaltedForBreachesOnlyByItsOwnKillOrALatch() {
+        final RiskEngine engine = new RiskEngine();
+        final RiskEngineSnapshot snapshot = new RiskEngineSnapshot();
+        snapshot.globalKill = true;
+        snapshot.killedStrategies.add(7);
+        engine.publishSnapshot(snapshot);
+
+        assertTrue(engine.isStrategyHalted(7));
+        assertFalse(engine.isStrategyHalted(8));
+        engine.latch(9);
+        assertTrue(engine.isStrategyHalted(9));
+    }
+
+    private void realize(final int strategyId, final int listingId, final long realizedPnl) {
+        if (positions.getStrategyPosition(strategyId, listingId) == null) {
+            positions.applyStrategyFill(strategyId, listingId, Side.Bid, 1, 100, 0);
+        }
+        positions.getStrategyPosition(strategyId, listingId).realizedPnl = realizedPnl;
     }
 
     // --- publishSnapshot ---

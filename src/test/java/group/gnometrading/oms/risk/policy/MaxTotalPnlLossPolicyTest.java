@@ -7,6 +7,7 @@ import group.gnometrading.oms.pnl.PriceSlotRegistry;
 import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.DefaultPositionTracker;
 import group.gnometrading.oms.position.SharedPositionBuffer;
+import group.gnometrading.oms.risk.MarketRiskPolicy;
 import group.gnometrading.oms.state.OrderStateManager;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.Statics;
@@ -25,6 +26,8 @@ class MaxTotalPnlLossPolicyTest {
 
     private static final int STRATEGY_ID = 1;
     private static final int LISTING_ID = 100;
+    private static final int OTHER_LISTING_ID = 200;
+    private static final int ALL = MarketRiskPolicy.ALL_LISTINGS;
 
     @Mock
     private OrderStateManager orders;
@@ -143,14 +146,76 @@ class MaxTotalPnlLossPolicyTest {
     // --- flat position ---
 
     @Test
-    void notViolated_flatPosition() {
+    void violated_flatPositionWithRealizedLoss() {
         positions.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 10 * UNIT, 100, 0);
         positions.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Ask, 10 * UNIT, 50, 0);
-        // position is now flat (netQuantity == 0)
+        // Flat with realizedPnl = -500; the mark no longer matters.
         priceBuffer.writeTrade(priceSlot, 120L);
 
-        final MaxTotalPnlLossPolicy policy = new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, 100L);
+        assertTrue(new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, 499L)
+                .isViolated(STRATEGY_ID, LISTING_ID, positions, orders));
+        assertFalse(new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, 500L)
+                .isViolated(STRATEGY_ID, LISTING_ID, positions, orders));
+    }
+
+    // --- strategy total ---
+
+    @Test
+    void strategyTotal_offsettingLegsAreNotABreachButEachLegAloneIs() {
+        final int otherSlot = priceSlotRegistry.register(OTHER_LISTING_ID);
+        positions.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 10 * UNIT, 100, 0);
+        positions.applyStrategyFill(STRATEGY_ID, OTHER_LISTING_ID, Side.Ask, 10 * UNIT, 100, 0);
+        priceBuffer.writeTrade(priceSlot, 40L); // long leg: -600
+        priceBuffer.writeTrade(otherSlot, 40L); // short leg: +600
+
+        final MaxTotalPnlLossPolicy policy = new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, 500L);
+        assertFalse(policy.isViolated(STRATEGY_ID, ALL, positions, orders));
+        assertTrue(policy.isViolated(STRATEGY_ID, LISTING_ID, positions, orders));
+        assertFalse(policy.isViolated(STRATEGY_ID, OTHER_LISTING_ID, positions, orders));
+    }
+
+    @Test
+    void strategyTotal_twoLegsEachUnderTheLimitBreachTogether() {
+        final int otherSlot = priceSlotRegistry.register(OTHER_LISTING_ID);
+        positions.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 10 * UNIT, 100, 0);
+        positions.applyStrategyFill(STRATEGY_ID, OTHER_LISTING_ID, Side.Bid, 10 * UNIT, 100, 0);
+        priceBuffer.writeTrade(priceSlot, 60L); // -400
+        priceBuffer.writeTrade(otherSlot, 60L); // -400
+
+        final MaxTotalPnlLossPolicy policy = new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, 500L);
+        assertTrue(policy.isViolated(STRATEGY_ID, ALL, positions, orders));
         assertFalse(policy.isViolated(STRATEGY_ID, LISTING_ID, positions, orders));
+        assertFalse(policy.isViolated(STRATEGY_ID, OTHER_LISTING_ID, positions, orders));
+    }
+
+    @Test
+    void strategyTotal_aLegWithNoMarkIsValuedAtEntryWhileRealizedAndFeesCount() {
+        priceSlotRegistry.register(OTHER_LISTING_ID); // never priced
+        positions.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 10 * UNIT, 100, 0);
+        positions.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Ask, 10 * UNIT, 80, 0); // realized -200
+        positions.applyStrategyFill(STRATEGY_ID, OTHER_LISTING_ID, Side.Bid, 10 * UNIT, 100, 50L); // fee 50
+
+        assertTrue(new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, 249L)
+                .isViolated(STRATEGY_ID, ALL, positions, orders));
+        assertFalse(new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, 250L)
+                .isViolated(STRATEGY_ID, ALL, positions, orders));
+    }
+
+    @Test
+    void strategyTotal_aStrategyWithNoPositionsIsNotABreach() {
+        assertFalse(
+                new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, 0L).isViolated(99, ALL, positions, orders));
+    }
+
+    @Test
+    void strategyTotal_otherStrategiesDoNotCount() {
+        positions.applyStrategyFill(2, LISTING_ID, Side.Bid, 10 * UNIT, 100, 0);
+        positions.applyStrategyFill(2, LISTING_ID, Side.Ask, 10 * UNIT, 10, 0); // strategy 2: -900
+
+        assertFalse(new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, 100L)
+                .isViolated(STRATEGY_ID, ALL, positions, orders));
+        assertTrue(
+                new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, 100L).isViolated(2, ALL, positions, orders));
     }
 
     // --- fees ---

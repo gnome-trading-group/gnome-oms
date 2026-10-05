@@ -9,21 +9,25 @@ import group.gnometrading.oms.risk.MarketRiskPolicy;
 import group.gnometrading.oms.risk.util.PolicyParameters;
 import group.gnometrading.oms.state.OrderStateManager;
 import group.gnometrading.strings.GnomeString;
+import java.util.function.Consumer;
 
 /**
- * Halts a strategy when its total PnL (realized + unrealized, net of fees) falls below {@code -maxLoss}, with
- * {@code maxLoss} in price units (1e9 per dollar).
+ * Breached when total PnL (realized + unrealized, net of fees) falls below {@code -maxLoss}, in price units (1e9
+ * per dollar): one listing's for a listing-scoped limit, or the sum across the strategy's listings otherwise, so a
+ * losing leg of a hedged strategy is offset by its winning leg.
  *
  * <p>Unrealized PnL is the notional of {@code netQuantity} at {@code markPrice - avgEntryPrice}, where the
  * mark price is the mid of the book, or the last trade when a side is empty, read from {@link SharedPriceBuffer}.
- * If no mark price is available for a listing, this policy conservatively returns {@code false} (not violated) to
- * avoid false halts on startup.
+ * A listing with no mark yet is valued at its average entry: its unrealized PnL counts as zero, while its realized
+ * PnL and fees still count.
  */
 public final class MaxTotalPnlLossPolicy extends AbstractConfigurablePolicy implements MarketRiskPolicy {
 
     private final SharedPriceBuffer priceBuffer;
     private final PriceSlotRegistry priceSlotRegistry;
     private long maxLoss;
+    private long totalSum;
+    private final Consumer<Position> addTotal = position -> totalSum += totalPnl(position);
 
     public MaxTotalPnlLossPolicy(final SharedPriceBuffer priceBuffer, final PriceSlotRegistry priceSlotRegistry) {
         this.priceBuffer = priceBuffer;
@@ -48,23 +52,28 @@ public final class MaxTotalPnlLossPolicy extends AbstractConfigurablePolicy impl
             final int listingId,
             final PositionTracker positions,
             final OrderStateManager orders) {
+        if (listingId == ALL_LISTINGS) {
+            totalSum = 0;
+            positions.forEachListingPosition(strategyId, addTotal);
+            return totalSum < -maxLoss;
+        }
         final Position pos = positions.getStrategyPosition(strategyId, listingId);
-        if (pos == null || pos.netQuantity == 0) {
-            return false;
-        }
+        return pos != null && totalPnl(pos) < -maxLoss;
+    }
 
-        final int slot = priceSlotRegistry.getSlot(listingId);
+    private long totalPnl(final Position pos) {
+        return pos.realizedPnl + unrealizedPnl(pos) - pos.totalFees;
+    }
+
+    private long unrealizedPnl(final Position pos) {
+        if (pos.netQuantity == 0) {
+            return 0;
+        }
+        final int slot = priceSlotRegistry.getSlot(pos.listingId);
         if (slot == IntToIntHashMap.MISSING) {
-            return false;
+            return 0;
         }
-
         final long markPrice = priceBuffer.markPrice(slot);
-        if (markPrice == 0) {
-            return false;
-        }
-
-        final long unrealizedPnl = Position.notional(markPrice - pos.getAvgEntryPrice(), pos.netQuantity);
-        final long totalPnl = pos.realizedPnl + unrealizedPnl - pos.totalFees;
-        return totalPnl < -maxLoss;
+        return markPrice == 0 ? 0 : Position.notional(markPrice - pos.getAvgEntryPrice(), pos.netQuantity);
     }
 }

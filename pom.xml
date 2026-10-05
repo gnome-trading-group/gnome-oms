@@ -51,7 +51,7 @@
         <dependency>
             <groupId>group.gnometrading</groupId>
             <artifactId>gnome-core</artifactId>
-            <version>1.12.1</version>
+            <version>1.13.0</version>
         </dependency>
         <dependency>
             <groupId>group.gnometrading</groupId>
@@ -79,5 +79,35 @@
             <scope>test</scope>
         </dependency>
     </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>default-test</id>
+                        <configuration>
+                            <excludedGroups>allocation</excludedGroups>
+                        </configuration>
+                    </execution>
+                    <!-- Mockito's inline mock maker rewrites a mocked final class for the whole JVM, so once any test
+                         mocks SecurityMaster, even real instances allocate. Each allocation test class gets a JVM of
+                         its own. -->
+                    <execution>
+                        <id>allocation-test</id>
+                        <phase>test</phase>
+                        <goals>
+                            <goal>test</goal>
+                        </goals>
+                        <configuration>
+                            <groups>allocation</groups>
+                            <reuseForks>false</reuseForks>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
 
 </project>

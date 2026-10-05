@@ -56,15 +56,6 @@ public final class RiskSyncAgent implements GnomeAgent {
             final RiskEngine riskEngine,
             final EpochClock clock,
             final Duration refreshInterval,
-            final Logger logger) {
-        this(riskMaster, riskEngine, clock, refreshInterval, logger, null, null);
-    }
-
-    public RiskSyncAgent(
-            final RiskMaster riskMaster,
-            final RiskEngine riskEngine,
-            final EpochClock clock,
-            final Duration refreshInterval,
             final Logger logger,
             final SharedPriceBuffer priceBuffer,
             final PriceSlotRegistry priceSlotRegistry) {

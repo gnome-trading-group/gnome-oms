@@ -12,6 +12,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import group.gnometrading.logging.NullLogger;
+import group.gnometrading.oms.pnl.PriceSlotRegistry;
+import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.DefaultPositionTracker;
 import group.gnometrading.oms.position.SharedPositionBuffer;
 import group.gnometrading.oms.state.OrderStateManager;
@@ -54,7 +56,14 @@ class RiskSyncAgentTest {
     @BeforeEach
     void setUp() {
         riskEngine = RiskEngine.syncedFromRegistry(clock, STALE_AFTER, 1);
-        agent = new RiskSyncAgent(riskMaster, riskEngine, clock, INTERVAL, new NullLogger());
+        agent = new RiskSyncAgent(
+                riskMaster,
+                riskEngine,
+                clock,
+                INTERVAL,
+                new NullLogger(),
+                new SharedPriceBuffer(1),
+                new PriceSlotRegistry(1));
         positions = new DefaultPositionTracker(new SharedPositionBuffer(8));
         order = new Order();
         order.encoder.side(Side.Bid).size(1).price(100);
@@ -124,7 +133,7 @@ class RiskSyncAgentTest {
 
     @Test
     void testRefreshAndPublishWithGlobalMarketPolicy() {
-        setupRiskMaster(createRecord(1, "MAX_PNL_LOSS", PolicyScope.GLOBAL, 0, 0, "{\"maxLoss\": 50}", true));
+        setupRiskMaster(createRecord(1, "MAX_TOTAL_PNL_LOSS", PolicyScope.GLOBAL, 0, 0, "{\"maxLoss\": 50}", true));
         triggerSync();
 
         positions.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 1, 100, 0);
@@ -208,7 +217,7 @@ class RiskSyncAgentTest {
     @Test
     void testRefreshAndPublishWithStrategyMarketPolicy() {
         setupRiskMaster(
-                createRecord(1, "MAX_PNL_LOSS", PolicyScope.STRATEGY, STRATEGY_ID, 0, "{\"maxLoss\": 50}", true));
+                createRecord(1, "MAX_TOTAL_PNL_LOSS", PolicyScope.STRATEGY, STRATEGY_ID, 0, "{\"maxLoss\": 50}", true));
         triggerSync();
 
         positions.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 1, 100, 0);
@@ -220,7 +229,8 @@ class RiskSyncAgentTest {
 
     @Test
     void testRefreshAndPublishWithListingMarketPolicy() {
-        setupRiskMaster(createRecord(1, "MAX_PNL_LOSS", PolicyScope.LISTING, 0, LISTING_ID, "{\"maxLoss\": 50}", true));
+        setupRiskMaster(
+                createRecord(1, "MAX_TOTAL_PNL_LOSS", PolicyScope.LISTING, 0, LISTING_ID, "{\"maxLoss\": 50}", true));
         triggerSync();
 
         positions.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 1, 100, 0);

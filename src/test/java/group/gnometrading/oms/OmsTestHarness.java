@@ -1,8 +1,10 @@
 package group.gnometrading.oms;
 
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import group.gnometrading.RegistryConnection;
 import group.gnometrading.SecurityMaster;
 import group.gnometrading.logging.NullLogger;
 import group.gnometrading.oms.action.ActionSink;
@@ -31,6 +33,8 @@ import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.ListingSpec;
 import group.gnometrading.sm.Security;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import org.agrona.concurrent.EpochNanoClock;
@@ -62,6 +66,10 @@ public final class OmsTestHarness {
     }
 
     OmsTestHarness(RiskEngine riskEngine) {
+        this(riskEngine, new SharedPriceBuffer(1), new PriceSlotRegistry(1));
+    }
+
+    OmsTestHarness(RiskEngine riskEngine, SharedPriceBuffer priceBuffer, PriceSlotRegistry priceSlots) {
         this.riskEngine = riskEngine;
         this.securityMaster = mock(SecurityMaster.class);
         this.orderStateManager = new RingBufferOrderStateManager(64);
@@ -72,8 +80,8 @@ public final class OmsTestHarness {
                 positionTracker,
                 riskEngine,
                 securityMaster,
-                new SharedPriceBuffer(1),
-                new PriceSlotRegistry(1));
+                priceBuffer,
+                priceSlots);
         this.sink = new RecordingSink();
         stubDefaultListing();
     }
@@ -83,6 +91,11 @@ public final class OmsTestHarness {
         for (int pass = 0; pass < OrderManagementSystem.RESWEEP_CHECK_PASSES; pass++) {
             oms.applyRiskChanges(sink, clock);
         }
+    }
+
+    /** What the OMS agent does at the end of its loop. */
+    void checkMarkMoves() {
+        oms.checkMarkMoves(sink);
     }
 
     /** Moves the OMS's clock on, e.g. past a kill re-sweep. */
@@ -510,4 +523,30 @@ public final class OmsTestHarness {
             long leavesQty,
             long fee,
             RejectReason rejectReason) {}
+
+    /**
+     * The production SecurityMaster holding one listing, loaded once at construction. Unlike the Mockito mock the
+     * harness uses, its lookups allocate nothing, so allocation tests can drive intents and exec reports through it.
+     */
+    static SecurityMaster cachedSecurityMaster(final int exchangeId, final int securityId, final int listingId) {
+        final RegistryConnection connection = mock(RegistryConnection.class);
+        when(connection.get(any())).thenAnswer(call -> {
+            final String path = call.getArgument(0).toString();
+            final String body;
+            if (path.startsWith("/api/listings")) {
+                body = "[{\"listing_id\": " + listingId + ", \"exchange_id\": " + exchangeId + ", \"security_id\": "
+                        + securityId + ", \"exchange_security_id\": \"S\", \"exchange_security_symbol\": \"S\"}]";
+            } else if (path.startsWith("/api/exchanges")) {
+                body = "[{\"exchange_id\": " + exchangeId
+                        + ", \"exchange_code\": \"KALSHI\", \"exchange_name\": \"K\","
+                        + " \"region\": \"us-east-1\", \"schema_type\": \"mbp-10\"}]";
+            } else if (path.startsWith("/api/securities")) {
+                body = "[{\"security_id\": " + securityId + ", \"type\": 0, \"symbol\": \"S\"}]";
+            } else {
+                body = "[]";
+            }
+            return ByteBuffer.wrap(body.getBytes(StandardCharsets.UTF_8));
+        });
+        return new SecurityMaster(connection);
+    }
 }

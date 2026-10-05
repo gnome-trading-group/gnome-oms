@@ -1,6 +1,7 @@
 package group.gnometrading.oms;
 
 import group.gnometrading.concurrent.GnomeAgent;
+import group.gnometrading.concurrent.ThreadProfile;
 import group.gnometrading.oms.action.ActionSink;
 import group.gnometrading.schemas.CancelOrder;
 import group.gnometrading.schemas.Intent;
@@ -72,7 +73,14 @@ public final class OmsAgent implements GnomeAgent, SequencedEventHandler, Action
         int work = 0;
         work += execReportPoller.poll();
         work += intentPoller.poll();
+        // After order handling, so loss checks on a moved mark never delay an intent arriving with the tick.
+        oms.checkMarkMoves(this);
         return work;
+    }
+
+    @Override
+    public ThreadProfile threadProfile() {
+        return ThreadProfile.HOT_PATH;
     }
 
     @Override

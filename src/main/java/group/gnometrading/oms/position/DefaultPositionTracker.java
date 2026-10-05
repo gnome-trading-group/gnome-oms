@@ -3,7 +3,9 @@ package group.gnometrading.oms.position;
 import group.gnometrading.collections.IntHashMap;
 import group.gnometrading.collections.IntToIntHashMap;
 import group.gnometrading.schemas.Side;
+import java.util.Arrays;
 import java.util.function.Consumer;
+import java.util.function.IntConsumer;
 
 public final class DefaultPositionTracker implements PositionTracker {
 
@@ -12,8 +14,7 @@ public final class DefaultPositionTracker implements PositionTracker {
     // Firm-level positions: listingId -> Position
     private final IntHashMap<Position> positions;
 
-    // Per-strategy positions: strategyId -> (listingId -> Position)
-    private final IntHashMap<IntHashMap<Position>> strategyPositions;
+    private final IntHashMap<StrategyPositions> strategyPositions;
 
     private final SharedPositionBuffer sharedBuffer;
     private final SlotRegistry slotRegistry;
@@ -35,8 +36,7 @@ public final class DefaultPositionTracker implements PositionTracker {
      * Must be called at startup before the OMS and strategy threads begin.
      */
     public void registerSlot(int strategyId, int listingId) {
-        IntHashMap<Position> strategyMap = getOrCreateStrategyMap(strategyId);
-        Position position = getOrCreatePosition(strategyMap, listingId);
+        Position position = getOrCreateStrategyPosition(strategyId, listingId);
         int slot = sharedBuffer.register();
         position.sharedSlot = slot;
         slotRegistry.register(slot, strategyId, listingId);
@@ -52,27 +52,25 @@ public final class DefaultPositionTracker implements PositionTracker {
         Position firmPosition = getOrCreatePosition(positions, listingId);
         firmPosition.applyFill(side, qty, price, fee);
 
-        IntHashMap<Position> strategyMap = getOrCreateStrategyMap(strategyId);
-        Position stratPosition = getOrCreatePosition(strategyMap, listingId);
+        Position stratPosition = getOrCreateStrategyPosition(strategyId, listingId);
         stratPosition.applyFill(side, qty, price, fee);
         syncToSharedBuffer(stratPosition);
     }
 
     @Override
     public Position getStrategyPosition(int strategyId, int listingId) {
-        IntHashMap<Position> strategyMap = strategyPositions.get(strategyId);
-        if (strategyMap == null) {
+        StrategyPositions strategy = strategyPositions.get(strategyId);
+        if (strategy == null) {
             return null;
         }
-        return strategyMap.get(listingId);
+        return strategy.byListing.get(listingId);
     }
 
     @Override
     public void addStrategyLeaves(int strategyId, int listingId, Side side, long qty) {
         getOrCreatePosition(positions, listingId).addLeaves(side, qty);
 
-        IntHashMap<Position> strategyMap = getOrCreateStrategyMap(strategyId);
-        Position stratPosition = getOrCreatePosition(strategyMap, listingId);
+        Position stratPosition = getOrCreateStrategyPosition(strategyId, listingId);
         stratPosition.addLeaves(side, qty);
         syncToSharedBuffer(stratPosition);
     }
@@ -105,6 +103,21 @@ public final class DefaultPositionTracker implements PositionTracker {
     }
 
     @Override
+    public void forEachListingPosition(int strategyId, Consumer<Position> consumer) {
+        StrategyPositions strategy = strategyPositions.get(strategyId);
+        if (strategy != null) {
+            for (int i = 0; i < strategy.count; i++) {
+                consumer.accept(strategy.all[i]);
+            }
+        }
+    }
+
+    @Override
+    public void forEachStrategyId(IntConsumer consumer) {
+        strategyPositions.forEachKey(consumer);
+    }
+
+    @Override
     public PositionView createPositionView(int strategyId) {
         IntToIntHashMap slotByListingId = new IntToIntHashMap();
         for (int slot = 0; slot < slotRegistry.count(); slot++) {
@@ -131,12 +144,34 @@ public final class DefaultPositionTracker implements PositionTracker {
         return position;
     }
 
-    private IntHashMap<Position> getOrCreateStrategyMap(int strategyId) {
-        IntHashMap<Position> strategyMap = strategyPositions.get(strategyId);
-        if (strategyMap == null) {
-            strategyMap = new IntHashMap<>();
-            strategyPositions.put(strategyId, strategyMap);
+    private Position getOrCreateStrategyPosition(int strategyId, int listingId) {
+        StrategyPositions strategy = strategyPositions.get(strategyId);
+        if (strategy == null) {
+            strategy = new StrategyPositions();
+            strategyPositions.put(strategyId, strategy);
         }
-        return strategyMap;
+        Position position = strategy.byListing.get(listingId);
+        if (position == null) {
+            position = getOrCreatePosition(strategy.byListing, listingId);
+            strategy.add(position);
+        }
+        return position;
+    }
+
+    /**
+     * A strategy's positions by listing, plus a dense copy: risk sums a strategy's positions on every mark move,
+     * and walking a hash map's buckets would cost more than the sum itself.
+     */
+    private static final class StrategyPositions {
+        final IntHashMap<Position> byListing = new IntHashMap<>(DEFAULT_INITIAL_CAPACITY);
+        Position[] all = new Position[4];
+        int count;
+
+        void add(Position position) {
+            if (count == all.length) {
+                all = Arrays.copyOf(all, count * 2);
+            }
+            all[count++] = position;
+        }
     }
 }

@@ -4,11 +4,13 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import group.gnometrading.oms.pnl.PriceSlotRegistry;
+import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.Position;
 import group.gnometrading.oms.risk.RiskEngine;
 import group.gnometrading.oms.risk.policy.MaxOrderSizePolicy;
-import group.gnometrading.oms.risk.policy.MaxPnlLossPolicy;
 import group.gnometrading.oms.risk.policy.MaxPositionPolicy;
+import group.gnometrading.oms.risk.policy.MaxTotalPnlLossPolicy;
 import group.gnometrading.schemas.ExecType;
 import group.gnometrading.schemas.OrderExecutionReportDecoder;
 import group.gnometrading.schemas.OrderType;
@@ -352,10 +354,12 @@ class OrderManagementSystemIntegrationTest {
 
     @Test
     void marketRisk_pnlViolation_haltsStrategy() {
-        // MaxPnlLoss of 100: realized loss > 100 triggers halt
+        // A total loss limit of 100: a realized loss > 100 triggers halt
         RiskEngine re = RiskEngine.withPolicies(
                 new group.gnometrading.oms.risk.OrderRiskPolicy[] {},
-                new group.gnometrading.oms.risk.MarketRiskPolicy[] {new MaxPnlLossPolicy(100L)});
+                new group.gnometrading.oms.risk.MarketRiskPolicy[] {
+                    new MaxTotalPnlLossPolicy(new SharedPriceBuffer(1), new PriceSlotRegistry(1), 100L)
+                });
         OmsTestHarness h2 = new OmsTestHarness(re);
 
         // Go long 10@200, then fill short 10@180 => realized loss = 10*(200-180) = 200
@@ -373,10 +377,12 @@ class OrderManagementSystemIntegrationTest {
 
     @Test
     void marketRisk_cancelsAllOpenOrders_whenViolated() {
-        // MaxPnlLoss of 100: loss triggers cancel of remaining open orders
+        // A total loss limit of 100: the loss cancels the remaining open orders
         RiskEngine re = RiskEngine.withPolicies(
                 new group.gnometrading.oms.risk.OrderRiskPolicy[] {},
-                new group.gnometrading.oms.risk.MarketRiskPolicy[] {new MaxPnlLossPolicy(100L)});
+                new group.gnometrading.oms.risk.MarketRiskPolicy[] {
+                    new MaxTotalPnlLossPolicy(new SharedPriceBuffer(1), new PriceSlotRegistry(1), 100L)
+                });
         OmsTestHarness h2 = new OmsTestHarness(re);
         // Need two securities for independent bid/ask
         h2.stubListing(OmsTestHarness.EXCHANGE_ID, 43, 101, 0, 0);
@@ -419,7 +425,9 @@ class OrderManagementSystemIntegrationTest {
     void marketRisk_haltOutlastsAReportThatPasses() {
         RiskEngine re = RiskEngine.withPolicies(
                 new group.gnometrading.oms.risk.OrderRiskPolicy[] {},
-                new group.gnometrading.oms.risk.MarketRiskPolicy[] {new MaxPnlLossPolicy(100L)});
+                new group.gnometrading.oms.risk.MarketRiskPolicy[] {
+                    new MaxTotalPnlLossPolicy(new SharedPriceBuffer(1), new PriceSlotRegistry(1), 100L)
+                });
         OmsTestHarness h2 = new OmsTestHarness(re);
         h2.stubListing(OmsTestHarness.EXCHANGE_ID, 43, 101, 0, 0);
         long otherListing = h2.submitBidIntent(OmsTestHarness.STRATEGY_ID, 43L, 50L * PX, 10L);

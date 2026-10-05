@@ -31,6 +31,7 @@ import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.ListingSpec;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
+import java.util.function.IntConsumer;
 import org.agrona.concurrent.EpochNanoClock;
 
 public final class OrderManagementSystem {
@@ -52,6 +53,9 @@ public final class OrderManagementSystem {
     private final RiskCheckingSink riskCheckingSink = new RiskCheckingSink();
     private final ScopeCanceller scopeCanceller = new ScopeCanceller();
     private final CancelOrder directCancel = new CancelOrder();
+    private final long[] seenSlotVersions;
+    private final MarkMoveChecker markMoveChecker = new MarkMoveChecker();
+    private long seenPriceEpoch;
     private long nextResweepNanos;
     private int passesUntilResweepCheck;
     private long oidCounter;
@@ -71,6 +75,7 @@ public final class OrderManagementSystem {
         this.securityMaster = securityMaster;
         this.priceBuffer = priceBuffer;
         this.priceSlotRegistry = priceSlotRegistry;
+        this.seenSlotVersions = new long[priceBuffer.capacity()];
         this.resolvers = new IntHashMap<>(4);
     }
 
@@ -126,6 +131,31 @@ public final class OrderManagementSystem {
         }
     }
 
+    /**
+     * Re-checks loss limits for every strategy holding a position on a listing whose mark has moved since the last
+     * call, so a breach is caught on the tick that causes it even with no order activity. Called at the end of each
+     * OMS pass, after order handling; with no price change it costs one load.
+     */
+    public void checkMarkMoves(ActionSink sink) {
+        final long epoch = priceBuffer.priceEpoch();
+        if (epoch == seenPriceEpoch) {
+            return;
+        }
+        seenPriceEpoch = epoch;
+        if (!riskEngine.hasMarketPolicies()) {
+            return;
+        }
+        riskCheckingSink.delegate = sink;
+        for (int slot = 0; slot < priceSlotRegistry.count(); slot++) {
+            final long version = priceBuffer.slotVersion(slot);
+            if (version != seenSlotVersions[slot]) {
+                seenSlotVersions[slot] = version;
+                markMoveChecker.listingId = priceSlotRegistry.listingId(slot);
+                positionTracker.forEachStrategyId(markMoveChecker);
+            }
+        }
+    }
+
     public void processExecutionReport(OrderExecutionReport report, ActionSink sink) {
         long counter = report.getClientOidCounter();
         TrackedOrder tracked = orderStateManager.getOrder(counter);
@@ -155,7 +185,6 @@ public final class OrderManagementSystem {
 
         long workingBefore = tracked.workingQty();
         int strategyId = tracked.getStrategyId();
-        // TODO: Move this to when we get a generic market update
         int listingId = resolveListingId(report.decoder.exchangeId(), report.decoder.securityId());
 
         orderStateManager.applyExecutionReport(report);
@@ -166,7 +195,7 @@ public final class OrderManagementSystem {
             orderStateManager.releaseOrder(tracked);
         }
 
-        checkMarketRisk(strategyId, listingId, sink);
+        checkMarketRisk(strategyId, listingId);
     }
 
     public boolean validateOrder(Order order) {
@@ -233,10 +262,24 @@ public final class OrderManagementSystem {
     }
 
     /** A breach halts the strategy until an operator resumes it; a later recovery in PnL does not. */
-    private void checkMarketRisk(final int strategyId, final int listingId, final ActionSink sink) {
+    private void checkMarketRisk(final int strategyId, final int listingId) {
         if (riskEngine.checkMarketPolicies(strategyId, listingId, positionTracker, orderStateManager)
                 && riskEngine.latch(strategyId)) {
             scopeCanceller.cancel(strategyId, IntentResolver.ALL_LISTINGS);
+        }
+    }
+
+    /** Checks each strategy with an open position on a listing whose mark just moved. */
+    private final class MarkMoveChecker implements IntConsumer {
+        int listingId;
+
+        @Override
+        public void accept(final int strategyId) {
+            final Position position = positionTracker.getStrategyPosition(strategyId, listingId);
+            // A flat position's PnL does not depend on the mark.
+            if (position != null && position.netQuantity != 0 && !riskEngine.isStrategyHalted(strategyId)) {
+                checkMarketRisk(strategyId, listingId);
+            }
         }
     }
 

@@ -24,6 +24,9 @@ import org.agrona.concurrent.UnsafeBuffer;
  *   [24] ask        (long) — best ask
  *   [32] padding    (32 bytes)
  * </pre>
+ *
+ * <p>A buffer-wide price epoch advances after every write that changes a price, so a reader can tell in one load
+ * whether any mark has moved, then compare {@link #slotVersion} per slot to find which.
  */
 public final class SharedPriceBuffer {
 
@@ -35,11 +38,16 @@ public final class SharedPriceBuffer {
 
     private final UnsafeBuffer buffer;
     private final int maxSlots;
+    private final int epochOffset;
     private int nextSlot = 0;
+    private long epoch;
 
     public SharedPriceBuffer(int maxSlots) {
         this.maxSlots = maxSlots;
-        this.buffer = ByteBufferUtils.createAlignedUnsafeBuffer(maxSlots * SLOT_SIZE);
+        // The epoch is written on every price change; an empty line between it and the last slot keeps the
+        // adjacent-line prefetcher from pulling slot data along with it.
+        this.epochOffset = (maxSlots + 1) * SLOT_SIZE;
+        this.buffer = ByteBufferUtils.createAlignedUnsafeBuffer(epochOffset + SLOT_SIZE);
     }
 
     public int capacity() {
@@ -58,10 +66,14 @@ public final class SharedPriceBuffer {
      */
     public void writeTrade(int slot, long price) {
         int base = slot * SLOT_SIZE;
+        if (buffer.getLong(base + LAST_TRADE_OFFSET) == price) {
+            return;
+        }
         long version = buffer.getLong(base + VERSION_OFFSET);
         buffer.putLongVolatile(base + VERSION_OFFSET, version + 1);
         buffer.putLong(base + LAST_TRADE_OFFSET, price);
         buffer.putLongVolatile(base + VERSION_OFFSET, version + 2);
+        buffer.putLongRelease(epochOffset, ++epoch);
     }
 
     /**
@@ -70,11 +82,26 @@ public final class SharedPriceBuffer {
      */
     public void writeQuote(int slot, long bid, long ask) {
         int base = slot * SLOT_SIZE;
+        // Depth-only updates repeat the top of book; skipping them spares readers a mark that did not move.
+        if (buffer.getLong(base + BID_OFFSET) == bid && buffer.getLong(base + ASK_OFFSET) == ask) {
+            return;
+        }
         long version = buffer.getLong(base + VERSION_OFFSET);
         buffer.putLongVolatile(base + VERSION_OFFSET, version + 1);
         buffer.putLong(base + BID_OFFSET, bid);
         buffer.putLong(base + ASK_OFFSET, ask);
         buffer.putLongVolatile(base + VERSION_OFFSET, version + 2);
+        buffer.putLongRelease(epochOffset, ++epoch);
+    }
+
+    /** Advances after every write that changes any slot's prices. */
+    public long priceEpoch() {
+        return buffer.getLongVolatile(epochOffset);
+    }
+
+    /** Changes whenever this slot's prices change. */
+    public long slotVersion(int slot) {
+        return buffer.getLongVolatile(slot * SLOT_SIZE + VERSION_OFFSET);
     }
 
     /**

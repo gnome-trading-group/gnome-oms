@@ -1,6 +1,7 @@
 package group.gnometrading.oms.pnl;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 import group.gnometrading.schemas.Side;
 import org.junit.jupiter.api.BeforeEach;
@@ -20,6 +21,36 @@ class SharedPriceBufferTest {
         assertEquals(0, buffer.register());
         assertEquals(1, buffer.register());
         assertEquals(2, buffer.register());
+    }
+
+    @Test
+    void priceEpoch_advancesOnEveryPriceChangeButNotARepeat() {
+        int slot = buffer.register();
+        int other = buffer.register();
+        long start = buffer.priceEpoch();
+
+        buffer.writeQuote(slot, 10L, 12L);
+        assertEquals(start + 1, buffer.priceEpoch());
+        buffer.writeTrade(other, 11L);
+        assertEquals(start + 2, buffer.priceEpoch());
+
+        buffer.writeQuote(slot, 10L, 12L);
+        buffer.writeTrade(other, 11L);
+        assertEquals(start + 2, buffer.priceEpoch(), "an unchanged top of book or trade price is not a change");
+    }
+
+    @Test
+    void slotVersion_changesOnlyForTheSlotWritten() {
+        int slot = buffer.register();
+        int other = buffer.register();
+        long slotBefore = buffer.slotVersion(slot);
+        long otherBefore = buffer.slotVersion(other);
+
+        buffer.writeQuote(slot, 10L, 12L);
+
+        assertNotEquals(slotBefore, buffer.slotVersion(slot));
+        assertEquals(otherBefore, buffer.slotVersion(other));
+        assertEquals(11L, buffer.markPrice(slot));
     }
 
     @Test

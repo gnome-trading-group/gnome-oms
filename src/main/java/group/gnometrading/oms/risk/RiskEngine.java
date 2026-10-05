@@ -168,6 +168,17 @@ public final class RiskEngine {
         return stale || current.blocks(strategyId, listingId) || latchedStrategies.contains(strategyId);
     }
 
+    /** Whether a breach on this strategy is already held, by its own kill or a latch, so need not be re-checked. */
+    public boolean isStrategyHalted(final int strategyId) {
+        return snapshot.get().killedStrategies.contains(strategyId) || latchedStrategies.contains(strategyId);
+    }
+
+    /** Whether any market-risk policy is configured, at any scope. */
+    public boolean hasMarketPolicies() {
+        final RiskEngineSnapshot s = snapshot.get();
+        return s.globalMarketGroup.count > 0 || !s.strategyMarketGroups.isEmpty() || !s.listingMarketGroups.isEmpty();
+    }
+
     @VisibleForTesting
     public boolean isLatched(final int strategyId) {
         return latchedStrategies.contains(strategyId);
@@ -310,7 +321,9 @@ public final class RiskEngine {
     }
 
     /**
-     * Checks market-time policies after a position update. Returns true if any policy is violated.
+     * Checks market-risk policies after a fill or a mark move. Global and strategy-scoped limits judge the
+     * strategy's total across its listings; listing-scoped ones judge its position on {@code listingId}. Returns
+     * true if any policy is violated.
      */
     public boolean checkMarketPolicies(
             final int strategyId,
@@ -318,8 +331,9 @@ public final class RiskEngine {
             final PositionTracker positions,
             final OrderStateManager orders) {
         final RiskEngineSnapshot s = snapshot.get();
-        return isMarketGroupViolated(s.globalMarketGroup, strategyId, listingId, positions, orders)
-                || isMarketGroupViolated(s.getStrategyMarketGroup(strategyId), strategyId, listingId, positions, orders)
+        final int all = MarketRiskPolicy.ALL_LISTINGS;
+        return isMarketGroupViolated(s.globalMarketGroup, strategyId, all, positions, orders)
+                || isMarketGroupViolated(s.getStrategyMarketGroup(strategyId), strategyId, all, positions, orders)
                 || isMarketGroupViolated(s.getListingMarketGroup(listingId), strategyId, listingId, positions, orders);
     }
 

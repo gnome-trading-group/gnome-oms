@@ -4,15 +4,20 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import group.gnometrading.oms.pnl.PriceSlotRegistry;
+import group.gnometrading.oms.pnl.SharedPriceBuffer;
+import group.gnometrading.oms.position.PositionTracker;
 import group.gnometrading.oms.risk.MarketRiskPolicy;
 import group.gnometrading.oms.risk.OrderRiskPolicy;
 import group.gnometrading.oms.risk.RiskEngine;
 import group.gnometrading.oms.risk.RiskSnapshots;
-import group.gnometrading.oms.risk.policy.MaxPnlLossPolicy;
+import group.gnometrading.oms.risk.policy.MaxTotalPnlLossPolicy;
+import group.gnometrading.oms.state.OrderStateManager;
 import group.gnometrading.schemas.ExecType;
 import group.gnometrading.schemas.OrderExecutionReportDecoder;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.Statics;
+import group.gnometrading.strings.GnomeString;
 import java.time.Duration;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
@@ -145,7 +150,9 @@ class KillSwitchScenarioTest {
 
     @Test
     void marketBreachCancelsOnceLatchesAndEscalatesThenTheRegistryHoldsIt() {
-        engine = RiskEngine.withPolicies(new OrderRiskPolicy[] {}, new MarketRiskPolicy[] {new MaxPnlLossPolicy(100L)});
+        engine = RiskEngine.withPolicies(new OrderRiskPolicy[] {}, new MarketRiskPolicy[] {
+            new MaxTotalPnlLossPolicy(new SharedPriceBuffer(1), new PriceSlotRegistry(1), 100L)
+        });
         h = new OmsTestHarness(engine);
         h.stubListing(OmsTestHarness.EXCHANGE_ID, OTHER_SECURITY, OTHER_LISTING, 0, 0);
         long resting = ackedBid(OmsTestHarness.STRATEGY_ID, OTHER_SECURITY);
@@ -174,6 +181,144 @@ class KillSwitchScenarioTest {
         RiskSnapshots.publishNoKills(engine);
         h.applyRiskChanges();
         assertFalse(engine.isBlocked(OmsTestHarness.STRATEGY_ID, OmsTestHarness.LISTING_ID));
+    }
+
+    @Test
+    void aMarkMovePastTheLimitHaltsTheStrategyWithNoOrderActivity() {
+        final MarkedHarness m = markedHarness(new MaxTotalPnlLossPolicy(m().prices, m().slots, 500L));
+        long resting = holdLongAtAHundred(m);
+        h.sink.clear();
+
+        m.quote(OmsTestHarness.LISTING_ID, 60L * PX, 62L * PX); // mid 61: -390 on 10
+        h.checkMarkMoves();
+        assertFalse(engine.isLatched(OmsTestHarness.STRATEGY_ID));
+
+        m.quote(OmsTestHarness.LISTING_ID, 48L * PX, 50L * PX); // mid 49: -510
+        h.checkMarkMoves();
+        assertTrue(engine.isLatched(OmsTestHarness.STRATEGY_ID));
+        assertEquals(List.of(resting), h.sink.cancels);
+        assertEquals(List.of(OmsTestHarness.STRATEGY_ID), RiskSnapshots.drainLatchedHalts(engine));
+
+        m.quote(OmsTestHarness.LISTING_ID, 40L * PX, 42L * PX);
+        h.checkMarkMoves();
+        assertEquals(1, h.sink.cancels.size(), "a halted strategy is not cancelled again");
+        assertTrue(RiskSnapshots.drainLatchedHalts(engine).isEmpty());
+    }
+
+    @Test
+    void onlyAMoveOnAHeldListingTriggersACheck() {
+        final CountingPolicy counting = new CountingPolicy();
+        final MarkedHarness m = markedHarness(counting);
+        holdLongAtAHundred(m);
+        final int afterOpening = counting.checks;
+
+        h.checkMarkMoves();
+        h.checkMarkMoves();
+        assertEquals(afterOpening, counting.checks, "no price change: nothing checked");
+
+        m.quote(OmsTestHarness.LISTING_ID, 99L * PX, 101L * PX); // same top of book as before
+        h.checkMarkMoves();
+        assertEquals(afterOpening, counting.checks, "a repeated top of book is not a move");
+
+        m.quote(OTHER_LISTING, 1L * PX, 2L * PX); // only a resting bid there, no position
+        h.checkMarkMoves();
+        assertEquals(afterOpening, counting.checks, "a move on a listing nobody holds checks no one");
+
+        m.quote(OmsTestHarness.LISTING_ID, 98L * PX, 100L * PX);
+        h.checkMarkMoves();
+        assertTrue(counting.checks > afterOpening);
+    }
+
+    @Test
+    void aHedgedStrategyIsJudgedOnItsTotalAcrossListings() {
+        final MarkedHarness m = markedHarness(new MaxTotalPnlLossPolicy(m().prices, m().slots, 500L));
+        holdLongAtAHundred(m);
+        long sell = h.submitAskIntent(OmsTestHarness.STRATEGY_ID, OTHER_SECURITY, 100L * PX, 10L);
+        h.injectAck(OmsTestHarness.STRATEGY_ID, sell, OmsTestHarness.EXCHANGE_ID, OTHER_SECURITY, 10);
+        h.injectFill(
+                OmsTestHarness.STRATEGY_ID, sell, OmsTestHarness.EXCHANGE_ID, OTHER_SECURITY, 10, 100 * PX, 10, 0, 0);
+
+        m.quote(OmsTestHarness.LISTING_ID, 39L * PX, 41L * PX); // long leg -600
+        m.quote(OTHER_LISTING, 39L * PX, 41L * PX); // short leg +600
+        h.checkMarkMoves();
+        assertFalse(engine.isLatched(OmsTestHarness.STRATEGY_ID), "the legs offset");
+
+        m.quote(OTHER_LISTING, 99L * PX, 101L * PX); // the short leg's gain is gone
+        h.checkMarkMoves();
+        assertTrue(engine.isLatched(OmsTestHarness.STRATEGY_ID));
+    }
+
+    @Test
+    void withoutMarketPoliciesAMarkMoveChecksNothing() {
+        final MarkedHarness m = m();
+        h = new OmsTestHarness(engine, m.prices, m.slots);
+        long buy = h.submitBidIntent(100L * PX, 10L);
+        h.injectAck(buy, 10);
+        h.injectFill(buy, 10, 100 * PX, 10, 0);
+
+        m.quote(OmsTestHarness.LISTING_ID, 1L, 2L);
+        h.checkMarkMoves();
+        assertFalse(engine.isLatched(OmsTestHarness.STRATEGY_ID));
+    }
+
+    /** Opens a 10-lot long at 100 on the default listing, marked at 100, plus a resting bid on the other one. */
+    private long holdLongAtAHundred(final MarkedHarness m) {
+        long resting = ackedBid(OmsTestHarness.STRATEGY_ID, OTHER_SECURITY);
+        long buy = h.submitBidIntent(100L * PX, 10L);
+        h.injectAck(buy, 10);
+        h.injectFill(buy, 10, 100 * PX, 10, 0);
+        m.quote(OmsTestHarness.LISTING_ID, 99L * PX, 101L * PX);
+        h.checkMarkMoves();
+        assertFalse(engine.isLatched(OmsTestHarness.STRATEGY_ID));
+        return resting;
+    }
+
+    private MarkedHarness marked;
+
+    /** The price buffer this test's policies and OMS share, created on first use. */
+    private MarkedHarness m() {
+        if (marked == null) {
+            marked = new MarkedHarness();
+        }
+        return marked;
+    }
+
+    private MarkedHarness markedHarness(final MarketRiskPolicy policy) {
+        engine = RiskEngine.withPolicies(new OrderRiskPolicy[] {}, new MarketRiskPolicy[] {policy});
+        h = new OmsTestHarness(engine, m().prices, m().slots);
+        h.stubListing(OmsTestHarness.EXCHANGE_ID, OTHER_SECURITY, OTHER_LISTING, 0, 0);
+        return m();
+    }
+
+    private static final class CountingPolicy implements MarketRiskPolicy {
+        int checks;
+
+        @Override
+        public boolean isViolated(
+                final int strategyId,
+                final int listingId,
+                final PositionTracker positions,
+                final OrderStateManager orders) {
+            checks++;
+            return false;
+        }
+
+        @Override
+        public void reconfigure(final GnomeString parametersJson) {}
+    }
+
+    private static final class MarkedHarness {
+        final SharedPriceBuffer prices = new SharedPriceBuffer(2);
+        final PriceSlotRegistry slots = new PriceSlotRegistry(2);
+
+        MarkedHarness() {
+            slots.register(OmsTestHarness.LISTING_ID);
+            slots.register(OTHER_LISTING);
+        }
+
+        void quote(final int listingId, final long bid, final long ask) {
+            prices.writeQuote(slots.getSlot(listingId), bid, ask);
+        }
     }
 
     @Test
@@ -262,7 +407,9 @@ class KillSwitchScenarioTest {
 
     @Test
     void aLatchedStrategyIsSweptAgainUntilItsOrdersAreGone() {
-        engine = RiskEngine.withPolicies(new OrderRiskPolicy[] {}, new MarketRiskPolicy[] {new MaxPnlLossPolicy(100L)});
+        engine = RiskEngine.withPolicies(new OrderRiskPolicy[] {}, new MarketRiskPolicy[] {
+            new MaxTotalPnlLossPolicy(new SharedPriceBuffer(1), new PriceSlotRegistry(1), 100L)
+        });
         h = new OmsTestHarness(engine);
         h.stubListing(OmsTestHarness.EXCHANGE_ID, OTHER_SECURITY, OTHER_LISTING, 0, 0);
         long resting = ackedBid(OmsTestHarness.STRATEGY_ID, OTHER_SECURITY);
