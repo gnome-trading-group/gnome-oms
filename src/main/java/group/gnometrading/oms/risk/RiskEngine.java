@@ -10,6 +10,7 @@ import group.gnometrading.schemas.Order;
 import java.time.Duration;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.IntConsumer;
+import java.util.function.LongConsumer;
 import org.agrona.collections.IntHashSet;
 import org.agrona.concurrent.EpochClock;
 
@@ -54,6 +55,8 @@ public final class RiskEngine {
     private final IntConsumer reportNewListingKill = this::reportNewListingKill;
     private final IntConsumer reportStrategyKill = this::reportStrategyKill;
     private final IntConsumer reportListingKill = this::reportListingKill;
+    private final LongConsumer reportNewStrategyListingKill = this::reportNewStrategyListingKill;
+    private final LongConsumer reportStrategyListingKill = this::reportStrategyListingKill;
     private RiskEngineSnapshot reportingAgainst;
     private KillHandler reportingTo;
 
@@ -173,10 +176,13 @@ public final class RiskEngine {
         return snapshot.get().killedStrategies.contains(strategyId) || latchedStrategies.contains(strategyId);
     }
 
-    /** Whether any market-risk policy is configured, at any scope. */
+    /** Whether any market-risk policy is configured, whatever it applies to. */
     public boolean hasMarketPolicies() {
         final RiskEngineSnapshot s = snapshot.get();
-        return s.globalMarketGroup.count > 0 || !s.strategyMarketGroups.isEmpty() || !s.listingMarketGroups.isEmpty();
+        return s.globalMarketGroup.count > 0
+                || !s.strategyMarketGroups.isEmpty()
+                || !s.listingMarketGroups.isEmpty()
+                || !s.strategyListingMarketGroups.isEmpty();
     }
 
     @VisibleForTesting
@@ -249,6 +255,7 @@ public final class RiskEngine {
             reportingTo = handler;
             current.killedStrategies.forEachInt(reportNewStrategyKill);
             current.killedListings.forEachInt(reportNewListingKill);
+            current.killedStrategyListings.forEachLong(reportNewStrategyListingKill);
         }
     }
 
@@ -270,6 +277,7 @@ public final class RiskEngine {
         applied.killedStrategies.forEachInt(reportStrategyKill);
         latchedStrategies.forEachInt(reportStrategyKill);
         applied.killedListings.forEachInt(reportListingKill);
+        applied.killedStrategyListings.forEachLong(reportStrategyListingKill);
     }
 
     private void releaseLatch(final int strategyId) {
@@ -288,6 +296,16 @@ public final class RiskEngine {
         }
     }
 
+    private void reportNewStrategyListingKill(final long key) {
+        if (!reportingAgainst.killedStrategyListings.contains(key)) {
+            reportStrategyListingKill(key);
+        }
+    }
+
+    private void reportStrategyListingKill(final long key) {
+        reportingTo.onStrategyListingKilled(RiskEngineSnapshot.pairStrategy(key), RiskEngineSnapshot.pairListing(key));
+    }
+
     private void reportStrategyKill(final int strategyId) {
         reportingTo.onStrategyKilled(strategyId);
     }
@@ -303,6 +321,8 @@ public final class RiskEngine {
         void onStrategyKilled(int strategyId);
 
         void onListingKilled(int listingId);
+
+        void onStrategyListingKilled(int strategyId, int listingId);
     }
 
     public boolean check(
@@ -317,13 +337,19 @@ public final class RiskEngine {
         }
         return checkOrderGroup(s.globalOrderGroup, order, positions, orders, strategyId, listingId)
                 && checkOrderGroup(s.getStrategyOrderGroup(strategyId), order, positions, orders, strategyId, listingId)
+                && checkOrderGroup(
+                        s.getStrategyListingOrderGroup(strategyId, listingId),
+                        order,
+                        positions,
+                        orders,
+                        strategyId,
+                        listingId)
                 && checkOrderGroup(s.getListingOrderGroup(listingId), order, positions, orders, strategyId, listingId);
     }
 
     /**
-     * Checks market-risk policies after a fill or a mark move. Global and strategy-scoped limits judge the
-     * strategy's total across its listings; listing-scoped ones judge its position on {@code listingId}. Returns
-     * true if any policy is violated.
+     * Checks market-risk policies after a fill or a mark move on {@code listingId}. Each policy knows whether it
+     * judges that listing or the strategy's total. Returns true if any policy is violated.
      */
     public boolean checkMarketPolicies(
             final int strategyId,
@@ -331,9 +357,14 @@ public final class RiskEngine {
             final PositionTracker positions,
             final OrderStateManager orders) {
         final RiskEngineSnapshot s = snapshot.get();
-        final int all = MarketRiskPolicy.ALL_LISTINGS;
-        return isMarketGroupViolated(s.globalMarketGroup, strategyId, all, positions, orders)
-                || isMarketGroupViolated(s.getStrategyMarketGroup(strategyId), strategyId, all, positions, orders)
+        return isMarketGroupViolated(s.globalMarketGroup, strategyId, listingId, positions, orders)
+                || isMarketGroupViolated(s.getStrategyMarketGroup(strategyId), strategyId, listingId, positions, orders)
+                || isMarketGroupViolated(
+                        s.getStrategyListingMarketGroup(strategyId, listingId),
+                        strategyId,
+                        listingId,
+                        positions,
+                        orders)
                 || isMarketGroupViolated(s.getListingMarketGroup(listingId), strategyId, listingId, positions, orders);
     }
 

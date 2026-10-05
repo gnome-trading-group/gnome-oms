@@ -49,7 +49,7 @@ class OmsAllocationTest {
         final int otherSlot = slots.register(otherListing);
         final RiskEngine engine = RiskEngine.withPolicies(
                 new OrderRiskPolicy[] {},
-                new MarketRiskPolicy[] {new MaxTotalPnlLossPolicy(prices, slots, Long.MAX_VALUE / 4)});
+                new MarketRiskPolicy[] {new MaxTotalPnlLossPolicy(prices, slots, true, Long.MAX_VALUE / 4)});
         final OmsTestHarness h = new OmsTestHarness(engine, prices, slots);
         h.stubListing(OmsTestHarness.EXCHANGE_ID, otherSecurity, otherListing, 0, 0);
         final long buy = h.submitBidIntent(100L * px, 10L);

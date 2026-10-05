@@ -21,6 +21,15 @@ public final class RiskSnapshots {
         engine.publishSnapshot(snapshot);
     }
 
+    /** Kills each {strategyId, listingId} pair: that strategy on that listing only. */
+    public static void publishStrategyListingKills(final RiskEngine engine, final int[]... pairs) {
+        final RiskEngineSnapshot snapshot = new RiskEngineSnapshot();
+        for (final int[] pair : pairs) {
+            snapshot.killedStrategyListings.add(RiskEngineSnapshot.pairKey(pair[0], pair[1]));
+        }
+        engine.publishSnapshot(snapshot);
+    }
+
     public static void publishNoKills(final RiskEngine engine) {
         engine.publishSnapshot(new RiskEngineSnapshot());
     }

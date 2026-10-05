@@ -2,6 +2,7 @@ package group.gnometrading.oms.risk;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import group.gnometrading.oms.pnl.PriceSlotRegistry;
@@ -106,6 +107,34 @@ class RiskEngineTest {
         engine.forEachKilledScope(handler);
 
         assertEquals("strategy 7;strategy 9;listing 200;", handler.events.toString());
+    }
+
+    @Test
+    void testAStrategyListingKillIsReportedOnceWhenNewAndOnEveryResweep() {
+        final RiskEngine engine = new RiskEngine();
+        final RiskEngineSnapshot killed = new RiskEngineSnapshot();
+        killed.killedStrategyListings.add(RiskEngineSnapshot.pairKey(7, 200));
+        engine.publishSnapshot(killed);
+
+        final RecordingKillHandler applied = new RecordingKillHandler();
+        engine.applyChanges(applied);
+        engine.applyChanges(applied);
+        assertEquals("pair 7/200;", applied.events.toString());
+
+        final RecordingKillHandler resweep = new RecordingKillHandler();
+        engine.forEachKilledScope(resweep);
+        assertEquals("pair 7/200;", resweep.events.toString());
+        assertTrue(engine.hasKills());
+        assertFalse(engine.check(order, positions, orders, 7, 200));
+        assertTrue(engine.check(order, positions, orders, 7, 201));
+    }
+
+    @Test
+    void testThePairKeyRoundTripsLargeAndUnusualIds() {
+        final long key = RiskEngineSnapshot.pairKey(Integer.MAX_VALUE, Integer.MIN_VALUE + 1);
+        assertEquals(Integer.MAX_VALUE, RiskEngineSnapshot.pairStrategy(key));
+        assertEquals(Integer.MIN_VALUE + 1, RiskEngineSnapshot.pairListing(key));
+        assertNotEquals(RiskEngineSnapshot.pairKey(1, 2), RiskEngineSnapshot.pairKey(2, 1));
     }
 
     // --- applyChanges ---
@@ -307,8 +336,8 @@ class RiskEngineTest {
     @Test
     void testCheckMarketPoliciesReturnsTrueWhenGlobalMarketPolicyViolated() {
         final OrderPolicyGroup globalOrder = new OrderPolicyGroup(RiskEngineSnapshot.MAX_POLICIES_PER_GROUP);
-        final MarketPolicyGroup globalMarket =
-                buildMarketGroup(new MaxTotalPnlLossPolicy(new SharedPriceBuffer(1), new PriceSlotRegistry(1), 100L));
+        final MarketPolicyGroup globalMarket = buildMarketGroup(
+                new MaxTotalPnlLossPolicy(new SharedPriceBuffer(1), new PriceSlotRegistry(1), true, 100L));
         final RiskEngine engine = new RiskEngine(globalOrder, globalMarket);
 
         positions.applyStrategyFill(1, 100, Side.Bid, 1, 100, 0);
@@ -320,8 +349,8 @@ class RiskEngineTest {
     @Test
     void testCheckMarketPoliciesReturnsFalseWhenNoPolicyViolated() {
         final OrderPolicyGroup globalOrder = new OrderPolicyGroup(RiskEngineSnapshot.MAX_POLICIES_PER_GROUP);
-        final MarketPolicyGroup globalMarket =
-                buildMarketGroup(new MaxTotalPnlLossPolicy(new SharedPriceBuffer(1), new PriceSlotRegistry(1), 1000L));
+        final MarketPolicyGroup globalMarket = buildMarketGroup(
+                new MaxTotalPnlLossPolicy(new SharedPriceBuffer(1), new PriceSlotRegistry(1), true, 1000L));
         final RiskEngine engine = new RiskEngine(globalOrder, globalMarket);
 
         positions.applyStrategyFill(1, 100, Side.Bid, 1, 100, 0);
@@ -336,7 +365,8 @@ class RiskEngineTest {
         final RiskEngineSnapshot snapshot = new RiskEngineSnapshot();
         snapshot.strategyMarketGroups.put(
                 1,
-                buildMarketGroup(new MaxTotalPnlLossPolicy(new SharedPriceBuffer(1), new PriceSlotRegistry(1), 100L)));
+                buildMarketGroup(
+                        new MaxTotalPnlLossPolicy(new SharedPriceBuffer(1), new PriceSlotRegistry(1), true, 100L)));
         engine.publishSnapshot(snapshot);
         realize(1, 100, -60L);
         realize(1, 200, -60L);
@@ -349,7 +379,8 @@ class RiskEngineTest {
     void testGlobalLossLimitJudgesEachStrategyTotalSeparately() {
         final RiskEngine engine = new RiskEngine(
                 new OrderPolicyGroup(RiskEngineSnapshot.MAX_POLICIES_PER_GROUP),
-                buildMarketGroup(new MaxTotalPnlLossPolicy(new SharedPriceBuffer(1), new PriceSlotRegistry(1), 100L)));
+                buildMarketGroup(
+                        new MaxTotalPnlLossPolicy(new SharedPriceBuffer(1), new PriceSlotRegistry(1), true, 100L)));
         realize(1, 100, -60L);
         realize(2, 100, -60L);
 
@@ -365,7 +396,8 @@ class RiskEngineTest {
         final RiskEngineSnapshot snapshot = new RiskEngineSnapshot();
         snapshot.listingMarketGroups.put(
                 100,
-                buildMarketGroup(new MaxTotalPnlLossPolicy(new SharedPriceBuffer(1), new PriceSlotRegistry(1), 100L)));
+                buildMarketGroup(
+                        new MaxTotalPnlLossPolicy(new SharedPriceBuffer(1), new PriceSlotRegistry(1), false, 100L)));
         engine.publishSnapshot(snapshot);
         realize(1, 100, -60L);
         realize(1, 200, -500L);
@@ -448,6 +480,15 @@ class RiskEngineTest {
         @Override
         public void onListingKilled(final int listingId) {
             events.append("listing ").append(listingId).append(';');
+        }
+
+        @Override
+        public void onStrategyListingKilled(final int strategyId, final int listingId) {
+            events.append("pair ")
+                    .append(strategyId)
+                    .append('/')
+                    .append(listingId)
+                    .append(';');
         }
     }
 }

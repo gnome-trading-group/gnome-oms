@@ -25,19 +25,26 @@ public final class MaxTotalPnlLossPolicy extends AbstractConfigurablePolicy impl
 
     private final SharedPriceBuffer priceBuffer;
     private final PriceSlotRegistry priceSlotRegistry;
+    private final boolean acrossListings;
     private long maxLoss;
     private long totalSum;
     private final Consumer<Position> addTotal = position -> totalSum += totalPnl(position);
 
-    public MaxTotalPnlLossPolicy(final SharedPriceBuffer priceBuffer, final PriceSlotRegistry priceSlotRegistry) {
+    public MaxTotalPnlLossPolicy(
+            final SharedPriceBuffer priceBuffer,
+            final PriceSlotRegistry priceSlotRegistry,
+            final boolean acrossListings) {
         this.priceBuffer = priceBuffer;
         this.priceSlotRegistry = priceSlotRegistry;
+        this.acrossListings = acrossListings;
     }
 
     public MaxTotalPnlLossPolicy(
-            final SharedPriceBuffer priceBuffer, final PriceSlotRegistry priceSlotRegistry, final long maxLoss) {
-        this.priceBuffer = priceBuffer;
-        this.priceSlotRegistry = priceSlotRegistry;
+            final SharedPriceBuffer priceBuffer,
+            final PriceSlotRegistry priceSlotRegistry,
+            final boolean acrossListings,
+            final long maxLoss) {
+        this(priceBuffer, priceSlotRegistry, acrossListings);
         this.maxLoss = maxLoss;
     }
 
@@ -52,7 +59,7 @@ public final class MaxTotalPnlLossPolicy extends AbstractConfigurablePolicy impl
             final int listingId,
             final PositionTracker positions,
             final OrderStateManager orders) {
-        if (listingId == ALL_LISTINGS) {
+        if (acrossListings) {
             totalSum = 0;
             positions.forEachListingPosition(strategyId, addTotal);
             return totalSum < -maxLoss;

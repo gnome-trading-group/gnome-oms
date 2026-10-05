@@ -16,6 +16,10 @@ public interface PositionTracker {
 
     void removeStrategyLeaves(int strategyId, int listingId, Side side, long qty);
 
+    void addOpenOrder(int strategyId, int listingId);
+
+    void removeOpenOrder(int strategyId, int listingId);
+
     void forEachPosition(Consumer<Position> consumer);
 
     void forEachStrategyPosition(StrategyPositionConsumer consumer);

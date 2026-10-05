@@ -54,7 +54,7 @@ class OmsLatencyBenchmarkTest {
         prices.writeQuote(slot, PRICE - 10_000_000L, PRICE + 10_000_000L);
         final RiskEngine engine = RiskEngine.withPolicies(
                 new OrderRiskPolicy[] {},
-                new MarketRiskPolicy[] {new MaxTotalPnlLossPolicy(prices, slots, Long.MAX_VALUE / 4)});
+                new MarketRiskPolicy[] {new MaxTotalPnlLossPolicy(prices, slots, true, Long.MAX_VALUE / 4)});
         oms = new OrderManagementSystem(
                 new NullLogger(),
                 new PooledOrderStateManager(64),

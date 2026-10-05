@@ -90,6 +90,19 @@ public final class DefaultPositionTracker implements PositionTracker {
     }
 
     @Override
+    public void addOpenOrder(int strategyId, int listingId) {
+        getOrCreateStrategyPosition(strategyId, listingId).openOrders++;
+    }
+
+    @Override
+    public void removeOpenOrder(int strategyId, int listingId) {
+        Position stratPosition = getStrategyPosition(strategyId, listingId);
+        if (stratPosition != null && stratPosition.openOrders > 0) {
+            stratPosition.openOrders--;
+        }
+    }
+
+    @Override
     public void forEachPosition(Consumer<Position> consumer) {
         positions.forEachValue(consumer);
     }

@@ -12,8 +12,10 @@ import group.gnometrading.oms.risk.MarketRiskPolicy;
 import group.gnometrading.oms.risk.OrderRiskPolicy;
 import group.gnometrading.oms.risk.RiskEngine;
 import group.gnometrading.oms.risk.policy.MaxNotionalValuePolicy;
+import group.gnometrading.oms.risk.policy.MaxOpenOrdersPolicy;
 import group.gnometrading.oms.risk.policy.MaxOrderSizePolicy;
 import group.gnometrading.oms.risk.policy.MaxTotalPnlLossPolicy;
+import group.gnometrading.oms.risk.policy.PriceCollarPolicy;
 import group.gnometrading.oms.state.PooledOrderStateManager;
 import group.gnometrading.schemas.CancelOrder;
 import group.gnometrading.schemas.ExecType;
@@ -51,9 +53,12 @@ class OmsLifecycleAllocationTest {
         final int slot = slots.register(OmsTestHarness.LISTING_ID);
         final RiskEngine engine = RiskEngine.withPolicies(
                 new OrderRiskPolicy[] {
-                    new MaxOrderSizePolicy(Long.MAX_VALUE / 4), new MaxNotionalValuePolicy(Long.MAX_VALUE / 4)
+                    new MaxOrderSizePolicy(Long.MAX_VALUE / 4),
+                    new MaxNotionalValuePolicy(Long.MAX_VALUE / 4),
+                    new PriceCollarPolicy(prices, slots, Long.MAX_VALUE / 4),
+                    new MaxOpenOrdersPolicy(true, 1_000)
                 },
-                new MarketRiskPolicy[] {new MaxTotalPnlLossPolicy(prices, slots, Long.MAX_VALUE / 4)});
+                new MarketRiskPolicy[] {new MaxTotalPnlLossPolicy(prices, slots, true, Long.MAX_VALUE / 4)});
         final OrderManagementSystem oms = new OrderManagementSystem(
                 new NullLogger(),
                 new PooledOrderStateManager(64),

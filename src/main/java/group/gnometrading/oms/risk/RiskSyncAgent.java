@@ -1,12 +1,13 @@
 package group.gnometrading.oms.risk;
 
+import group.gnometrading.collections.IntHashMap;
+import group.gnometrading.collections.LongHashMap;
 import group.gnometrading.collections.buffer.MessageConsumer;
 import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.oms.pnl.PriceSlotRegistry;
 import group.gnometrading.oms.pnl.SharedPriceBuffer;
-import group.gnometrading.risk.PolicyScope;
 import group.gnometrading.risk.RiskMaster;
 import group.gnometrading.risk.RiskPolicyRecord;
 import group.gnometrading.strings.GnomeString;
@@ -24,7 +25,7 @@ import org.agrona.concurrent.EpochClock;
  *
  * <p>Runs on its own thread via {@link group.gnometrading.concurrent.GnomeAgentRunner}. The OMS hot path reads only
  * from the published snapshot — no sync work, no I/O. Nothing here may stop the thread: a failed refresh keeps the
- * last policies, and a policy that can't be built kills its scope rather than trading without it. It also records
+ * last policies, and a policy that can't be built kills its target rather than trading without it. It also records
  * halts the OMS latched after a market-risk breach as strategy kill switches, so an operator can see and resume them.
  */
 public final class RiskSyncAgent implements GnomeAgent {
@@ -143,7 +144,7 @@ public final class RiskSyncAgent implements GnomeAgent {
             final RiskPolicyRecord record = source.getRecord(i);
             hash = mix(hash, record.policyId);
             hash = mix(hash, record.policyType);
-            hash = mix(hash, record.scope == null ? -1 : record.scope.ordinal());
+            hash = mix(hash, record.sessionId);
             hash = mix(hash, record.strategyId);
             hash = mix(hash, record.listingId);
             hash = mix(hash, record.enabled ? 1 : 0);
@@ -169,20 +170,36 @@ public final class RiskSyncAgent implements GnomeAgent {
         final int count = source.getPolicyCount();
         for (int i = 0; i < count; i++) {
             final RiskPolicyRecord record = source.getRecord(i);
-            if (record.enabled && RiskPolicyType.fromString(record.policyType) == RiskPolicyType.KILL_SWITCH) {
-                addKill(snapshot, record.scope, record.strategyId, record.listingId);
+            if (appliesHere(source, record)
+                    && RiskPolicyType.fromString(record.policyType) == RiskPolicyType.KILL_SWITCH) {
+                addKill(snapshot, record.strategyId, record.listingId);
             }
         }
         for (int i = 0; i < count; i++) {
             final RiskPolicyRecord record = source.getRecord(i);
-            if (record.enabled) {
+            if (appliesHere(source, record)) {
                 addPolicy(snapshot, record);
             }
         }
     }
 
     /**
-     * A policy that can't be built — an unknown type, or parameters it can't read — kills its scope instead: trading
+     * The registry already sends only this session's rows; another session's row reaching here is skipped rather
+     * than applied, since its strategy id alone would make it a kill of every session.
+     */
+    private static boolean appliesHere(final RiskMaster source, final RiskPolicyRecord record) {
+        if (!record.enabled) {
+            return false;
+        }
+        if (record.sessionId.length() == 0) {
+            return true;
+        }
+        final String ownSession = source.sessionId();
+        return ownSession != null && record.sessionId.equals(ownSession);
+    }
+
+    /**
+     * A policy that can't be built — an unknown type, or parameters it can't read — kills its target instead: trading
      * on without a limit someone configured is the unsafe choice, and a kill is visible to an operator.
      */
     private void addPolicy(final RiskEngineSnapshot snapshot, final RiskPolicyRecord record) {
@@ -194,85 +211,109 @@ public final class RiskSyncAgent implements GnomeAgent {
             if (type == null) {
                 throw new IllegalStateException("unknown risk policy type " + record.policyType);
             }
-            if (record.scope == null) {
-                throw new IllegalStateException("unreadable scope");
+            if (record.strategyId < 0 || record.listingId < 0) {
+                throw new IllegalStateException("unreadable target");
             }
-            final Configurable policy = policyFactory.create(type);
+            final Configurable policy = policyFactory.create(type, record.listingId == 0);
             policy.reconfigure(record.parametersJson);
             if (type.category() == RiskPolicyType.Category.ORDER) {
-                addOrderPolicy(snapshot, record.scope, record.strategyId, record.listingId, (OrderRiskPolicy) policy);
+                addOrderPolicy(snapshot, record.strategyId, record.listingId, (OrderRiskPolicy) policy);
             } else {
-                addMarketPolicy(snapshot, record.scope, record.strategyId, record.listingId, (MarketRiskPolicy) policy);
+                addMarketPolicy(snapshot, record.strategyId, record.listingId, (MarketRiskPolicy) policy);
             }
         } catch (RuntimeException e) {
             logger.logf(
                     LogMessage.UNKNOWN_ERROR,
-                    "Risk policy %d can't be applied, killing its scope instead: %s",
+                    "Risk policy %d can't be applied, killing its target instead: %s",
                     record.policyId,
                     e);
-            addKill(snapshot, record.scope, record.strategyId, record.listingId);
+            addKill(snapshot, record.strategyId, record.listingId);
         }
     }
 
-    // A kill whose scope can't be read stops everything rather than nothing.
-    private static void addKill(
-            final RiskEngineSnapshot snapshot, final PolicyScope scope, final int strategyId, final int listingId) {
-        if (scope == PolicyScope.STRATEGY) {
+    // A kill whose target can't be read stops everything rather than nothing.
+    private static void addKill(final RiskEngineSnapshot snapshot, final int strategyId, final int listingId) {
+        if (strategyId < 0 || listingId < 0 || (strategyId == 0 && listingId == 0)) {
+            snapshot.globalKill = true;
+        } else if (listingId == 0) {
             snapshot.killedStrategies.add(strategyId);
-        } else if (scope == PolicyScope.LISTING) {
+        } else if (strategyId == 0) {
             snapshot.killedListings.add(listingId);
         } else {
-            snapshot.globalKill = true;
+            snapshot.killedStrategyListings.add(RiskEngineSnapshot.pairKey(strategyId, listingId));
         }
     }
 
     private static void addOrderPolicy(
             final RiskEngineSnapshot snapshot,
-            final PolicyScope scope,
             final int strategyId,
             final int listingId,
             final OrderRiskPolicy policy) {
-        if (scope == PolicyScope.GLOBAL) {
-            snapshot.globalOrderGroup.policies[snapshot.globalOrderGroup.count++] = policy;
-        } else if (scope == PolicyScope.STRATEGY) {
-            OrderPolicyGroup group = snapshot.strategyOrderGroups.get(strategyId);
-            if (group == null) {
-                group = new OrderPolicyGroup(RiskEngineSnapshot.MAX_POLICIES_PER_GROUP);
-                snapshot.strategyOrderGroups.put(strategyId, group);
-            }
-            group.policies[group.count++] = policy;
+        final OrderPolicyGroup group;
+        if (strategyId == 0 && listingId == 0) {
+            group = snapshot.globalOrderGroup;
+        } else if (listingId == 0) {
+            group = orderGroup(snapshot.strategyOrderGroups, strategyId);
+        } else if (strategyId == 0) {
+            group = orderGroup(snapshot.listingOrderGroups, listingId);
         } else {
-            OrderPolicyGroup group = snapshot.listingOrderGroups.get(listingId);
-            if (group == null) {
-                group = new OrderPolicyGroup(RiskEngineSnapshot.MAX_POLICIES_PER_GROUP);
-                snapshot.listingOrderGroups.put(listingId, group);
-            }
-            group.policies[group.count++] = policy;
+            group = orderGroup(snapshot.strategyListingOrderGroups, RiskEngineSnapshot.pairKey(strategyId, listingId));
         }
+        group.policies[group.count++] = policy;
     }
 
     private static void addMarketPolicy(
             final RiskEngineSnapshot snapshot,
-            final PolicyScope scope,
             final int strategyId,
             final int listingId,
             final MarketRiskPolicy policy) {
-        if (scope == PolicyScope.GLOBAL) {
-            snapshot.globalMarketGroup.policies[snapshot.globalMarketGroup.count++] = policy;
-        } else if (scope == PolicyScope.STRATEGY) {
-            MarketPolicyGroup group = snapshot.strategyMarketGroups.get(strategyId);
-            if (group == null) {
-                group = new MarketPolicyGroup(RiskEngineSnapshot.MAX_POLICIES_PER_GROUP);
-                snapshot.strategyMarketGroups.put(strategyId, group);
-            }
-            group.policies[group.count++] = policy;
+        final MarketPolicyGroup group;
+        if (strategyId == 0 && listingId == 0) {
+            group = snapshot.globalMarketGroup;
+        } else if (listingId == 0) {
+            group = marketGroup(snapshot.strategyMarketGroups, strategyId);
+        } else if (strategyId == 0) {
+            group = marketGroup(snapshot.listingMarketGroups, listingId);
         } else {
-            MarketPolicyGroup group = snapshot.listingMarketGroups.get(listingId);
-            if (group == null) {
-                group = new MarketPolicyGroup(RiskEngineSnapshot.MAX_POLICIES_PER_GROUP);
-                snapshot.listingMarketGroups.put(listingId, group);
-            }
-            group.policies[group.count++] = policy;
+            group = marketGroup(
+                    snapshot.strategyListingMarketGroups, RiskEngineSnapshot.pairKey(strategyId, listingId));
         }
+        group.policies[group.count++] = policy;
+    }
+
+    private static OrderPolicyGroup orderGroup(final IntHashMap<OrderPolicyGroup> groups, final int key) {
+        OrderPolicyGroup group = groups.get(key);
+        if (group == null) {
+            group = new OrderPolicyGroup(RiskEngineSnapshot.MAX_POLICIES_PER_GROUP);
+            groups.put(key, group);
+        }
+        return group;
+    }
+
+    private static OrderPolicyGroup orderGroup(final LongHashMap<OrderPolicyGroup> groups, final long key) {
+        OrderPolicyGroup group = groups.get(key);
+        if (group == null) {
+            group = new OrderPolicyGroup(RiskEngineSnapshot.MAX_POLICIES_PER_GROUP);
+            groups.put(key, group);
+        }
+        return group;
+    }
+
+    private static MarketPolicyGroup marketGroup(final IntHashMap<MarketPolicyGroup> groups, final int key) {
+        MarketPolicyGroup group = groups.get(key);
+        if (group == null) {
+            group = new MarketPolicyGroup(RiskEngineSnapshot.MAX_POLICIES_PER_GROUP);
+            groups.put(key, group);
+        }
+        return group;
+    }
+
+    private static MarketPolicyGroup marketGroup(final LongHashMap<MarketPolicyGroup> groups, final long key) {
+        MarketPolicyGroup group = groups.get(key);
+        if (group == null) {
+            group = new MarketPolicyGroup(RiskEngineSnapshot.MAX_POLICIES_PER_GROUP);
+            groups.put(key, group);
+        }
+        return group;
     }
 }

@@ -22,6 +22,8 @@ class RiskPolicyTypeTest {
                 Arguments.of("MAX_NOTIONAL", RiskPolicyType.MAX_NOTIONAL),
                 Arguments.of("MAX_ORDER_SIZE", RiskPolicyType.MAX_ORDER_SIZE),
                 Arguments.of("MAX_POSITION", RiskPolicyType.MAX_POSITION),
+                Arguments.of("MAX_OPEN_ORDERS", RiskPolicyType.MAX_OPEN_ORDERS),
+                Arguments.of("PRICE_COLLAR", RiskPolicyType.PRICE_COLLAR),
                 Arguments.of("MAX_TOTAL_PNL_LOSS", RiskPolicyType.MAX_TOTAL_PNL_LOSS),
                 Arguments.of("MAX_PNL_LOSS", null),
                 Arguments.of("UNKNOWN", null));
@@ -39,6 +41,8 @@ class RiskPolicyTypeTest {
                 Arguments.of(RiskPolicyType.MAX_NOTIONAL, RiskPolicyType.Category.ORDER),
                 Arguments.of(RiskPolicyType.MAX_ORDER_SIZE, RiskPolicyType.Category.ORDER),
                 Arguments.of(RiskPolicyType.MAX_POSITION, RiskPolicyType.Category.ORDER),
+                Arguments.of(RiskPolicyType.MAX_OPEN_ORDERS, RiskPolicyType.Category.ORDER),
+                Arguments.of(RiskPolicyType.PRICE_COLLAR, RiskPolicyType.Category.ORDER),
                 Arguments.of(RiskPolicyType.MAX_TOTAL_PNL_LOSS, RiskPolicyType.Category.MARKET));
     }
 }

@@ -7,12 +7,14 @@ public enum RiskPolicyType {
     MAX_NOTIONAL(Category.ORDER),
     MAX_ORDER_SIZE(Category.ORDER),
     MAX_POSITION(Category.ORDER),
+    MAX_OPEN_ORDERS(Category.ORDER),
+    PRICE_COLLAR(Category.ORDER),
     MAX_TOTAL_PNL_LOSS(Category.MARKET);
 
     public enum Category {
         ORDER,
         MARKET,
-        /** Not a policy: an enabled row blocks its scope and cancels everything in it. */
+        /** Not a policy: an enabled row blocks its target and cancels everything in it. */
         KILL
     }
 
@@ -35,6 +37,10 @@ public enum RiskPolicyType {
             return MAX_ORDER_SIZE;
         } else if (type.equals("MAX_POSITION")) {
             return MAX_POSITION;
+        } else if (type.equals("MAX_OPEN_ORDERS")) {
+            return MAX_OPEN_ORDERS;
+        } else if (type.equals("PRICE_COLLAR")) {
+            return PRICE_COLLAR;
         } else if (type.equals("MAX_TOTAL_PNL_LOSS")) {
             return MAX_TOTAL_PNL_LOSS;
         }

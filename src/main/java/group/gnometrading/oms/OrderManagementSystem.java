@@ -193,17 +193,18 @@ public final class OrderManagementSystem {
 
         orderStateManager.applyExecutionReport(report);
         updatePositionTracking(report, tracked, strategyId, workingBefore, listingId, bookFill);
+        final boolean terminal = tracked.getState().isTerminal();
+        if (terminal) {
+            // Before the resolver runs: it may send the replacement queued behind this order's cancel.
+            positionTracker.removeOpenOrder(strategyId, listingId);
+        }
         forwardToResolver(report, tracked, strategyId, listingId, sink);
 
-        if (tracked.getState().isTerminal()) {
+        if (terminal) {
             orderStateManager.releaseOrder(tracked);
         }
 
         checkMarketRisk(strategyId, listingId);
-    }
-
-    public boolean validateOrder(Order order) {
-        return riskEngine.check(order, positionTracker, orderStateManager, 0, 0);
     }
 
     public void onOrderAccepted(Order order) {
@@ -211,6 +212,7 @@ public final class OrderManagementSystem {
         int listingId = resolveListingId(order.decoder.exchangeId(), order.decoder.securityId());
         positionTracker.addStrategyLeaves(
                 order.getClientOidStrategyId(), listingId, order.decoder.side(), order.decoder.size());
+        positionTracker.addOpenOrder(order.getClientOidStrategyId(), listingId);
     }
 
     public Position getPosition(int listingId) {
@@ -326,6 +328,11 @@ public final class OrderManagementSystem {
         @Override
         public void onListingKilled(final int listingId) {
             cancel(ALL_STRATEGIES, listingId);
+        }
+
+        @Override
+        public void onStrategyListingKilled(final int strategyId, final int listingId) {
+            cancel(strategyId, listingId);
         }
 
         void cancel(final int strategyId, final int listingId) {

@@ -17,6 +17,9 @@ public final class Position {
     public long totalFees;
     public long leavesBuyQty;
     public long leavesSellQty;
+    /** Orders tracked by the OMS and not yet released, including ones awaiting an ack or a cancel. OMS only. */
+    public int openOrders;
+
     int sharedSlot = -1;
 
     public void init(int id) {
@@ -27,6 +30,7 @@ public final class Position {
         this.totalFees = 0;
         this.leavesBuyQty = 0;
         this.leavesSellQty = 0;
+        this.openOrders = 0;
         this.sharedSlot = -1;
     }
 

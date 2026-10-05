@@ -7,7 +7,6 @@ import group.gnometrading.oms.pnl.PriceSlotRegistry;
 import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.DefaultPositionTracker;
 import group.gnometrading.oms.position.SharedPositionBuffer;
-import group.gnometrading.oms.risk.MarketRiskPolicy;
 import group.gnometrading.oms.state.OrderStateManager;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.Statics;
@@ -27,7 +26,6 @@ class MaxTotalPnlLossPolicyTest {
     private static final int STRATEGY_ID = 1;
     private static final int LISTING_ID = 100;
     private static final int OTHER_LISTING_ID = 200;
-    private static final int ALL = MarketRiskPolicy.ALL_LISTINGS;
 
     @Mock
     private OrderStateManager orders;
@@ -50,7 +48,7 @@ class MaxTotalPnlLossPolicyTest {
 
     @Test
     void notViolated_whenNoPosition() {
-        final MaxTotalPnlLossPolicy policy = new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, 100L);
+        final MaxTotalPnlLossPolicy policy = pair(100L);
         priceBuffer.writeTrade(priceSlot, 150L);
         assertFalse(policy.isViolated(STRATEGY_ID, LISTING_ID, positions, orders));
     }
@@ -61,7 +59,7 @@ class MaxTotalPnlLossPolicyTest {
     void notViolated_whenNoMarkPrice() {
         positions.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 10 * UNIT, 100, 0);
         // markPrice == 0 (never written)
-        final MaxTotalPnlLossPolicy policy = new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, 100L);
+        final MaxTotalPnlLossPolicy policy = pair(100L);
         assertFalse(policy.isViolated(STRATEGY_ID, LISTING_ID, positions, orders));
     }
 
@@ -69,7 +67,7 @@ class MaxTotalPnlLossPolicyTest {
     void notViolated_whenListingNotRegisteredInPriceRegistry() {
         positions.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 10 * UNIT, 100, 0);
         final PriceSlotRegistry emptyRegistry = new PriceSlotRegistry(8);
-        final MaxTotalPnlLossPolicy policy = new MaxTotalPnlLossPolicy(priceBuffer, emptyRegistry, 100L);
+        final MaxTotalPnlLossPolicy policy = new MaxTotalPnlLossPolicy(priceBuffer, emptyRegistry, false, 100L);
         assertFalse(policy.isViolated(STRATEGY_ID, LISTING_ID, positions, orders));
     }
 
@@ -81,7 +79,7 @@ class MaxTotalPnlLossPolicyTest {
         positions.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 10 * UNIT, 100, 0);
         priceBuffer.writeTrade(priceSlot, 120L);
 
-        final MaxTotalPnlLossPolicy policy = new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, 500L);
+        final MaxTotalPnlLossPolicy policy = pair(500L);
         assertFalse(policy.isViolated(STRATEGY_ID, LISTING_ID, positions, orders));
     }
 
@@ -91,7 +89,7 @@ class MaxTotalPnlLossPolicyTest {
         positions.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 10 * UNIT, 100, 0);
         priceBuffer.writeTrade(priceSlot, 50L);
 
-        final MaxTotalPnlLossPolicy policy = new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, 499L);
+        final MaxTotalPnlLossPolicy policy = pair(499L);
         assertTrue(policy.isViolated(STRATEGY_ID, LISTING_ID, positions, orders));
     }
 
@@ -101,7 +99,7 @@ class MaxTotalPnlLossPolicyTest {
         positions.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 10 * UNIT, 100, 0);
         priceBuffer.writeTrade(priceSlot, 50L);
 
-        final MaxTotalPnlLossPolicy policy = new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, 500L);
+        final MaxTotalPnlLossPolicy policy = pair(500L);
         assertFalse(policy.isViolated(STRATEGY_ID, LISTING_ID, positions, orders));
     }
 
@@ -113,7 +111,7 @@ class MaxTotalPnlLossPolicyTest {
         positions.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Ask, 10 * UNIT, 100, 0);
         priceBuffer.writeTrade(priceSlot, 160L);
 
-        final MaxTotalPnlLossPolicy policy = new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, 500L);
+        final MaxTotalPnlLossPolicy policy = pair(500L);
         assertTrue(policy.isViolated(STRATEGY_ID, LISTING_ID, positions, orders));
     }
 
@@ -123,7 +121,7 @@ class MaxTotalPnlLossPolicyTest {
         positions.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Ask, 10 * UNIT, 100, 0);
         priceBuffer.writeTrade(priceSlot, 80L);
 
-        final MaxTotalPnlLossPolicy policy = new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, 500L);
+        final MaxTotalPnlLossPolicy policy = pair(500L);
         assertFalse(policy.isViolated(STRATEGY_ID, LISTING_ID, positions, orders));
     }
 
@@ -139,7 +137,7 @@ class MaxTotalPnlLossPolicyTest {
 
         priceBuffer.writeTrade(priceSlot, 80L);
 
-        final MaxTotalPnlLossPolicy policy = new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, 299L);
+        final MaxTotalPnlLossPolicy policy = pair(299L);
         assertTrue(policy.isViolated(STRATEGY_ID, LISTING_ID, positions, orders));
     }
 
@@ -152,10 +150,8 @@ class MaxTotalPnlLossPolicyTest {
         // Flat with realizedPnl = -500; the mark no longer matters.
         priceBuffer.writeTrade(priceSlot, 120L);
 
-        assertTrue(new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, 499L)
-                .isViolated(STRATEGY_ID, LISTING_ID, positions, orders));
-        assertFalse(new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, 500L)
-                .isViolated(STRATEGY_ID, LISTING_ID, positions, orders));
+        assertTrue(pair(499L).isViolated(STRATEGY_ID, LISTING_ID, positions, orders));
+        assertFalse(pair(500L).isViolated(STRATEGY_ID, LISTING_ID, positions, orders));
     }
 
     // --- strategy total ---
@@ -168,10 +164,11 @@ class MaxTotalPnlLossPolicyTest {
         priceBuffer.writeTrade(priceSlot, 40L); // long leg: -600
         priceBuffer.writeTrade(otherSlot, 40L); // short leg: +600
 
-        final MaxTotalPnlLossPolicy policy = new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, 500L);
-        assertFalse(policy.isViolated(STRATEGY_ID, ALL, positions, orders));
-        assertTrue(policy.isViolated(STRATEGY_ID, LISTING_ID, positions, orders));
-        assertFalse(policy.isViolated(STRATEGY_ID, OTHER_LISTING_ID, positions, orders));
+        final MaxTotalPnlLossPolicy pair = pair(500L);
+        final MaxTotalPnlLossPolicy total = total(500L);
+        assertFalse(total.isViolated(STRATEGY_ID, LISTING_ID, positions, orders));
+        assertTrue(pair.isViolated(STRATEGY_ID, LISTING_ID, positions, orders));
+        assertFalse(pair.isViolated(STRATEGY_ID, OTHER_LISTING_ID, positions, orders));
     }
 
     @Test
@@ -182,10 +179,11 @@ class MaxTotalPnlLossPolicyTest {
         priceBuffer.writeTrade(priceSlot, 60L); // -400
         priceBuffer.writeTrade(otherSlot, 60L); // -400
 
-        final MaxTotalPnlLossPolicy policy = new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, 500L);
-        assertTrue(policy.isViolated(STRATEGY_ID, ALL, positions, orders));
-        assertFalse(policy.isViolated(STRATEGY_ID, LISTING_ID, positions, orders));
-        assertFalse(policy.isViolated(STRATEGY_ID, OTHER_LISTING_ID, positions, orders));
+        final MaxTotalPnlLossPolicy pair = pair(500L);
+        final MaxTotalPnlLossPolicy total = total(500L);
+        assertTrue(total.isViolated(STRATEGY_ID, LISTING_ID, positions, orders));
+        assertFalse(pair.isViolated(STRATEGY_ID, LISTING_ID, positions, orders));
+        assertFalse(pair.isViolated(STRATEGY_ID, OTHER_LISTING_ID, positions, orders));
     }
 
     @Test
@@ -195,16 +193,13 @@ class MaxTotalPnlLossPolicyTest {
         positions.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Ask, 10 * UNIT, 80, 0); // realized -200
         positions.applyStrategyFill(STRATEGY_ID, OTHER_LISTING_ID, Side.Bid, 10 * UNIT, 100, 50L); // fee 50
 
-        assertTrue(new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, 249L)
-                .isViolated(STRATEGY_ID, ALL, positions, orders));
-        assertFalse(new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, 250L)
-                .isViolated(STRATEGY_ID, ALL, positions, orders));
+        assertTrue(total(249L).isViolated(STRATEGY_ID, LISTING_ID, positions, orders));
+        assertFalse(total(250L).isViolated(STRATEGY_ID, LISTING_ID, positions, orders));
     }
 
     @Test
     void strategyTotal_aStrategyWithNoPositionsIsNotABreach() {
-        assertFalse(
-                new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, 0L).isViolated(99, ALL, positions, orders));
+        assertFalse(total(0L).isViolated(99, LISTING_ID, positions, orders));
     }
 
     @Test
@@ -212,10 +207,8 @@ class MaxTotalPnlLossPolicyTest {
         positions.applyStrategyFill(2, LISTING_ID, Side.Bid, 10 * UNIT, 100, 0);
         positions.applyStrategyFill(2, LISTING_ID, Side.Ask, 10 * UNIT, 10, 0); // strategy 2: -900
 
-        assertFalse(new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, 100L)
-                .isViolated(STRATEGY_ID, ALL, positions, orders));
-        assertTrue(
-                new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, 100L).isViolated(2, ALL, positions, orders));
+        assertFalse(total(100L).isViolated(STRATEGY_ID, LISTING_ID, positions, orders));
+        assertTrue(total(100L).isViolated(2, LISTING_ID, positions, orders));
     }
 
     // --- fees ---
@@ -227,7 +220,7 @@ class MaxTotalPnlLossPolicyTest {
         positions.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 10 * UNIT, 100, 51);
         priceBuffer.writeTrade(priceSlot, 95L);
 
-        final MaxTotalPnlLossPolicy policy = new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, 100L);
+        final MaxTotalPnlLossPolicy policy = pair(100L);
         assertTrue(policy.isViolated(STRATEGY_ID, LISTING_ID, positions, orders));
     }
 
@@ -237,7 +230,7 @@ class MaxTotalPnlLossPolicyTest {
         positions.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 10 * UNIT, 100, 0);
         priceBuffer.writeTrade(priceSlot, 95L);
 
-        final MaxTotalPnlLossPolicy policy = new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, 100L);
+        final MaxTotalPnlLossPolicy policy = pair(100L);
         assertFalse(policy.isViolated(STRATEGY_ID, LISTING_ID, positions, orders));
     }
 
@@ -249,7 +242,7 @@ class MaxTotalPnlLossPolicyTest {
         priceBuffer.writeTrade(priceSlot, 50L);
         // unrealizedPnl = 10 * (50 - 100) = -500
 
-        final MaxTotalPnlLossPolicy policy = new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry);
+        final MaxTotalPnlLossPolicy policy = new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, false);
         policy.reconfigure(new ViewString("{\"maxLoss\": 499}"));
         assertTrue(policy.isViolated(STRATEGY_ID, LISTING_ID, positions, orders));
 
@@ -266,7 +259,17 @@ class MaxTotalPnlLossPolicyTest {
         priceBuffer.writeTrade(priceSlot, 150L);
         priceBuffer.writeQuote(priceSlot, 40L, 60L);
 
-        final MaxTotalPnlLossPolicy policy = new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, 400L);
+        final MaxTotalPnlLossPolicy policy = pair(400L);
         assertTrue(policy.isViolated(STRATEGY_ID, LISTING_ID, positions, orders));
+    }
+
+    /** Judges the (strategy, listing) position it is asked about, as a listing-scoped limit does. */
+    private MaxTotalPnlLossPolicy pair(final long maxLoss) {
+        return new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, false, maxLoss);
+    }
+
+    /** Judges the strategy's total across its listings, as a global or strategy-scoped limit does. */
+    private MaxTotalPnlLossPolicy total(final long maxLoss) {
+        return new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, true, maxLoss);
     }
 }

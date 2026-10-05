@@ -17,7 +17,6 @@ import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.DefaultPositionTracker;
 import group.gnometrading.oms.position.SharedPositionBuffer;
 import group.gnometrading.oms.state.OrderStateManager;
-import group.gnometrading.risk.PolicyScope;
 import group.gnometrading.risk.RiskMaster;
 import group.gnometrading.risk.RiskPolicyRecord;
 import group.gnometrading.schemas.Order;
@@ -90,13 +89,15 @@ class RiskSyncAgentTest {
         public void onStrategyKilled(final int strategyId) {}
 
         @Override
+        public void onStrategyListingKilled(final int strategyId, final int listingId) {}
+
+        @Override
         public void onListingKilled(final int listingId) {}
     };
 
     private static RiskPolicyRecord createRecord(
             final int policyId,
             final String type,
-            final PolicyScope scope,
             final int strategyId,
             final int listingId,
             final String params,
@@ -104,11 +105,15 @@ class RiskSyncAgentTest {
         final RiskPolicyRecord record = new RiskPolicyRecord();
         record.policyId = policyId;
         record.policyType.copy(new ViewString(type));
-        record.scope = scope;
         record.strategyId = strategyId;
         record.listingId = listingId;
         record.parametersJson.copy(new ViewString(params));
         record.enabled = enabled;
+        return record;
+    }
+
+    private static RiskPolicyRecord forSession(final String sessionId, final RiskPolicyRecord record) {
+        record.sessionId.copy(new ViewString(sessionId));
         return record;
     }
 
@@ -121,7 +126,7 @@ class RiskSyncAgentTest {
 
     @Test
     void testRefreshAndPublishWithGlobalOrderPolicy() {
-        setupRiskMaster(createRecord(1, "MAX_ORDER_SIZE", PolicyScope.GLOBAL, 0, 0, "{\"maxOrderSize\": 10}", true));
+        setupRiskMaster(createRecord(1, "MAX_ORDER_SIZE", 0, 0, "{\"maxOrderSize\": 10}", true));
         triggerSync();
 
         order.encoder.size(11);
@@ -132,8 +137,40 @@ class RiskSyncAgentTest {
     }
 
     @Test
+    void testAListingScopedOpenOrderLimitCountsThatListingAndAStrategyOneCountsThemAll() {
+        setupRiskMaster(
+                createRecord(1, "MAX_OPEN_ORDERS", 0, LISTING_ID, "{\"maxOpenOrders\": 1}", true),
+                createRecord(2, "MAX_OPEN_ORDERS", STRATEGY_ID, 0, "{\"maxOpenOrders\": 2}", true));
+        triggerSync();
+
+        positions.addOpenOrder(STRATEGY_ID, LISTING_ID + 1);
+        assertTrue(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID), "1 open elsewhere");
+
+        positions.addOpenOrder(STRATEGY_ID, LISTING_ID);
+        assertFalse(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID), "listing limit of 1");
+        assertFalse(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID + 1), "strategy limit of 2");
+    }
+
+    @Test
+    void testAListingScopedLossLimitIgnoresTheStrategysOtherListingsAndAStrategyScopedOneSumsThem() {
+        setupRiskMaster(
+                createRecord(1, "MAX_TOTAL_PNL_LOSS", 0, LISTING_ID, "{\"maxLoss\": 50}", true),
+                createRecord(2, "MAX_TOTAL_PNL_LOSS", STRATEGY_ID + 1, 0, "{\"maxLoss\": 50}", true));
+        triggerSync();
+
+        positions.applyStrategyFill(STRATEGY_ID, LISTING_ID + 1, Side.Bid, 1, 100, 0);
+        positions.getStrategyPosition(STRATEGY_ID, LISTING_ID + 1).realizedPnl = -51L;
+        assertFalse(riskEngine.checkMarketPolicies(STRATEGY_ID, LISTING_ID, positions, orders), "loss elsewhere");
+
+        positions.applyStrategyFill(STRATEGY_ID + 1, LISTING_ID + 1, Side.Bid, 1, 100, 0);
+        positions.getStrategyPosition(STRATEGY_ID + 1, LISTING_ID + 1).realizedPnl = -51L;
+        positions.applyStrategyFill(STRATEGY_ID + 1, LISTING_ID + 2, Side.Bid, 1, 100, 0);
+        assertTrue(riskEngine.checkMarketPolicies(STRATEGY_ID + 1, LISTING_ID + 2, positions, orders), "summed");
+    }
+
+    @Test
     void testRefreshAndPublishWithGlobalMarketPolicy() {
-        setupRiskMaster(createRecord(1, "MAX_TOTAL_PNL_LOSS", PolicyScope.GLOBAL, 0, 0, "{\"maxLoss\": 50}", true));
+        setupRiskMaster(createRecord(1, "MAX_TOTAL_PNL_LOSS", 0, 0, "{\"maxLoss\": 50}", true));
         triggerSync();
 
         positions.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 1, 100, 0);
@@ -144,7 +181,7 @@ class RiskSyncAgentTest {
 
     @Test
     void testRefreshAndPublishSkipsDisabledPolicies() {
-        setupRiskMaster(createRecord(1, "KILL_SWITCH", PolicyScope.GLOBAL, 0, 0, "{}", false));
+        setupRiskMaster(createRecord(1, "KILL_SWITCH", 0, 0, "{}", false));
         triggerSync();
 
         // Disabled kill switch — everything trades
@@ -153,7 +190,7 @@ class RiskSyncAgentTest {
 
     @Test
     void testStrategyKillSwitchBlocksOnlyThatStrategy() {
-        setupRiskMaster(createRecord(1, "KILL_SWITCH", PolicyScope.STRATEGY, STRATEGY_ID, 0, "{}", true));
+        setupRiskMaster(createRecord(1, "KILL_SWITCH", STRATEGY_ID, 0, "{}", true));
         triggerSync();
 
         assertFalse(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID));
@@ -162,7 +199,7 @@ class RiskSyncAgentTest {
 
     @Test
     void testListingKillSwitchBlocksOnlyThatListing() {
-        setupRiskMaster(createRecord(1, "KILL_SWITCH", PolicyScope.LISTING, 0, LISTING_ID, "{}", true));
+        setupRiskMaster(createRecord(1, "KILL_SWITCH", 0, LISTING_ID, "{}", true));
         triggerSync();
 
         assertFalse(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID));
@@ -172,9 +209,9 @@ class RiskSyncAgentTest {
     @Test
     void testPolicyThatCantBeBuiltKillsItsScopeAndLeavesOthersTrading() {
         setupRiskMaster(
-                createRecord(1, "UNKNOWN_TYPE", PolicyScope.STRATEGY, STRATEGY_ID, 0, "{}", true),
-                createRecord(2, "MAX_ORDER_SIZE", PolicyScope.LISTING, 0, LISTING_ID, "{}", true),
-                createRecord(3, "MAX_ORDER_SIZE", PolicyScope.GLOBAL, 0, 0, "{\"maxOrderSize\": 10}", true));
+                createRecord(1, "UNKNOWN_TYPE", STRATEGY_ID, 0, "{}", true),
+                createRecord(2, "MAX_ORDER_SIZE", 0, LISTING_ID, "{}", true),
+                createRecord(3, "MAX_ORDER_SIZE", 0, 0, "{\"maxOrderSize\": 10}", true));
         triggerSync();
 
         assertTrue(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID + 1), "unknown type kills its strategy");
@@ -188,8 +225,8 @@ class RiskSyncAgentTest {
     @Test
     void testKillSwitchAppliesEvenWhenAnotherPolicyCantBeBuilt() {
         setupRiskMaster(
-                createRecord(1, "MAX_ORDER_SIZE", PolicyScope.LISTING, 0, LISTING_ID, "{}", true),
-                createRecord(2, "KILL_SWITCH", PolicyScope.GLOBAL, 0, 0, "{}", true));
+                createRecord(1, "MAX_ORDER_SIZE", 0, LISTING_ID, "{}", true),
+                createRecord(2, "KILL_SWITCH", 0, 0, "{}", true));
         triggerSync();
 
         assertTrue(riskEngine.isBlocked(STRATEGY_ID + 1, LISTING_ID + 1));
@@ -197,8 +234,7 @@ class RiskSyncAgentTest {
 
     @Test
     void testChangedParametersPublishAFreshPolicy() {
-        final RiskPolicyRecord record =
-                createRecord(1, "MAX_ORDER_SIZE", PolicyScope.GLOBAL, 0, 0, "{\"maxOrderSize\": 100}", true);
+        final RiskPolicyRecord record = createRecord(1, "MAX_ORDER_SIZE", 0, 0, "{\"maxOrderSize\": 100}", true);
         setupRiskMaster(record);
         triggerSync();
 
@@ -216,8 +252,7 @@ class RiskSyncAgentTest {
 
     @Test
     void testRefreshAndPublishWithStrategyMarketPolicy() {
-        setupRiskMaster(
-                createRecord(1, "MAX_TOTAL_PNL_LOSS", PolicyScope.STRATEGY, STRATEGY_ID, 0, "{\"maxLoss\": 50}", true));
+        setupRiskMaster(createRecord(1, "MAX_TOTAL_PNL_LOSS", STRATEGY_ID, 0, "{\"maxLoss\": 50}", true));
         triggerSync();
 
         positions.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 1, 100, 0);
@@ -229,8 +264,7 @@ class RiskSyncAgentTest {
 
     @Test
     void testRefreshAndPublishWithListingMarketPolicy() {
-        setupRiskMaster(
-                createRecord(1, "MAX_TOTAL_PNL_LOSS", PolicyScope.LISTING, 0, LISTING_ID, "{\"maxLoss\": 50}", true));
+        setupRiskMaster(createRecord(1, "MAX_TOTAL_PNL_LOSS", 0, LISTING_ID, "{\"maxLoss\": 50}", true));
         triggerSync();
 
         positions.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 1, 100, 0);
@@ -253,8 +287,77 @@ class RiskSyncAgentTest {
     }
 
     @Test
-    void testGlobalKillSwitchAndUnreadableScopeBlockEverything() {
-        setupRiskMaster(createRecord(1, "KILL_SWITCH", null, 0, 0, "{}", true));
+    void testAStrategyRowIsNotGlobalAndAListingRowCoversEveryStrategyOnIt() {
+        setupRiskMaster(
+                createRecord(1, "KILL_SWITCH", STRATEGY_ID, 0, "{}", true),
+                createRecord(2, "KILL_SWITCH", 0, LISTING_ID + 1, "{}", true));
+        triggerSync();
+
+        assertTrue(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID + 7));
+        assertFalse(riskEngine.isBlocked(STRATEGY_ID + 1, LISTING_ID), "another strategy");
+        assertTrue(riskEngine.isBlocked(STRATEGY_ID + 1, LISTING_ID + 1));
+        assertTrue(riskEngine.isBlocked(STRATEGY_ID + 2, LISTING_ID + 1));
+    }
+
+    @Test
+    void testAStrategyAndListingKillStopsOnlyThatStrategyOnThatListing() {
+        setupRiskMaster(createRecord(1, "KILL_SWITCH", STRATEGY_ID, LISTING_ID, "{}", true));
+        triggerSync();
+
+        assertTrue(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID));
+        assertFalse(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID + 1), "its other listings");
+        assertFalse(riskEngine.isBlocked(STRATEGY_ID + 1, LISTING_ID), "other strategies on the listing");
+    }
+
+    @Test
+    void testAStrategyAndListingLimitJudgesOnlyThatPair() {
+        setupRiskMaster(createRecord(1, "MAX_ORDER_SIZE", STRATEGY_ID, LISTING_ID, "{\"maxOrderSize\": 10}", true));
+        triggerSync();
+
+        order.encoder.size(11);
+        assertFalse(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID));
+        assertTrue(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID + 1));
+        assertTrue(riskEngine.check(order, positions, orders, STRATEGY_ID + 1, LISTING_ID));
+    }
+
+    @Test
+    void testAStrategyAndListingLossLimitJudgesOnlyThatPair() {
+        setupRiskMaster(createRecord(1, "MAX_TOTAL_PNL_LOSS", STRATEGY_ID, LISTING_ID, "{\"maxLoss\": 50}", true));
+        triggerSync();
+
+        positions.applyStrategyFill(STRATEGY_ID, LISTING_ID + 1, Side.Bid, 1, 100, 0);
+        positions.getStrategyPosition(STRATEGY_ID, LISTING_ID + 1).realizedPnl = -500L;
+        positions.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 1, 100, 0);
+        assertFalse(riskEngine.checkMarketPolicies(STRATEGY_ID, LISTING_ID, positions, orders), "loss elsewhere");
+
+        positions.getStrategyPosition(STRATEGY_ID, LISTING_ID).realizedPnl = -51L;
+        assertTrue(riskEngine.checkMarketPolicies(STRATEGY_ID, LISTING_ID, positions, orders));
+    }
+
+    @Test
+    void testOwnSessionRowsApplyAndOtherSessionsRowsAreSkipped() {
+        when(riskMaster.sessionId()).thenReturn("mine");
+        setupRiskMaster(
+                forSession("mine", createRecord(1, "MAX_ORDER_SIZE", STRATEGY_ID, 0, "{\"maxOrderSize\": 10}", true)),
+                forSession("theirs", createRecord(2, "KILL_SWITCH", STRATEGY_ID, 0, "{}", true)));
+        triggerSync();
+
+        assertFalse(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID), "another session's kill");
+        order.encoder.size(11);
+        assertFalse(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID), "this session's limit");
+    }
+
+    @Test
+    void testSessionRowsAreSkippedOutsideASession() {
+        setupRiskMaster(forSession("any", createRecord(1, "KILL_SWITCH", STRATEGY_ID, 0, "{}", true)));
+        triggerSync();
+
+        assertFalse(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID));
+    }
+
+    @Test
+    void testAKillWhoseTargetCantBeReadBlocksEverything() {
+        setupRiskMaster(createRecord(1, "KILL_SWITCH", -1, 0, "{}", true));
         triggerSync();
 
         assertTrue(riskEngine.isBlocked(STRATEGY_ID + 5, LISTING_ID + 5));
@@ -262,7 +365,7 @@ class RiskSyncAgentTest {
 
     @Test
     void testFailedRefreshKeepsTheLastPolicies() {
-        setupRiskMaster(createRecord(1, "MAX_ORDER_SIZE", PolicyScope.GLOBAL, 0, 0, "{\"maxOrderSize\": 10}", true));
+        setupRiskMaster(createRecord(1, "MAX_ORDER_SIZE", 0, 0, "{\"maxOrderSize\": 10}", true));
         triggerSync();
         doThrow(new RuntimeException("registry down")).when(riskMaster).refresh();
 
@@ -293,7 +396,7 @@ class RiskSyncAgentTest {
 
     @Test
     void testUnchangedPoliciesPublishNothing() {
-        setupRiskMaster(createRecord(1, "MAX_ORDER_SIZE", PolicyScope.GLOBAL, 0, 0, "{\"maxOrderSize\": 10}", true));
+        setupRiskMaster(createRecord(1, "MAX_ORDER_SIZE", 0, 0, "{\"maxOrderSize\": 10}", true));
         triggerSync();
         final RiskEngineSnapshot first = riskEngine.publishedSnapshot();
 
@@ -354,7 +457,7 @@ class RiskSyncAgentTest {
         agent.doWork(); // records the halt
         now[0] += 1;
         agent.doWork(); // publishes the confirmation; the OMS doesn't look before the policies change
-        setupRiskMaster(createRecord(1, "MAX_ORDER_SIZE", PolicyScope.GLOBAL, 0, 0, "{\"maxOrderSize\": 10}", true));
+        setupRiskMaster(createRecord(1, "MAX_ORDER_SIZE", 0, 0, "{\"maxOrderSize\": 10}", true));
         now[0] += 1;
         agent.doWork(); // so the snapshot it does see must carry the confirmation again
         riskEngine.applyChanges(IGNORE_KILLS);

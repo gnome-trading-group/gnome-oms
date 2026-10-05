@@ -358,7 +358,7 @@ class OrderManagementSystemIntegrationTest {
         RiskEngine re = RiskEngine.withPolicies(
                 new group.gnometrading.oms.risk.OrderRiskPolicy[] {},
                 new group.gnometrading.oms.risk.MarketRiskPolicy[] {
-                    new MaxTotalPnlLossPolicy(new SharedPriceBuffer(1), new PriceSlotRegistry(1), 100L)
+                    new MaxTotalPnlLossPolicy(new SharedPriceBuffer(1), new PriceSlotRegistry(1), true, 100L)
                 });
         OmsTestHarness h2 = new OmsTestHarness(re);
 
@@ -381,7 +381,7 @@ class OrderManagementSystemIntegrationTest {
         RiskEngine re = RiskEngine.withPolicies(
                 new group.gnometrading.oms.risk.OrderRiskPolicy[] {},
                 new group.gnometrading.oms.risk.MarketRiskPolicy[] {
-                    new MaxTotalPnlLossPolicy(new SharedPriceBuffer(1), new PriceSlotRegistry(1), 100L)
+                    new MaxTotalPnlLossPolicy(new SharedPriceBuffer(1), new PriceSlotRegistry(1), true, 100L)
                 });
         OmsTestHarness h2 = new OmsTestHarness(re);
         // Need two securities for independent bid/ask
@@ -426,7 +426,7 @@ class OrderManagementSystemIntegrationTest {
         RiskEngine re = RiskEngine.withPolicies(
                 new group.gnometrading.oms.risk.OrderRiskPolicy[] {},
                 new group.gnometrading.oms.risk.MarketRiskPolicy[] {
-                    new MaxTotalPnlLossPolicy(new SharedPriceBuffer(1), new PriceSlotRegistry(1), 100L)
+                    new MaxTotalPnlLossPolicy(new SharedPriceBuffer(1), new PriceSlotRegistry(1), true, 100L)
                 });
         OmsTestHarness h2 = new OmsTestHarness(re);
         h2.stubListing(OmsTestHarness.EXCHANGE_ID, 43, 101, 0, 0);
