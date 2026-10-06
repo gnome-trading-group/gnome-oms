@@ -50,6 +50,96 @@ final class RiskEngineSnapshot {
         this.strategyListingMarketGroups = new LongHashMap<>();
     }
 
+    /**
+     * Adds a policy to the group its target selects: strategy 0 and listing 0 is global, listing 0 alone is one
+     * strategy across listings, strategy 0 alone is one listing across strategies, and both set is one strategy on
+     * one listing.
+     */
+    void addPolicy(final int strategyId, final int listingId, final Configurable policy) {
+        if (policy instanceof OrderRiskPolicy orderPolicy) {
+            addOrderPolicy(strategyId, listingId, orderPolicy);
+        } else {
+            addMarketPolicy(strategyId, listingId, (MarketRiskPolicy) policy);
+        }
+    }
+
+    // A kill whose target can't be read stops everything rather than nothing.
+    void addKill(final int strategyId, final int listingId) {
+        if (strategyId < 0 || listingId < 0 || (strategyId == 0 && listingId == 0)) {
+            globalKill = true;
+        } else if (listingId == 0) {
+            killedStrategies.add(strategyId);
+        } else if (strategyId == 0) {
+            killedListings.add(listingId);
+        } else {
+            killedStrategyListings.add(pairKey(strategyId, listingId));
+        }
+    }
+
+    private void addOrderPolicy(final int strategyId, final int listingId, final OrderRiskPolicy policy) {
+        final OrderPolicyGroup group;
+        if (strategyId == 0 && listingId == 0) {
+            group = globalOrderGroup;
+        } else if (listingId == 0) {
+            group = orderGroup(strategyOrderGroups, strategyId);
+        } else if (strategyId == 0) {
+            group = orderGroup(listingOrderGroups, listingId);
+        } else {
+            group = orderGroup(strategyListingOrderGroups, pairKey(strategyId, listingId));
+        }
+        group.policies[group.count++] = policy;
+    }
+
+    private void addMarketPolicy(final int strategyId, final int listingId, final MarketRiskPolicy policy) {
+        final MarketPolicyGroup group;
+        if (strategyId == 0 && listingId == 0) {
+            group = globalMarketGroup;
+        } else if (listingId == 0) {
+            group = marketGroup(strategyMarketGroups, strategyId);
+        } else if (strategyId == 0) {
+            group = marketGroup(listingMarketGroups, listingId);
+        } else {
+            group = marketGroup(strategyListingMarketGroups, pairKey(strategyId, listingId));
+        }
+        group.policies[group.count++] = policy;
+    }
+
+    private static OrderPolicyGroup orderGroup(final IntHashMap<OrderPolicyGroup> groups, final int key) {
+        OrderPolicyGroup group = groups.get(key);
+        if (group == null) {
+            group = new OrderPolicyGroup(RiskEngineSnapshot.MAX_POLICIES_PER_GROUP);
+            groups.put(key, group);
+        }
+        return group;
+    }
+
+    private static OrderPolicyGroup orderGroup(final LongHashMap<OrderPolicyGroup> groups, final long key) {
+        OrderPolicyGroup group = groups.get(key);
+        if (group == null) {
+            group = new OrderPolicyGroup(RiskEngineSnapshot.MAX_POLICIES_PER_GROUP);
+            groups.put(key, group);
+        }
+        return group;
+    }
+
+    private static MarketPolicyGroup marketGroup(final IntHashMap<MarketPolicyGroup> groups, final int key) {
+        MarketPolicyGroup group = groups.get(key);
+        if (group == null) {
+            group = new MarketPolicyGroup(RiskEngineSnapshot.MAX_POLICIES_PER_GROUP);
+            groups.put(key, group);
+        }
+        return group;
+    }
+
+    private static MarketPolicyGroup marketGroup(final LongHashMap<MarketPolicyGroup> groups, final long key) {
+        MarketPolicyGroup group = groups.get(key);
+        if (group == null) {
+            group = new MarketPolicyGroup(RiskEngineSnapshot.MAX_POLICIES_PER_GROUP);
+            groups.put(key, group);
+        }
+        return group;
+    }
+
     static long pairKey(final int strategyId, final int listingId) {
         return ((long) strategyId << Integer.SIZE) | Integer.toUnsignedLong(listingId);
     }

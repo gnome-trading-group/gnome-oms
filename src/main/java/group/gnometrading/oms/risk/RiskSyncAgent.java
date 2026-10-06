@@ -1,7 +1,5 @@
 package group.gnometrading.oms.risk;
 
-import group.gnometrading.collections.IntHashMap;
-import group.gnometrading.collections.LongHashMap;
 import group.gnometrading.collections.buffer.MessageConsumer;
 import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.logging.LogMessage;
@@ -172,7 +170,7 @@ public final class RiskSyncAgent implements GnomeAgent {
             final RiskPolicyRecord record = source.getRecord(i);
             if (appliesHere(source, record)
                     && RiskPolicyType.fromString(record.policyType) == RiskPolicyType.KILL_SWITCH) {
-                addKill(snapshot, record.strategyId, record.listingId);
+                snapshot.addKill(record.strategyId, record.listingId);
             }
         }
         for (int i = 0; i < count; i++) {
@@ -216,104 +214,14 @@ public final class RiskSyncAgent implements GnomeAgent {
             }
             final Configurable policy = policyFactory.create(type, record.listingId == 0);
             policy.reconfigure(record.parametersJson);
-            if (type.category() == RiskPolicyType.Category.ORDER) {
-                addOrderPolicy(snapshot, record.strategyId, record.listingId, (OrderRiskPolicy) policy);
-            } else {
-                addMarketPolicy(snapshot, record.strategyId, record.listingId, (MarketRiskPolicy) policy);
-            }
+            snapshot.addPolicy(record.strategyId, record.listingId, policy);
         } catch (RuntimeException e) {
             logger.logf(
                     LogMessage.UNKNOWN_ERROR,
                     "Risk policy %d can't be applied, killing its target instead: %s",
                     record.policyId,
                     e);
-            addKill(snapshot, record.strategyId, record.listingId);
+            snapshot.addKill(record.strategyId, record.listingId);
         }
-    }
-
-    // A kill whose target can't be read stops everything rather than nothing.
-    private static void addKill(final RiskEngineSnapshot snapshot, final int strategyId, final int listingId) {
-        if (strategyId < 0 || listingId < 0 || (strategyId == 0 && listingId == 0)) {
-            snapshot.globalKill = true;
-        } else if (listingId == 0) {
-            snapshot.killedStrategies.add(strategyId);
-        } else if (strategyId == 0) {
-            snapshot.killedListings.add(listingId);
-        } else {
-            snapshot.killedStrategyListings.add(RiskEngineSnapshot.pairKey(strategyId, listingId));
-        }
-    }
-
-    private static void addOrderPolicy(
-            final RiskEngineSnapshot snapshot,
-            final int strategyId,
-            final int listingId,
-            final OrderRiskPolicy policy) {
-        final OrderPolicyGroup group;
-        if (strategyId == 0 && listingId == 0) {
-            group = snapshot.globalOrderGroup;
-        } else if (listingId == 0) {
-            group = orderGroup(snapshot.strategyOrderGroups, strategyId);
-        } else if (strategyId == 0) {
-            group = orderGroup(snapshot.listingOrderGroups, listingId);
-        } else {
-            group = orderGroup(snapshot.strategyListingOrderGroups, RiskEngineSnapshot.pairKey(strategyId, listingId));
-        }
-        group.policies[group.count++] = policy;
-    }
-
-    private static void addMarketPolicy(
-            final RiskEngineSnapshot snapshot,
-            final int strategyId,
-            final int listingId,
-            final MarketRiskPolicy policy) {
-        final MarketPolicyGroup group;
-        if (strategyId == 0 && listingId == 0) {
-            group = snapshot.globalMarketGroup;
-        } else if (listingId == 0) {
-            group = marketGroup(snapshot.strategyMarketGroups, strategyId);
-        } else if (strategyId == 0) {
-            group = marketGroup(snapshot.listingMarketGroups, listingId);
-        } else {
-            group = marketGroup(
-                    snapshot.strategyListingMarketGroups, RiskEngineSnapshot.pairKey(strategyId, listingId));
-        }
-        group.policies[group.count++] = policy;
-    }
-
-    private static OrderPolicyGroup orderGroup(final IntHashMap<OrderPolicyGroup> groups, final int key) {
-        OrderPolicyGroup group = groups.get(key);
-        if (group == null) {
-            group = new OrderPolicyGroup(RiskEngineSnapshot.MAX_POLICIES_PER_GROUP);
-            groups.put(key, group);
-        }
-        return group;
-    }
-
-    private static OrderPolicyGroup orderGroup(final LongHashMap<OrderPolicyGroup> groups, final long key) {
-        OrderPolicyGroup group = groups.get(key);
-        if (group == null) {
-            group = new OrderPolicyGroup(RiskEngineSnapshot.MAX_POLICIES_PER_GROUP);
-            groups.put(key, group);
-        }
-        return group;
-    }
-
-    private static MarketPolicyGroup marketGroup(final IntHashMap<MarketPolicyGroup> groups, final int key) {
-        MarketPolicyGroup group = groups.get(key);
-        if (group == null) {
-            group = new MarketPolicyGroup(RiskEngineSnapshot.MAX_POLICIES_PER_GROUP);
-            groups.put(key, group);
-        }
-        return group;
-    }
-
-    private static MarketPolicyGroup marketGroup(final LongHashMap<MarketPolicyGroup> groups, final long key) {
-        MarketPolicyGroup group = groups.get(key);
-        if (group == null) {
-            group = new MarketPolicyGroup(RiskEngineSnapshot.MAX_POLICIES_PER_GROUP);
-            groups.put(key, group);
-        }
-        return group;
     }
 }

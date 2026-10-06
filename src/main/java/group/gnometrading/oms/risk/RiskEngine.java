@@ -8,6 +8,7 @@ import group.gnometrading.oms.position.PositionTracker;
 import group.gnometrading.oms.state.OrderStateManager;
 import group.gnometrading.schemas.Order;
 import java.time.Duration;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.IntConsumer;
 import java.util.function.LongConsumer;
@@ -133,6 +134,29 @@ public final class RiskEngine {
             marketGroup.policies[marketGroup.count++] = p;
         }
         return new RiskEngine(orderGroup, marketGroup);
+    }
+
+    /** A policy and the target it applies to, as the registry describes one: 0 means every strategy or listing. */
+    public record ScopedPolicy(int strategyId, int listingId, Configurable policy) {
+        public ScopedPolicy {
+            if (strategyId < 0 || listingId < 0) {
+                throw new IllegalArgumentException(
+                        "strategyId and listingId must be 0 (all) or positive, got " + strategyId + "/" + listingId);
+            }
+        }
+    }
+
+    /**
+     * An engine whose policies are fixed at construction, each placed in the group its target selects exactly as
+     * {@link RiskSyncAgent} places registry policies. For backtests, which run a strategy under the limits it would
+     * have live without a sync agent.
+     */
+    public static RiskEngine withScopedPolicies(final List<ScopedPolicy> policies) {
+        final RiskEngineSnapshot initial = new RiskEngineSnapshot();
+        for (final ScopedPolicy scoped : policies) {
+            initial.addPolicy(scoped.strategyId(), scoped.listingId(), scoped.policy());
+        }
+        return new RiskEngine(initial, null, 0, 0);
     }
 
     void publishSnapshot(final RiskEngineSnapshot newSnapshot) {
