@@ -3,6 +3,8 @@ package group.gnometrading.oms.risk;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import group.gnometrading.oms.pnl.PriceSlotRegistry;
@@ -13,6 +15,7 @@ import group.gnometrading.oms.risk.policy.MaxOrderSizePolicy;
 import group.gnometrading.oms.risk.policy.MaxTotalPnlLossPolicy;
 import group.gnometrading.oms.state.OrderStateManager;
 import group.gnometrading.schemas.Order;
+import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.schemas.Side;
 import java.time.Duration;
 import java.util.List;
@@ -44,12 +47,12 @@ class RiskEngineTest {
     void testRegistryBackedEngineBlocksNewOrdersUntilTheFirstRefresh() {
         final long[] now = {1_000};
         final RiskEngine engine = RiskEngine.syncedFromRegistry(() -> now[0], Duration.ofSeconds(30), 1);
-        assertFalse(engine.check(order, positions, orders, 1, 1));
+        assertNotNull(engine.check(order, positions, orders, 1, 1));
         assertTrue(engine.isBlocked(1, 1));
 
         engine.recordRefresh(now[0]);
         engine.applyChanges(new RecordingKillHandler());
-        assertTrue(engine.check(order, positions, orders, 1, 1));
+        assertNull(engine.check(order, positions, orders, 1, 1));
     }
 
     @Test
@@ -79,9 +82,34 @@ class RiskEngineTest {
         snapshot.killedListings.add(200);
         engine.publishSnapshot(snapshot);
 
-        assertFalse(engine.check(order, positions, orders, 7, 1));
-        assertFalse(engine.check(order, positions, orders, 1, 200));
-        assertTrue(engine.check(order, positions, orders, 8, 201));
+        assertNotNull(engine.check(order, positions, orders, 7, 1));
+        assertNotNull(engine.check(order, positions, orders, 1, 200));
+        assertNull(engine.check(order, positions, orders, 8, 201));
+    }
+
+    @Test
+    void testAHaltSaysWhyAndALimitNamesItsPolicy() {
+        final long[] now = {1_000};
+        final RiskEngine engine = RiskEngine.syncedFromRegistry(() -> now[0], Duration.ofSeconds(30), 1);
+        assertEquals(RejectReason.HALTED, engine.check(order, positions, orders, 7, 1));
+        assertEquals(RiskEngine.HALT_STALE, engine.haltCause());
+
+        engine.recordRefresh(now[0]);
+        final RiskEngineSnapshot snapshot = new RiskEngineSnapshot();
+        snapshot.killedListings.add(200);
+        snapshot.addPolicy(7, 0, new MaxOrderSizePolicy(0), 37);
+        engine.publishSnapshot(snapshot);
+        engine.applyChanges(new RecordingKillHandler());
+
+        assertEquals(RejectReason.HALTED, engine.check(order, positions, orders, 8, 200));
+        assertEquals(RiskEngine.HALT_KILLED, engine.haltCause());
+
+        assertEquals(RejectReason.RISK_LIMIT_EXCEEDED, engine.check(order, positions, orders, 7, 1));
+        assertEquals(37, engine.violatedPolicyId());
+
+        engine.latch(7);
+        assertEquals(RejectReason.HALTED, engine.check(order, positions, orders, 7, 1));
+        assertEquals(RiskEngine.HALT_LATCHED, engine.haltCause());
     }
 
     @Test
@@ -90,7 +118,7 @@ class RiskEngineTest {
         final RiskEngineSnapshot killed = new RiskEngineSnapshot();
         killed.globalKill = true;
         engine.publishSnapshot(killed);
-        assertFalse(engine.check(order, positions, orders, 8, 201));
+        assertNotNull(engine.check(order, positions, orders, 8, 201));
     }
 
     @Test
@@ -125,8 +153,8 @@ class RiskEngineTest {
         engine.forEachKilledScope(resweep);
         assertEquals("pair 7/200;", resweep.events.toString());
         assertTrue(engine.hasKills());
-        assertFalse(engine.check(order, positions, orders, 7, 200));
-        assertTrue(engine.check(order, positions, orders, 7, 201));
+        assertNotNull(engine.check(order, positions, orders, 7, 200));
+        assertNull(engine.check(order, positions, orders, 7, 201));
     }
 
     @Test
@@ -191,7 +219,7 @@ class RiskEngineTest {
         engine.applyChanges(handler);
 
         assertEquals("strategy 7;", handler.events.toString());
-        assertTrue(engine.check(order, positions, orders, 7, 1));
+        assertNull(engine.check(order, positions, orders, 7, 1));
     }
 
     // --- latch ---
@@ -201,7 +229,7 @@ class RiskEngineTest {
         final RiskEngine engine = new RiskEngine();
         assertTrue(engine.latch(7));
         assertFalse(engine.latch(7), "already halted");
-        assertFalse(engine.check(order, positions, orders, 7, 1));
+        assertNotNull(engine.check(order, positions, orders, 7, 1));
         assertEquals(List.of(7), RiskSnapshots.drainLatchedHalts(engine));
         assertEquals(List.of(), RiskSnapshots.drainLatchedHalts(engine), "each halt is handed over once");
 
@@ -210,11 +238,11 @@ class RiskEngineTest {
         engine.publishSnapshot(confirmed);
         engine.applyChanges(new RecordingKillHandler());
         assertFalse(engine.isLatched(7));
-        assertFalse(engine.check(order, positions, orders, 7, 1), "now held by the registry kill");
+        assertNotNull(engine.check(order, positions, orders, 7, 1), "now held by the registry kill");
 
         engine.publishSnapshot(new RiskEngineSnapshot());
         engine.applyChanges(new RecordingKillHandler());
-        assertTrue(engine.check(order, positions, orders, 7, 1), "the operator resumed it");
+        assertNull(engine.check(order, positions, orders, 7, 1), "the operator resumed it");
     }
 
     @Test
@@ -229,7 +257,7 @@ class RiskEngineTest {
         engine.applyChanges(new RecordingKillHandler());
 
         assertFalse(engine.isLatched(7));
-        assertTrue(engine.check(order, positions, orders, 7, 1));
+        assertNull(engine.check(order, positions, orders, 7, 1));
     }
 
     @Test
@@ -242,7 +270,7 @@ class RiskEngineTest {
 
         engine.publishSnapshot(new RiskEngineSnapshot());
         engine.applyChanges(new RecordingKillHandler());
-        assertFalse(engine.check(order, positions, orders, 7, 1));
+        assertNotNull(engine.check(order, positions, orders, 7, 1));
     }
 
     @Test
@@ -261,7 +289,7 @@ class RiskEngineTest {
     @Test
     void testCheckReturnsTrueWithNoPolicies() {
         final RiskEngine engine = new RiskEngine();
-        assertTrue(engine.check(order, positions, orders, 0, 0));
+        assertNull(engine.check(order, positions, orders, 0, 0));
     }
 
     @Test
@@ -269,7 +297,7 @@ class RiskEngineTest {
         final OrderPolicyGroup globalOrder = buildOrderGroup(new MaxOrderSizePolicy(0));
         final MarketPolicyGroup globalMarket = new MarketPolicyGroup(RiskEngineSnapshot.MAX_POLICIES_PER_GROUP);
         final RiskEngine engine = new RiskEngine(globalOrder, globalMarket);
-        assertFalse(engine.check(order, positions, orders, 0, 0));
+        assertNotNull(engine.check(order, positions, orders, 0, 0));
     }
 
     @Test
@@ -278,7 +306,7 @@ class RiskEngineTest {
         final MarketPolicyGroup globalMarket = new MarketPolicyGroup(RiskEngineSnapshot.MAX_POLICIES_PER_GROUP);
         final RiskEngine engine = new RiskEngine(globalOrder, globalMarket);
         order.encoder.size(5);
-        assertTrue(engine.check(order, positions, orders, 0, 0));
+        assertNull(engine.check(order, positions, orders, 0, 0));
     }
 
     @Test
@@ -292,7 +320,7 @@ class RiskEngineTest {
         final MarketPolicyGroup globalMarket = new MarketPolicyGroup(RiskEngineSnapshot.MAX_POLICIES_PER_GROUP);
         final RiskEngine engine = new RiskEngine(globalOrder, globalMarket);
         order.encoder.size(5);
-        assertFalse(engine.check(order, positions, orders, 0, 0));
+        assertNotNull(engine.check(order, positions, orders, 0, 0));
     }
 
     @Test
@@ -306,8 +334,8 @@ class RiskEngineTest {
         snapshot.strategyOrderGroups.put(7, stratGroup);
         engine.publishSnapshot(snapshot);
 
-        assertFalse(engine.check(order, positions, orders, 7, 0));
-        assertTrue(engine.check(order, positions, orders, 8, 0)); // different strategy — passes
+        assertNotNull(engine.check(order, positions, orders, 7, 0));
+        assertNull(engine.check(order, positions, orders, 8, 0)); // different strategy — passes
     }
 
     @Test
@@ -321,8 +349,8 @@ class RiskEngineTest {
         snapshot.listingOrderGroups.put(200, listingGroup);
         engine.publishSnapshot(snapshot);
 
-        assertFalse(engine.check(order, positions, orders, 0, 200));
-        assertTrue(engine.check(order, positions, orders, 0, 201)); // different listing — passes
+        assertNotNull(engine.check(order, positions, orders, 0, 200));
+        assertNull(engine.check(order, positions, orders, 0, 201)); // different listing — passes
     }
 
     // --- checkMarketPolicies() ---
@@ -344,6 +372,21 @@ class RiskEngineTest {
         positions.getStrategyPosition(1, 100).realizedPnl = -200L;
 
         assertTrue(engine.checkMarketPolicies(1, 100, positions, orders));
+    }
+
+    @Test
+    void testABreachNamesThePolicyThatTripped() {
+        final RiskEngine engine = new RiskEngine();
+        final RiskEngineSnapshot snapshot = new RiskEngineSnapshot();
+        snapshot.addPolicy(
+                1, 0, new MaxTotalPnlLossPolicy(new SharedPriceBuffer(1), new PriceSlotRegistry(1), true, 100L), 12);
+        engine.publishSnapshot(snapshot);
+
+        positions.applyStrategyFill(1, 100, Side.Bid, 1, 100, 0);
+        positions.getStrategyPosition(1, 100).realizedPnl = -200L;
+
+        assertTrue(engine.checkMarketPolicies(1, 100, positions, orders));
+        assertEquals(12, engine.breachedPolicyId());
     }
 
     @Test
@@ -438,14 +481,14 @@ class RiskEngineTest {
     @Test
     void testPublishSnapshotUpdatesEngineState() {
         final RiskEngine engine = new RiskEngine();
-        assertTrue(engine.check(order, positions, orders, 0, 0)); // empty snapshot — passes
+        assertNull(engine.check(order, positions, orders, 0, 0)); // empty snapshot — passes
 
         final RiskEngineSnapshot snapshot = new RiskEngineSnapshot();
         snapshot.globalOrderGroup.policies[0] = new MaxOrderSizePolicy(0);
         snapshot.globalOrderGroup.count = 1;
         engine.publishSnapshot(snapshot);
 
-        assertFalse(engine.check(order, positions, orders, 0, 0)); // now blocked
+        assertNotNull(engine.check(order, positions, orders, 0, 0)); // now blocked
     }
 
     // --- Helpers ---
@@ -459,8 +502,7 @@ class RiskEngineTest {
 
     private static MarketPolicyGroup buildMarketGroup(final MarketRiskPolicy policy) {
         final MarketPolicyGroup group = new MarketPolicyGroup(RiskEngineSnapshot.MAX_POLICIES_PER_GROUP);
-        group.policies[0] = policy;
-        group.count = 1;
+        group.add(policy, 0);
         return group;
     }
 

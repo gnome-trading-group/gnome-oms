@@ -8,11 +8,13 @@ import group.gnometrading.logging.Logger;
 import group.gnometrading.oms.action.ActionSink;
 import group.gnometrading.oms.intent.IntentResolver;
 import group.gnometrading.oms.intent.VenueCapabilities;
+import group.gnometrading.oms.ledger.LedgerSink;
 import group.gnometrading.oms.pnl.PriceSlotRegistry;
 import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.Position;
 import group.gnometrading.oms.position.PositionTracker;
 import group.gnometrading.oms.risk.RiskEngine;
+import group.gnometrading.oms.state.OrderState;
 import group.gnometrading.oms.state.OrderStateManager;
 import group.gnometrading.oms.state.TrackedOrder;
 import group.gnometrading.schemas.CancelOrder;
@@ -32,12 +34,21 @@ import group.gnometrading.sm.ListingSpec;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.function.IntConsumer;
+import org.agrona.collections.Int2IntHashMap;
 import org.agrona.concurrent.EpochNanoClock;
 
 public final class OrderManagementSystem {
 
     private static final long RESWEEP_INTERVAL_NANOS = TimeUnit.SECONDS.toNanos(1);
     static final int RESWEEP_CHECK_PASSES = 1024;
+    static final int LEDGER_CHECK_PASSES = 1024;
+    // Listing rules, numbered as LogMessage.ORDER_REJECTED_EXCHANGE_CONSTRAINTS names them.
+    private static final int NO_RULE = -1;
+    private static final int RULE_LOT_SIZE = 0;
+    private static final int RULE_MIN_SIZE = 1;
+    private static final int RULE_TICK = 2;
+    private static final int RULE_MIN_NOTIONAL = 3;
+    private static final int NOT_HALTED = -1;
 
     private final Logger logger;
 
@@ -48,6 +59,12 @@ public final class OrderManagementSystem {
     private final SharedPriceBuffer priceBuffer;
     private final PriceSlotRegistry priceSlotRegistry;
     private final IntHashMap<IntentResolver> resolvers;
+    // The halt cause last logged per strategy, so a halt is logged when it starts rather than for every order.
+    private final Int2IntHashMap loggedHaltCauses = new Int2IntHashMap(NOT_HALTED);
+    private final LedgerSink ledger;
+    private final IntConsumer ledgerFailureLatch = this::latchForLedger;
+    private int passesUntilLedgerCheck;
+    private boolean ledgerFailing;
     private final Order riskCheckOrder = new Order();
     private final OrderExecutionReport syntheticReject = new OrderExecutionReport();
     private final RiskCheckingSink riskCheckingSink = new RiskCheckingSink();
@@ -70,8 +87,10 @@ public final class OrderManagementSystem {
             SecurityMaster securityMaster,
             SharedPriceBuffer priceBuffer,
             PriceSlotRegistry priceSlotRegistry,
+            LedgerSink ledger,
             EpochNanoClock clock) {
         this.logger = logger;
+        this.ledger = ledger;
         this.clock = clock;
         this.orderStateManager = orderStateManager;
         this.positionTracker = positionTracker;
@@ -136,6 +155,35 @@ public final class OrderManagementSystem {
     }
 
     /**
+     * Halts every strategy, cancelling its working orders, once the ledger can't record what happens next. Called on
+     * every pass of the OMS loop; reads the clock once every {@link #LEDGER_CHECK_PASSES} passes. A registry outage
+     * must not let resting orders keep filling with nothing recorded, which a restart would then never know about.
+     */
+    public void checkLedger(ActionSink sink) {
+        if (--passesUntilLedgerCheck > 0) {
+            return;
+        }
+        passesUntilLedgerCheck = LEDGER_CHECK_PASSES;
+        if (!ledger.isFailing(clock.nanoTime())) {
+            ledgerFailing = false;
+            return;
+        }
+        if (!ledgerFailing) {
+            ledgerFailing = true;
+            logger.log(LogMessage.LEDGER_FAILING_HALTED);
+        }
+        // Checked again while it lasts, so an operator resuming the strategy can't trade past a broken ledger.
+        riskCheckingSink.delegate = sink;
+        positionTracker.forEachStrategyId(ledgerFailureLatch);
+    }
+
+    private void latchForLedger(final int strategyId) {
+        if (riskEngine.latch(strategyId)) {
+            scopeCanceller.cancel(strategyId, IntentResolver.ALL_LISTINGS);
+        }
+    }
+
+    /**
      * Re-checks loss limits for every strategy holding a position on a listing whose mark has moved since the last
      * call, so a breach is caught on the tick that causes it even with no order activity. Called at the end of each
      * OMS pass, after order handling; with no price change it costs one load.
@@ -190,9 +238,11 @@ public final class OrderManagementSystem {
         long workingBefore = tracked.workingQty();
         int strategyId = tracked.getStrategyId();
         int listingId = resolveListingId(report.decoder.exchangeId(), report.decoder.securityId());
+        final boolean awaitingAck = tracked.getState() == OrderState.PENDING_NEW;
 
         orderStateManager.applyExecutionReport(report);
         updatePositionTracking(report, tracked, strategyId, workingBefore, listingId, bookFill);
+        recordInLedger(report, tracked, strategyId, listingId, awaitingAck, bookFill);
         final boolean terminal = tracked.getState().isTerminal();
         if (terminal) {
             // Before the resolver runs: it may send the replacement queued behind this order's cancel.
@@ -207,9 +257,50 @@ public final class OrderManagementSystem {
         checkMarketRisk(strategyId, listingId);
     }
 
+    private void recordInLedger(
+            OrderExecutionReport report,
+            TrackedOrder tracked,
+            int strategyId,
+            int listingId,
+            boolean awaitingAck,
+            boolean bookFill) {
+        final long counter = tracked.getClientOidCounter();
+        if (awaitingAck && report.decoder.execType() != ExecType.REJECT) {
+            ledger.orderAcked(strategyId, listingId, tracked.getExchangeId(), counter, report);
+        }
+        if (bookFill) {
+            ledger.fillBooked(
+                    strategyId,
+                    listingId,
+                    counter,
+                    tracked.getFilledQty(),
+                    tracked.getSide(),
+                    report.decoder.filledQty(),
+                    report.decoder.fillPrice(),
+                    feeOf(report),
+                    eventTimeOf(report),
+                    positionTracker.getStrategyPosition(strategyId, listingId));
+        }
+        if (tracked.getState().isTerminal()) {
+            ledger.orderClosed(
+                    strategyId, listingId, tracked.getExchangeId(), counter, tracked.getFilledQty(), clock.nanoTime());
+        }
+    }
+
     public void onOrderAccepted(Order order) {
         orderStateManager.trackOrder(order);
         int listingId = resolveListingId(order.decoder.exchangeId(), order.decoder.securityId());
+        // Recorded before the order is sent, so a later session can recognise it on the venue even if this process
+        // dies before the venue answers.
+        ledger.orderOpened(
+                order.getClientOidStrategyId(),
+                listingId,
+                order.decoder.exchangeId(),
+                order.getClientOidCounter(),
+                order.decoder.side(),
+                order.decoder.price(),
+                order.decoder.size(),
+                clock.nanoTime());
         positionTracker.addStrategyLeaves(
                 order.getClientOidStrategyId(), listingId, order.decoder.side(), order.decoder.size());
         positionTracker.addOpenOrder(order.getClientOidStrategyId(), listingId);
@@ -271,6 +362,7 @@ public final class OrderManagementSystem {
     private void checkMarketRisk(final int strategyId, final int listingId) {
         if (riskEngine.checkMarketPolicies(strategyId, listingId, positionTracker, orderStateManager)
                 && riskEngine.latch(strategyId)) {
+            logger.log(LogMessage.STRATEGY_LATCHED_LOSS_LIMIT, strategyId, listingId, riskEngine.breachedPolicyId());
             scopeCanceller.cancel(strategyId, IntentResolver.ALL_LISTINGS);
         }
     }
@@ -389,6 +481,15 @@ public final class OrderManagementSystem {
         return exec == ExecType.FILL || exec == ExecType.PARTIAL_FILL;
     }
 
+    private static long feeOf(OrderExecutionReport report) {
+        return report.decoder.fee() == OrderExecutionReportDecoder.feeNullValue() ? 0 : report.decoder.fee();
+    }
+
+    private static long eventTimeOf(OrderExecutionReport report) {
+        final long event = report.decoder.timestampEvent();
+        return event == OrderExecutionReportDecoder.timestampEventNullValue() ? report.decoder.timestampRecv() : event;
+    }
+
     /** A fill without its quantity or price cannot be booked. */
     private static boolean isMalformedFill(OrderExecutionReport report) {
         return report.decoder.filledQty() == OrderExecutionReportDecoder.filledQtyNullValue()
@@ -405,14 +506,13 @@ public final class OrderManagementSystem {
             boolean bookFill) {
         adjustLeaves(strategyId, listingId, tracked.getSide(), tracked.workingQty() - workingBefore);
         if (bookFill) {
-            long fee = report.decoder.fee() == OrderExecutionReportDecoder.feeNullValue() ? 0 : report.decoder.fee();
             positionTracker.applyStrategyFill(
                     strategyId,
                     listingId,
                     tracked.getSide(),
                     report.decoder.filledQty(),
                     report.decoder.fillPrice(),
-                    fee);
+                    feeOf(report));
         }
     }
 
@@ -450,22 +550,70 @@ public final class OrderManagementSystem {
         public void onNewOrder(final Order order) {
             final int strategyId = order.getClientOidStrategyId();
             final int listingId = resolveListingId(order.decoder.exchangeId(), order.decoder.securityId());
-            final RejectReason violation = exchangeConstraintViolation(
-                    listingId, order.decoder.side(), order.decoder.price(), order.decoder.size());
-            if (violation != null) {
-                logger.log(LogMessage.ORDER_REJECTED_EXCHANGE_CONSTRAINTS, order.getClientOidCounter());
-                emitNewOrderRejection(order, listingId, violation);
+            final int rule =
+                    brokenListingRule(listingId, order.decoder.side(), order.decoder.price(), order.decoder.size());
+            if (rule != NO_RULE) {
+                logConstraintRejection(order, listingId, rule);
+                emitNewOrderRejection(order, listingId, rejectReasonFor(rule));
                 return;
             }
             // A full order book is a limit like any other: refuse the order rather than fail the OMS.
-            if (!orderStateManager.isFull()
-                    && riskEngine.check(order, positionTracker, orderStateManager, strategyId, listingId)) {
+            final boolean bookFull = orderStateManager.isFull();
+            final RejectReason riskReject = bookFull
+                    ? RejectReason.RISK_LIMIT_EXCEEDED
+                    : riskEngine.check(order, positionTracker, orderStateManager, strategyId, listingId);
+            if (riskReject == null) {
+                loggedHaltCauses.remove(strategyId);
                 onOrderAccepted(order);
                 delegate.onNewOrder(order);
             } else {
-                logger.log(LogMessage.ORDER_REJECTED_RISK_CHECK, order.getClientOidCounter());
-                emitNewOrderRejection(order, listingId, RejectReason.RISK_LIMIT_EXCEEDED);
+                logRiskRejection(order, strategyId, listingId, riskReject, bookFull);
+                emitNewOrderRejection(order, listingId, riskReject);
             }
+        }
+
+        /**
+         * Names what refused the order: the policy it broke (0 for a limit with no registry policy), or why the
+         * strategy is halted. A halt is logged once when it starts refusing orders, not for each order it refuses.
+         */
+        private void logRiskRejection(
+                final Order order,
+                final int strategyId,
+                final int listingId,
+                final RejectReason reason,
+                final boolean bookFull) {
+            if (reason == RejectReason.HALTED) {
+                final int cause = riskEngine.haltCause();
+                if (loggedHaltCauses.get(strategyId) != cause) {
+                    loggedHaltCauses.put(strategyId, cause);
+                    logger.log(
+                            LogMessage.ORDER_REJECTED_HALTED,
+                            order.getClientOidCounter(),
+                            strategyId,
+                            listingId,
+                            cause);
+                }
+                return;
+            }
+            logger.log(
+                    LogMessage.ORDER_REJECTED_RISK_CHECK,
+                    order.getClientOidCounter(),
+                    listingId,
+                    order.decoder.side().value(),
+                    order.decoder.price(),
+                    order.decoder.size(),
+                    bookFull ? 0 : riskEngine.violatedPolicyId());
+        }
+
+        private void logConstraintRejection(final Order order, final int listingId, final int rule) {
+            logger.log(
+                    LogMessage.ORDER_REJECTED_EXCHANGE_CONSTRAINTS,
+                    order.getClientOidCounter(),
+                    listingId,
+                    order.decoder.side().value(),
+                    order.decoder.price(),
+                    order.decoder.size(),
+                    rule);
         }
 
         private void emitNewOrderRejection(final Order order, final int listingId, final RejectReason reason) {
@@ -475,7 +623,6 @@ public final class OrderManagementSystem {
                     .encoder
                     .exchangeId(order.decoder.exchangeId())
                     .securityId(order.decoder.securityId())
-                    .orderId(0)
                     .execType(ExecType.REJECT)
                     .orderStatus(OrderStatus.REJECTED)
                     .rejectReason(reason)
@@ -529,23 +676,23 @@ public final class OrderManagementSystem {
                     .orderType(original.getOrderType())
                     .timeInForce(original.getTimeInForce());
             final int listingId = resolveListingId(modify.decoder.exchangeId(), modify.decoder.securityId());
-            final RejectReason violation =
-                    exchangeConstraintViolation(listingId, original.getSide(), modify.decoder.price(), newLeaves);
-            if (violation != null) {
-                logger.log(LogMessage.ORDER_REJECTED_EXCHANGE_CONSTRAINTS, counter);
-                emitModifyRejection(modify, original, listingId, violation);
+            final int rule = brokenListingRule(listingId, original.getSide(), modify.decoder.price(), newLeaves);
+            if (rule != NO_RULE) {
+                logConstraintRejection(riskCheckOrder, listingId, rule);
+                emitModifyRejection(modify, original, listingId, rejectReasonFor(rule));
                 return;
             }
-            if (riskEngine.check(
-                    riskCheckOrder, positionTracker, orderStateManager, original.getStrategyId(), listingId)) {
+            final RejectReason riskReject = riskEngine.check(
+                    riskCheckOrder, positionTracker, orderStateManager, original.getStrategyId(), listingId);
+            if (riskReject == null) {
                 final long workingBefore = original.workingQty();
                 original.modify(modify.decoder.price(), modify.decoder.size());
                 adjustLeaves(
                         original.getStrategyId(), listingId, original.getSide(), original.workingQty() - workingBefore);
                 delegate.onModify(modify);
             } else {
-                logger.log(LogMessage.ORDER_REJECTED_RISK_CHECK, counter);
-                emitModifyRejection(modify, original, listingId, RejectReason.RISK_LIMIT_EXCEEDED);
+                logRiskRejection(riskCheckOrder, original.getStrategyId(), listingId, riskReject, false);
+                emitModifyRejection(modify, original, listingId, riskReject);
             }
         }
 
@@ -557,7 +704,6 @@ public final class OrderManagementSystem {
                     .encoder
                     .exchangeId(modify.decoder.exchangeId())
                     .securityId(modify.decoder.securityId())
-                    .orderId(0)
                     .execType(ExecType.CANCEL_REJECT)
                     .orderStatus(OrderStatus.NEW)
                     .rejectReason(reason)
@@ -584,24 +730,28 @@ public final class OrderManagementSystem {
         }
 
         /**
-         * The listing rule an order breaks, or null if it breaks none. A listing without a spec, or with a
-         * zero field, is not checked on that field.
+         * The listing rule an order breaks, or {@link #NO_RULE}. A listing without a spec, or with a zero field, is
+         * not checked on that field.
          */
-        private RejectReason exchangeConstraintViolation(int listingId, Side side, long price, long size) {
+        private int brokenListingRule(int listingId, Side side, long price, long size) {
             ListingSpec spec = securityMaster.getListingSpec(listingId);
             if (spec == null) {
-                return null;
+                return NO_RULE;
             }
             if (spec.lotSize() > 0 && size % spec.lotSize() != 0) {
-                return RejectReason.INVALID_SIZE;
+                return RULE_LOT_SIZE;
             }
             if (size < spec.minSize()) {
-                return RejectReason.INVALID_SIZE;
+                return RULE_MIN_SIZE;
             }
             if (isOffTick(spec, price)) {
-                return RejectReason.INVALID_PRICE;
+                return RULE_TICK;
             }
-            return isBelowMinNotional(spec, listingId, side, price, size) ? RejectReason.INVALID_SIZE : null;
+            return isBelowMinNotional(spec, listingId, side, price, size) ? RULE_MIN_NOTIONAL : NO_RULE;
+        }
+
+        private RejectReason rejectReasonFor(int rule) {
+            return rule == RULE_TICK ? RejectReason.INVALID_PRICE : RejectReason.INVALID_SIZE;
         }
 
         // A market order has no price to check.

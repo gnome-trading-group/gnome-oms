@@ -214,7 +214,7 @@ public final class RiskSyncAgent implements GnomeAgent {
             }
             final Configurable policy = policyFactory.create(type, record.listingId == 0);
             policy.reconfigure(record.parametersJson);
-            snapshot.addPolicy(record.strategyId, record.listingId, policy);
+            snapshot.addPolicy(record.strategyId, record.listingId, policy, record.policyId);
         } catch (RuntimeException e) {
             logger.logf(
                     LogMessage.UNKNOWN_ERROR,

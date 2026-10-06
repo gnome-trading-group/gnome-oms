@@ -42,6 +42,24 @@ public final class DefaultPositionTracker implements PositionTracker {
         slotRegistry.register(slot, strategyId, listingId);
     }
 
+    /**
+     * Starts a strategy on a listing holding what earlier sessions left it, before any thread trades. The firm
+     * position takes the same inventory, as though bought at its average entry price.
+     */
+    public void seedStrategyPosition(int strategyId, int listingId, long netQuantity, long totalCost, long version) {
+        Position stratPosition = getOrCreateStrategyPosition(strategyId, listingId);
+        stratPosition.seed(netQuantity, totalCost, version);
+        syncToSharedBuffer(stratPosition);
+        if (netQuantity != 0) {
+            getOrCreatePosition(positions, listingId)
+                    .applyFill(
+                            netQuantity > 0 ? Side.Bid : Side.Ask,
+                            Math.abs(netQuantity),
+                            stratPosition.getAvgEntryPrice(),
+                            0);
+        }
+    }
+
     @Override
     public Position getPosition(int listingId) {
         return positions.get(listingId);

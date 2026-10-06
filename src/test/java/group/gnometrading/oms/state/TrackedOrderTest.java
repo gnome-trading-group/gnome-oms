@@ -241,7 +241,6 @@ class TrackedOrderTest {
         report.encoder
                 .exchangeId(1)
                 .securityId(42)
-                .orderId(0)
                 .execType(type)
                 .orderStatus(OrderStatus.NULL_VAL)
                 .filledQty(filledQty)

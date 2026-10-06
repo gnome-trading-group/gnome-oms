@@ -8,6 +8,7 @@ import group.gnometrading.RegistryConnection;
 import group.gnometrading.SecurityMaster;
 import group.gnometrading.logging.NullLogger;
 import group.gnometrading.oms.action.ActionSink;
+import group.gnometrading.oms.ledger.LedgerSink;
 import group.gnometrading.oms.pnl.PriceSlotRegistry;
 import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.DefaultPositionTracker;
@@ -82,6 +83,7 @@ public final class OmsTestHarness {
                 securityMaster,
                 priceBuffer,
                 priceSlots,
+                LedgerSink.NONE,
                 clock);
         this.sink = new RecordingSink();
         stubDefaultListing();
@@ -280,7 +282,6 @@ public final class OmsTestHarness {
         report.encoder
                 .exchangeId(exchangeId)
                 .securityId(securityId)
-                .orderId(0)
                 .execType(execType)
                 .orderStatus(OrderStatus.NULL_VAL)
                 .filledQty(filledQty)
@@ -427,7 +428,6 @@ public final class OmsTestHarness {
         report.encoder
                 .exchangeId(exchangeId)
                 .securityId(securityId)
-                .orderId(0)
                 .execType(execType)
                 .orderStatus(OrderStatus.NULL_VAL)
                 .filledQty(filledQty)

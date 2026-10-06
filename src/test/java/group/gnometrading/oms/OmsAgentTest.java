@@ -6,6 +6,7 @@ import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.when;
 
 import group.gnometrading.logging.NullLogger;
+import group.gnometrading.oms.ledger.LedgerSink;
 import group.gnometrading.oms.pnl.PriceSlotRegistry;
 import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.DefaultPositionTracker;
@@ -89,6 +90,7 @@ class OmsAgentTest {
                 securityMaster,
                 new SharedPriceBuffer(1),
                 new PriceSlotRegistry(1),
+                LedgerSink.NONE,
                 () -> 0L);
 
         omsAgent = new OmsAgent(
@@ -275,7 +277,6 @@ class OmsAgentTest {
         report.encoder
                 .exchangeId(EXCHANGE_ID)
                 .securityId(SECURITY_ID)
-                .orderId(0)
                 .execType(execType)
                 .orderStatus(OrderStatus.NULL_VAL)
                 .filledQty(0)

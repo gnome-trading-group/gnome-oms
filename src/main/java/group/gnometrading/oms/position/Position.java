@@ -19,6 +19,11 @@ public final class Position {
     public long leavesSellQty;
     /** Orders tracked by the OMS and not yet released, including ones awaiting an ack or a cancel. OMS only. */
     public int openOrders;
+    /**
+     * Counts the fills that built this position, carried on from earlier sessions when it is inherited. The ledger
+     * keeps the position with the highest version, so a late or replayed write can never roll it back.
+     */
+    public long version;
 
     int sharedSlot = -1;
 
@@ -31,12 +36,21 @@ public final class Position {
         this.leavesBuyQty = 0;
         this.leavesSellQty = 0;
         this.openOrders = 0;
+        this.version = 0;
         this.sharedSlot = -1;
+    }
+
+    /** Takes on inventory a previous session left; realized PnL and fees belong to that session and start at 0. */
+    void seed(long netQty, long cost, long seededVersion) {
+        this.netQuantity = netQty;
+        this.totalCost = cost;
+        this.version = seededVersion;
     }
 
     public void applyFill(Side side, long qty, long price, long fee) {
         long signedQty = (side == Side.Bid) ? qty : -qty;
         totalFees += fee;
+        version++;
 
         if (netQuantity == 0) {
             netQuantity = signedQty;

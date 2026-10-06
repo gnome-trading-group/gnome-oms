@@ -7,6 +7,7 @@ import group.gnometrading.collections.buffer.RingBuffer;
 import group.gnometrading.oms.position.PositionTracker;
 import group.gnometrading.oms.state.OrderStateManager;
 import group.gnometrading.schemas.Order;
+import group.gnometrading.schemas.RejectReason;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
@@ -27,6 +28,14 @@ import org.agrona.concurrent.EpochClock;
  * global groups directly.
  */
 public final class RiskEngine {
+
+    // Halt causes, numbered as LogMessage.ORDER_REJECTED_HALTED names them.
+    /** Risk data is stale: the registry hasn't been reached recently enough to trust that nothing was killed. */
+    public static final int HALT_STALE = 0;
+    /** A kill switch covers the order's strategy, session or listing. */
+    public static final int HALT_KILLED = 1;
+    /** The strategy latched itself: a loss limit breached, or the ledger stopped keeping up. */
+    public static final int HALT_LATCHED = 2;
 
     // The sync thread drains this at least once a second, so it only fills if this many strategies breach in
     // between. A halt that doesn't fit stays latched here, it just isn't recorded for an operator to resume.
@@ -49,6 +58,9 @@ public final class RiskEngine {
     private volatile long lastRefreshMs = NEVER;
     private volatile long appliedSequence;
     private boolean stale;
+    private int violatedPolicyId;
+    private int breachedPolicyId;
+    private int haltCause;
     private int passesUntilStaleCheck;
 
     private final IntConsumer releaseLatch = this::releaseLatch;
@@ -114,7 +126,7 @@ public final class RiskEngine {
     public static RiskEngine withOrderPolicies(final OrderRiskPolicy... policies) {
         final OrderPolicyGroup orderGroup = new OrderPolicyGroup(Math.max(policies.length, 1));
         for (final OrderRiskPolicy p : policies) {
-            orderGroup.policies[orderGroup.count++] = p;
+            orderGroup.add(p, 0);
         }
         return new RiskEngine(orderGroup, new MarketPolicyGroup(1));
     }
@@ -127,11 +139,11 @@ public final class RiskEngine {
             final OrderRiskPolicy[] orderPolicies, final MarketRiskPolicy[] marketPolicies) {
         final OrderPolicyGroup orderGroup = new OrderPolicyGroup(Math.max(orderPolicies.length, 1));
         for (final OrderRiskPolicy p : orderPolicies) {
-            orderGroup.policies[orderGroup.count++] = p;
+            orderGroup.add(p, 0);
         }
         final MarketPolicyGroup marketGroup = new MarketPolicyGroup(Math.max(marketPolicies.length, 1));
         for (final MarketRiskPolicy p : marketPolicies) {
-            marketGroup.policies[marketGroup.count++] = p;
+            marketGroup.add(p, 0);
         }
         return new RiskEngine(orderGroup, marketGroup);
     }
@@ -154,7 +166,7 @@ public final class RiskEngine {
     public static RiskEngine withScopedPolicies(final List<ScopedPolicy> policies) {
         final RiskEngineSnapshot initial = new RiskEngineSnapshot();
         for (final ScopedPolicy scoped : policies) {
-            initial.addPolicy(scoped.strategyId(), scoped.listingId(), scoped.policy());
+            initial.addPolicy(scoped.strategyId(), scoped.listingId(), scoped.policy(), 0);
         }
         return new RiskEngine(initial, null, 0, 0);
     }
@@ -349,17 +361,31 @@ public final class RiskEngine {
         void onStrategyListingKilled(int strategyId, int listingId);
     }
 
-    public boolean check(
+    /**
+     * Why an order may not go out, or null if it may. {@link RejectReason#HALTED} means nothing may trade in this
+     * scope, and {@link #haltCause()} says why; {@link RejectReason#RISK_LIMIT_EXCEEDED} means this order broke a
+     * limit, and {@link #violatedPolicyId()} names it. OMS thread only.
+     */
+    public RejectReason check(
             final Order order,
             final PositionTracker positions,
             final OrderStateManager orders,
             final int strategyId,
             final int listingId) {
         final RiskEngineSnapshot s = snapshot.get();
-        if (blocked(s, strategyId, listingId)) {
-            return false;
+        if (stale) {
+            haltCause = HALT_STALE;
+            return RejectReason.HALTED;
         }
-        return checkOrderGroup(s.globalOrderGroup, order, positions, orders, strategyId, listingId)
+        if (s.blocks(strategyId, listingId)) {
+            haltCause = HALT_KILLED;
+            return RejectReason.HALTED;
+        }
+        if (latchedStrategies.contains(strategyId)) {
+            haltCause = HALT_LATCHED;
+            return RejectReason.HALTED;
+        }
+        final boolean passes = checkOrderGroup(s.globalOrderGroup, order, positions, orders, strategyId, listingId)
                 && checkOrderGroup(s.getStrategyOrderGroup(strategyId), order, positions, orders, strategyId, listingId)
                 && checkOrderGroup(
                         s.getStrategyListingOrderGroup(strategyId, listingId),
@@ -369,6 +395,22 @@ public final class RiskEngine {
                         strategyId,
                         listingId)
                 && checkOrderGroup(s.getListingOrderGroup(listingId), order, positions, orders, strategyId, listingId);
+        return passes ? null : RejectReason.RISK_LIMIT_EXCEEDED;
+    }
+
+    /** The registry id of the policy behind the last {@link RejectReason#RISK_LIMIT_EXCEEDED}; 0 if it has none. */
+    public int violatedPolicyId() {
+        return violatedPolicyId;
+    }
+
+    /** The registry id of the policy behind the last breach {@link #checkMarketPolicies} found; 0 if it has none. */
+    public int breachedPolicyId() {
+        return breachedPolicyId;
+    }
+
+    /** Why the last {@link RejectReason#HALTED} was: {@link #HALT_STALE}, {@link #HALT_KILLED} or {@link #HALT_LATCHED}. */
+    public int haltCause() {
+        return haltCause;
     }
 
     /**
@@ -392,7 +434,7 @@ public final class RiskEngine {
                 || isMarketGroupViolated(s.getListingMarketGroup(listingId), strategyId, listingId, positions, orders);
     }
 
-    private static boolean checkOrderGroup(
+    private boolean checkOrderGroup(
             final OrderPolicyGroup group,
             final Order order,
             final PositionTracker positions,
@@ -404,13 +446,14 @@ public final class RiskEngine {
         }
         for (int i = 0; i < group.count; i++) {
             if (group.policies[i].isViolated(strategyId, listingId, order, positions, orders)) {
+                violatedPolicyId = group.policyIds[i];
                 return false;
             }
         }
         return true;
     }
 
-    private static boolean isMarketGroupViolated(
+    private boolean isMarketGroupViolated(
             final MarketPolicyGroup group,
             final int strategyId,
             final int listingId,
@@ -421,6 +464,7 @@ public final class RiskEngine {
         }
         for (int i = 0; i < group.count; i++) {
             if (group.policies[i].isViolated(strategyId, listingId, positions, orders)) {
+                breachedPolicyId = group.policyIds[i];
                 return true;
             }
         }

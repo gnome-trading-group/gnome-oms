@@ -125,6 +125,29 @@ public final class SharedPriceBuffer {
     }
 
     /**
+     * Reads the best bid, best ask and last trade, consistent with each other, into {@code dest[0..2]}. Zero
+     * allocation.
+     */
+    public void readTop(int slot, long[] dest) {
+        int base = slot * SLOT_SIZE;
+        while (true) {
+            long v1 = buffer.getLongVolatile(base + VERSION_OFFSET);
+            if ((v1 & 1) != 0) {
+                continue;
+            }
+            long bid = buffer.getLong(base + BID_OFFSET);
+            long ask = buffer.getLong(base + ASK_OFFSET);
+            long lastTrade = buffer.getLong(base + LAST_TRADE_OFFSET);
+            if (buffer.getLongVolatile(base + VERSION_OFFSET) == v1) {
+                dest[0] = bid;
+                dest[1] = ask;
+                dest[2] = lastTrade;
+                return;
+            }
+        }
+    }
+
+    /**
      * The mid of the best bid and ask, or the last trade when either side is empty. Returns 0 when none is known.
      * Zero allocation.
      */

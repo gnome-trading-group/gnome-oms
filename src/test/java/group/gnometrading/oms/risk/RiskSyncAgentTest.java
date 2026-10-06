@@ -1,6 +1,8 @@
 package group.gnometrading.oms.risk;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -130,10 +132,10 @@ class RiskSyncAgentTest {
         triggerSync();
 
         order.encoder.size(11);
-        assertFalse(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID));
+        assertNotNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID));
 
         order.encoder.size(5);
-        assertTrue(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID));
+        assertNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID));
     }
 
     @Test
@@ -144,11 +146,11 @@ class RiskSyncAgentTest {
         triggerSync();
 
         positions.addOpenOrder(STRATEGY_ID, LISTING_ID + 1);
-        assertTrue(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID), "1 open elsewhere");
+        assertNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID), "1 open elsewhere");
 
         positions.addOpenOrder(STRATEGY_ID, LISTING_ID);
-        assertFalse(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID), "listing limit of 1");
-        assertFalse(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID + 1), "strategy limit of 2");
+        assertNotNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID), "listing limit of 1");
+        assertNotNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID + 1), "strategy limit of 2");
     }
 
     @Test
@@ -185,7 +187,7 @@ class RiskSyncAgentTest {
         triggerSync();
 
         // Disabled kill switch — everything trades
-        assertTrue(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID));
+        assertNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID));
     }
 
     @Test
@@ -193,8 +195,8 @@ class RiskSyncAgentTest {
         setupRiskMaster(createRecord(1, "KILL_SWITCH", STRATEGY_ID, 0, "{}", true));
         triggerSync();
 
-        assertFalse(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID));
-        assertTrue(riskEngine.check(order, positions, orders, STRATEGY_ID + 1, LISTING_ID));
+        assertNotNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID));
+        assertNull(riskEngine.check(order, positions, orders, STRATEGY_ID + 1, LISTING_ID));
     }
 
     @Test
@@ -202,8 +204,8 @@ class RiskSyncAgentTest {
         setupRiskMaster(createRecord(1, "KILL_SWITCH", 0, LISTING_ID, "{}", true));
         triggerSync();
 
-        assertFalse(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID));
-        assertTrue(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID + 1));
+        assertNotNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID));
+        assertNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID + 1));
     }
 
     @Test
@@ -217,9 +219,9 @@ class RiskSyncAgentTest {
         assertTrue(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID + 1), "unknown type kills its strategy");
         assertTrue(riskEngine.isBlocked(STRATEGY_ID + 1, LISTING_ID), "unreadable parameters kill their listing");
         order.encoder.size(5);
-        assertTrue(riskEngine.check(order, positions, orders, STRATEGY_ID + 1, LISTING_ID + 1));
+        assertNull(riskEngine.check(order, positions, orders, STRATEGY_ID + 1, LISTING_ID + 1));
         order.encoder.size(11);
-        assertFalse(riskEngine.check(order, positions, orders, STRATEGY_ID + 1, LISTING_ID + 1));
+        assertNotNull(riskEngine.check(order, positions, orders, STRATEGY_ID + 1, LISTING_ID + 1));
     }
 
     @Test
@@ -240,14 +242,14 @@ class RiskSyncAgentTest {
 
         // First sync: maxOrderSize = 100
         order.encoder.size(50);
-        assertTrue(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID));
+        assertNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID));
 
         // Second sync: update same policyId to maxOrderSize = 10
         record.parametersJson.copy(new ViewString("{\"maxOrderSize\": 10}"));
         advance(10);
 
         order.encoder.size(50);
-        assertFalse(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID));
+        assertNotNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID));
     }
 
     @Test
@@ -315,9 +317,9 @@ class RiskSyncAgentTest {
         triggerSync();
 
         order.encoder.size(11);
-        assertFalse(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID));
-        assertTrue(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID + 1));
-        assertTrue(riskEngine.check(order, positions, orders, STRATEGY_ID + 1, LISTING_ID));
+        assertNotNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID));
+        assertNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID + 1));
+        assertNull(riskEngine.check(order, positions, orders, STRATEGY_ID + 1, LISTING_ID));
     }
 
     @Test
@@ -344,7 +346,7 @@ class RiskSyncAgentTest {
 
         assertFalse(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID), "another session's kill");
         order.encoder.size(11);
-        assertFalse(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID), "this session's limit");
+        assertNotNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID), "this session's limit");
     }
 
     @Test
@@ -372,9 +374,9 @@ class RiskSyncAgentTest {
         advance(1_000);
 
         order.encoder.size(5);
-        assertTrue(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID));
+        assertNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID));
         order.encoder.size(11);
-        assertFalse(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID));
+        assertNotNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID));
     }
 
     @Test

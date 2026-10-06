@@ -55,11 +55,11 @@ final class RiskEngineSnapshot {
      * strategy across listings, strategy 0 alone is one listing across strategies, and both set is one strategy on
      * one listing.
      */
-    void addPolicy(final int strategyId, final int listingId, final Configurable policy) {
+    void addPolicy(final int strategyId, final int listingId, final Configurable policy, final int policyId) {
         if (policy instanceof OrderRiskPolicy orderPolicy) {
-            addOrderPolicy(strategyId, listingId, orderPolicy);
+            addOrderPolicy(strategyId, listingId, orderPolicy, policyId);
         } else {
-            addMarketPolicy(strategyId, listingId, (MarketRiskPolicy) policy);
+            addMarketPolicy(strategyId, listingId, (MarketRiskPolicy) policy, policyId);
         }
     }
 
@@ -76,7 +76,8 @@ final class RiskEngineSnapshot {
         }
     }
 
-    private void addOrderPolicy(final int strategyId, final int listingId, final OrderRiskPolicy policy) {
+    private void addOrderPolicy(
+            final int strategyId, final int listingId, final OrderRiskPolicy policy, final int policyId) {
         final OrderPolicyGroup group;
         if (strategyId == 0 && listingId == 0) {
             group = globalOrderGroup;
@@ -87,10 +88,11 @@ final class RiskEngineSnapshot {
         } else {
             group = orderGroup(strategyListingOrderGroups, pairKey(strategyId, listingId));
         }
-        group.policies[group.count++] = policy;
+        group.add(policy, policyId);
     }
 
-    private void addMarketPolicy(final int strategyId, final int listingId, final MarketRiskPolicy policy) {
+    private void addMarketPolicy(
+            final int strategyId, final int listingId, final MarketRiskPolicy policy, final int policyId) {
         final MarketPolicyGroup group;
         if (strategyId == 0 && listingId == 0) {
             group = globalMarketGroup;
@@ -101,7 +103,7 @@ final class RiskEngineSnapshot {
         } else {
             group = marketGroup(strategyListingMarketGroups, pairKey(strategyId, listingId));
         }
-        group.policies[group.count++] = policy;
+        group.add(policy, policyId);
     }
 
     private static OrderPolicyGroup orderGroup(final IntHashMap<OrderPolicyGroup> groups, final int key) {

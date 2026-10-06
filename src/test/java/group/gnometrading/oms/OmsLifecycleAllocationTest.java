@@ -2,8 +2,12 @@ package group.gnometrading.oms;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import group.gnometrading.collections.buffer.MessageConsumer;
 import group.gnometrading.logging.NullLogger;
 import group.gnometrading.oms.action.ActionSink;
+import group.gnometrading.oms.ledger.LedgerAgent;
+import group.gnometrading.oms.ledger.LedgerEvent;
+import group.gnometrading.oms.ledger.LedgerRing;
 import group.gnometrading.oms.pnl.PriceSlotRegistry;
 import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.DefaultPositionTracker;
@@ -59,15 +63,20 @@ class OmsLifecycleAllocationTest {
                     new MaxOpenOrdersPolicy(true, 1_000)
                 },
                 new MarketRiskPolicy[] {new MaxTotalPnlLossPolicy(prices, slots, true, Long.MAX_VALUE / 4)});
+        final DefaultPositionTracker positions = new DefaultPositionTracker(new SharedPositionBuffer(16));
+        final LedgerRing ledger = new LedgerRing(1024, LedgerAgent.MAX_EVENTS_PER_BATCH, Long.MAX_VALUE / 4, positions);
+        final int[] drained = {0};
+        final MessageConsumer<LedgerEvent> drain = event -> drained[0]++;
         final OrderManagementSystem oms = new OrderManagementSystem(
                 new NullLogger(),
                 new PooledOrderStateManager(64),
-                new DefaultPositionTracker(new SharedPositionBuffer(16)),
+                positions,
                 engine,
                 OmsTestHarness.cachedSecurityMaster(
                         OmsTestHarness.EXCHANGE_ID, OmsTestHarness.SECURITY_ID, OmsTestHarness.LISTING_ID),
                 prices,
                 slots,
+                ledger,
                 () -> 1L);
         final LastOrderSink sink = new LastOrderSink();
         final Reports reports = new Reports(oms, sink);
@@ -84,7 +93,8 @@ class OmsLifecycleAllocationTest {
                 4 * unit);
         final long[] tick = {0};
 
-        // Quote, reprice, partial fill, pull, then flatten, with a mark move and the loss check on every cycle.
+        // Quote, reprice, partial fill, pull, then flatten, with a mark move, the loss check and every order and fill
+        // recorded in the ledger on every cycle.
         final Runnable lifecycle = () -> {
             final long move = (tick[0]++ & 1) * unit;
             prices.writeQuote(slot, price - unit + move, price + unit + move);
@@ -105,10 +115,17 @@ class OmsLifecycleAllocationTest {
             reports.send(sell, ExecType.FILL, 4 * unit, price, 4 * unit, 0);
             oms.processIntent(pull, sink);
             oms.checkMarkMoves(sink);
+            oms.checkLedger(sink);
+            // Stands in for the ledger agent, so the ring never fills.
+            drained[0] = 0;
+            ledger.read(drain, 1024);
+            ledger.acknowledge(drained[0]);
         };
         allocatedBy(lifecycle, LIFECYCLES);
         final long allocated = allocatedBy(lifecycle, LIFECYCLES);
         assertTrue(allocated < ALLOWED_BYTES, "intents, exec reports and risk per cycle: " + allocated + " bytes");
+        // Two orders opened, acknowledged, filled and closed.
+        assertTrue(drained[0] >= 8, "each cycle recorded its orders and fills: " + drained[0]);
     }
 
     private static Intent bidIntent(final long price, final long size) {

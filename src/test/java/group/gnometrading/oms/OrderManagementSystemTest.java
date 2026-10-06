@@ -1,6 +1,7 @@
 package group.gnometrading.oms;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -12,11 +13,16 @@ import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.logging.NullLogger;
 import group.gnometrading.oms.action.ActionSink;
+import group.gnometrading.oms.ledger.LedgerSink;
 import group.gnometrading.oms.pnl.PriceSlotRegistry;
 import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.DefaultPositionTracker;
 import group.gnometrading.oms.position.SharedPositionBuffer;
+import group.gnometrading.oms.risk.MarketRiskPolicy;
+import group.gnometrading.oms.risk.OrderRiskPolicy;
 import group.gnometrading.oms.risk.RiskEngine;
+import group.gnometrading.oms.risk.policy.MaxOrderSizePolicy;
+import group.gnometrading.oms.risk.policy.MaxTotalPnlLossPolicy;
 import group.gnometrading.oms.state.PooledOrderStateManager;
 import group.gnometrading.schemas.CancelOrder;
 import group.gnometrading.schemas.ExecType;
@@ -57,6 +63,7 @@ class OrderManagementSystemTest {
 
     private OrderManagementSystem oms;
     private RecordingSink delegate;
+    private RecordingLogger logger;
     private SharedPriceBuffer priceBuffer;
     private int priceSlot;
 
@@ -68,14 +75,16 @@ class OrderManagementSystemTest {
         priceBuffer = new SharedPriceBuffer(1);
         PriceSlotRegistry priceSlotRegistry = new PriceSlotRegistry(1);
         priceSlot = priceSlotRegistry.register(LISTING_ID);
+        logger = new RecordingLogger();
         oms = new OrderManagementSystem(
-                new NullLogger(),
+                logger,
                 orderStateManager,
                 positionTracker,
                 riskEngine,
                 securityMaster,
                 priceBuffer,
                 priceSlotRegistry,
+                LedgerSink.NONE,
                 () -> 0L);
         delegate = new RecordingSink();
 
@@ -87,6 +96,91 @@ class OrderManagementSystemTest {
                 "SYM");
         lenient().when(securityMaster.getListing(EXCHANGE_ID, SECURITY_ID)).thenReturn(listing);
         lenient().when(securityMaster.getListing(LISTING_ID)).thenReturn(listing);
+    }
+
+    // --- rejection logging ---
+
+    @Test
+    void testAListingRuleRejectionNamesTheOrderAndTheRule() {
+        when(securityMaster.getListingSpec(LISTING_ID)).thenReturn(new ListingSpec(LISTING_ID, 10, 0, 0, 1, 0));
+        submitIntent(105L, 10L);
+        assertEquals(
+                List.of("ORDER_REJECTED_EXCHANGE_CONSTRAINTS 1 100 66 105 10 2"),
+                logger.linesFor(LogMessage.ORDER_REJECTED_EXCHANGE_CONSTRAINTS),
+                "order 1 on listing 100, a 10 @ 105 bid, broke the tick rule");
+
+        stubSpec(0, 1_000_000_000_000L);
+        submitIntent(100L, 10L);
+        assertTrue(
+                logger.linesFor(LogMessage.ORDER_REJECTED_EXCHANGE_CONSTRAINTS)
+                        .get(1)
+                        .endsWith(" 3"),
+                "min notional");
+    }
+
+    @Test
+    void testARiskRejectionNamesTheOrderAndThePolicy() {
+        oms = omsWith(RiskEngine.withOrderPolicies(new MaxOrderSizePolicy(5)));
+        submitIntent(100L, 10L);
+        assertEquals(
+                List.of("ORDER_REJECTED_RISK_CHECK 1 100 66 100 10 0"),
+                logger.linesFor(LogMessage.ORDER_REJECTED_RISK_CHECK));
+    }
+
+    @Test
+    void testAHaltIsLoggedWhenItStartsNotForEveryOrderItRefuses() {
+        oms = omsWith(RiskEngine.syncedFromRegistry(() -> 0L, java.time.Duration.ofSeconds(30)));
+        submitIntent(100L, 10L);
+        submitIntent(101L, 10L);
+        submitIntent(102L, 10L);
+        assertEquals(
+                List.of("ORDER_REJECTED_HALTED 1 7 100 " + RiskEngine.HALT_STALE),
+                logger.linesFor(LogMessage.ORDER_REJECTED_HALTED));
+        assertEquals(List.of(RejectReason.HALTED), delegate.rejects, "the last order was still refused");
+    }
+
+    @Test
+    void testALossLimitLatchIsLoggedOnceWithItsPolicy() {
+        // Any loss at all breaches; the fill's fee alone is one.
+        oms = omsWith(RiskEngine.withPolicies(
+                new OrderRiskPolicy[0],
+                new MarketRiskPolicy[] {new MaxTotalPnlLossPolicy(priceBuffer, new PriceSlotRegistry(1), true, 0L)}));
+        submitIntent(100L, 10L);
+        final long counter = delegate.newOrders.get(0).getClientOidCounter();
+        for (int i = 1; i <= 2; i++) {
+            final OrderExecutionReport fill = new OrderExecutionReport();
+            fill.encodeClientOid(counter, STRATEGY_ID);
+            fill.encoder
+                    .exchangeId(EXCHANGE_ID)
+                    .securityId(SECURITY_ID)
+                    .execType(ExecType.PARTIAL_FILL)
+                    .filledQty(1)
+                    .fillPrice(100)
+                    .cumulativeQty(i)
+                    .leavesQty(10 - i)
+                    .fee(1);
+            oms.processExecutionReport(fill, delegate);
+        }
+
+        assertEquals(
+                List.of("STRATEGY_LATCHED_LOSS_LIMIT " + STRATEGY_ID + " " + LISTING_ID + " 0"),
+                logger.linesFor(LogMessage.STRATEGY_LATCHED_LOSS_LIMIT),
+                "the second breach finds the strategy already latched");
+    }
+
+    private OrderManagementSystem omsWith(final RiskEngine engine) {
+        final PriceSlotRegistry slots = new PriceSlotRegistry(1);
+        slots.register(LISTING_ID);
+        return new OrderManagementSystem(
+                logger,
+                new PooledOrderStateManager(64),
+                new DefaultPositionTracker(new SharedPositionBuffer(8)),
+                engine,
+                securityMaster,
+                new SharedPriceBuffer(1),
+                slots,
+                LedgerSink.NONE,
+                () -> 0L);
     }
 
     // --- lotSize constraint ---
@@ -287,6 +381,7 @@ class OrderManagementSystemTest {
                 securityMaster,
                 new SharedPriceBuffer(1),
                 new PriceSlotRegistry(1),
+                LedgerSink.NONE,
                 () -> 5_000L);
         stubSpec(0, 0);
 
@@ -331,6 +426,7 @@ class OrderManagementSystemTest {
                 securityMaster,
                 new SharedPriceBuffer(1),
                 new PriceSlotRegistry(1),
+                LedgerSink.NONE,
                 () -> 0L);
 
         OrderExecutionReport cancelReject = new OrderExecutionReport();

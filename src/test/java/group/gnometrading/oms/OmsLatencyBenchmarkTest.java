@@ -2,6 +2,7 @@ package group.gnometrading.oms;
 
 import group.gnometrading.logging.NullLogger;
 import group.gnometrading.oms.action.ActionSink;
+import group.gnometrading.oms.ledger.LedgerSink;
 import group.gnometrading.oms.pnl.PriceSlotRegistry;
 import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.DefaultPositionTracker;
@@ -63,6 +64,7 @@ class OmsLatencyBenchmarkTest {
                 OmsTestHarness.cachedSecurityMaster(EXCHANGE_ID, SECURITY_ID, LISTING_ID),
                 prices,
                 slots,
+                LedgerSink.NONE,
                 clock);
         holdAPositionWithARestingBid();
         final Intent unchanged = OmsTestHarness.buildIntent(
