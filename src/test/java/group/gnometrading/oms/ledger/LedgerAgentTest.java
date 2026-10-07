@@ -17,6 +17,7 @@ import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.DefaultPositionTracker;
 import group.gnometrading.oms.position.Position;
 import group.gnometrading.oms.position.SharedPositionBuffer;
+import group.gnometrading.schemas.OrderDecoder;
 import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.schemas.Side;
 import java.nio.charset.StandardCharsets;
@@ -91,6 +92,19 @@ class LedgerAgentTest {
                 batch.get("orderAcks").get(0).get("exchangeOrderId").asText());
         assertEquals(4_000_000, batch.get("orderCloses").get(0).get("filledQty").asLong());
         assertFalse(ring.isFailing(MAX_LAG_NS * 2), "every event confirmed");
+    }
+
+    @Test
+    void aMarketOrderIsRecordedWithoutAPrice() throws Exception {
+        ring.orderOpened(7, 100, 1, 3L, Side.Bid, OrderDecoder.priceNullValue(), 10_000_000, 1L);
+
+        agent.doWork();
+
+        assertTrue(mapper.readTree(posted.get(0))
+                .get("orderOpens")
+                .get(0)
+                .get("price")
+                .isNull());
     }
 
     @Test

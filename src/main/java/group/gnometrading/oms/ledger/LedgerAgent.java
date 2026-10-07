@@ -7,6 +7,7 @@ import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.oms.pnl.PriceSlotRegistry;
 import group.gnometrading.oms.pnl.SharedPriceBuffer;
+import group.gnometrading.schemas.OrderDecoder;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.strings.GnomeString;
 import group.gnometrading.strings.MutableString;
@@ -263,13 +264,14 @@ public final class LedgerAgent implements GnomeAgent {
             if (event.type == LedgerEventType.ORDER_OPENED) {
                 first = separate(first);
                 writeOrderKey(event);
-                json.writeComma()
-                        .writeObjectEntry("side", sideOf(event.side))
-                        .writeComma()
-                        .writeObjectEntry("price", event.price)
-                        .writeComma()
-                        .writeObjectEntry("size", event.size)
-                        .writeObjectEnd();
+                json.writeComma().writeObjectEntry("side", sideOf(event.side)).writeComma();
+                // A market order has no price; the schema's null marker would otherwise be stored as a number.
+                if (event.price == OrderDecoder.priceNullValue()) {
+                    json.writeString("price").writeColon().writeNull();
+                } else {
+                    json.writeObjectEntry("price", event.price);
+                }
+                json.writeComma().writeObjectEntry("size", event.size).writeObjectEnd();
             }
         }
         json.writeArrayEnd();
