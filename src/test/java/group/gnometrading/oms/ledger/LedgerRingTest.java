@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import group.gnometrading.oms.position.DefaultPositionTracker;
 import group.gnometrading.oms.position.SharedPositionBuffer;
 import group.gnometrading.schemas.OrderExecutionReport;
+import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.schemas.Side;
 import java.util.ArrayList;
 import java.util.List;
@@ -86,6 +87,26 @@ class LedgerRingTest {
         assertEquals(LedgerEventType.ORDER_ACKED, ack.type);
         assertEquals("4071-100-1", new String(ack.exchangeOrderId, 0, ack.exchangeOrderIdLength));
         assertEquals(9L, ack.eventTimeNs);
+    }
+
+    @Test
+    void refusalCountsWaitForRoomInsteadOfFailingTheLedger() {
+        final LedgerRing ring = new LedgerRing(2, 4, MAX_LAG_NS, positions);
+        ring.orderOpened(7, 100, 1, 1L, Side.Bid, 50, 10, 1L);
+        ring.orderOpened(7, 100, 1, 2L, Side.Bid, 50, 10, 1L);
+        for (int i = 0; i < 1_000; i++) {
+            ring.orderRefused(100, RejectReason.RISK_LIMIT_EXCEEDED);
+        }
+
+        assertFalse(ring.isFailing(2L), "a full ring delays counts; it never loses positions over them");
+        assertEquals(List.of(LedgerEventType.ORDER_OPENED, LedgerEventType.ORDER_OPENED), types(drain(ring)));
+        ring.acknowledge(2);
+
+        assertFalse(ring.isFailing(1_000_000_003L));
+        final LedgerEvent count = drain(ring).get(0);
+        assertEquals(LedgerEventType.REJECT_COUNT, count.type);
+        assertEquals(RejectReason.RISK_LIMIT_EXCEEDED, count.rejectReason);
+        assertEquals(1_000, count.count);
     }
 
     private static List<LedgerEvent> drain(final LedgerRing ring) {

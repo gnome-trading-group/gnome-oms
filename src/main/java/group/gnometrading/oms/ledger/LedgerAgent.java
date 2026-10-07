@@ -75,6 +75,10 @@ public final class LedgerAgent implements GnomeAgent {
     private long nextAttemptMs;
     private long backoffMs = MIN_BACKOFF_MS;
 
+    // Read by the session heartbeat on its own thread.
+    private volatile long lastAcceptedMs;
+    private volatile int consecutiveFailures;
+
     public LedgerAgent(
             final LedgerRing ring,
             final RegistryConnection registry,
@@ -156,6 +160,16 @@ public final class LedgerAgent implements GnomeAgent {
         }
     }
 
+    /** Wall-clock millis of the last batch the registry stored, or 0 before the first. */
+    public long lastAcceptedMs() {
+        return lastAcceptedMs;
+    }
+
+    /** Failed attempts since the last stored batch. */
+    public int consecutiveFailures() {
+        return consecutiveFailures;
+    }
+
     private long nextWakeMs(final long now) {
         if (bodyReady) {
             return nextAttemptMs;
@@ -200,6 +214,8 @@ public final class LedgerAgent implements GnomeAgent {
     private boolean send(final long now) {
         final int status = registry.tryPost(PATH, body.array(), body.position());
         if (status == HTTP_OK) {
+            lastAcceptedMs = now;
+            consecutiveFailures = 0;
             ring.acknowledge(batchCount);
             for (int slot = 0; slot < priceSlots.count(); slot++) {
                 if (markPending[slot]) {
@@ -226,6 +242,7 @@ public final class LedgerAgent implements GnomeAgent {
             return true;
         }
         logger.log(LogMessage.LEDGER_WRITE_FAILED, status);
+        consecutiveFailures = consecutiveFailures + 1;
         nextAttemptMs = now + backoffMs;
         backoffMs = Math.min(backoffMs * 2, MAX_BACKOFF_MS);
         return false;
@@ -239,6 +256,7 @@ public final class LedgerAgent implements GnomeAgent {
         writeOrderOpens();
         writeOrderAcks();
         writeOrderCloses();
+        writeRejectCounts();
         writeMarks();
         json.writeObjectEnd();
     }
@@ -307,10 +325,42 @@ public final class LedgerAgent implements GnomeAgent {
                 writeOrderKey(event);
                 json.writeComma()
                         .writeObjectEntry("filledQty", event.cumQtyAfter)
+                        .writeComma()
+                        .writeObjectEntry("state", event.closeState.name())
+                        .writeComma();
+                writeNullableName("rejectReason", event.rejectReason);
+                json.writeObjectEnd();
+            }
+        }
+        json.writeArrayEnd();
+    }
+
+    private void writeRejectCounts() {
+        json.writeComma().writeString("rejectCounts").writeColon().writeArrayStart();
+        boolean first = true;
+        for (int i = 0; i < batchCount; i++) {
+            final LedgerEvent event = batch[i];
+            if (event.type == LedgerEventType.REJECT_COUNT) {
+                first = separate(first);
+                json.writeObjectStart()
+                        .writeObjectEntry("listingId", event.listingId)
+                        .writeComma()
+                        .writeObjectEntry("reason", event.rejectReason.name())
+                        .writeComma()
+                        .writeObjectEntry("count", event.count)
                         .writeObjectEnd();
             }
         }
         json.writeArrayEnd();
+    }
+
+    private void writeNullableName(final String key, final Enum<?> value) {
+        json.writeString(key).writeColon();
+        if (value == null) {
+            json.writeNull();
+        } else {
+            json.writeString(value.name());
+        }
     }
 
     private void writeMarks() {
@@ -375,7 +425,9 @@ public final class LedgerAgent implements GnomeAgent {
                     .writeComma()
                     .writeObjectEntry("fillPrice", event.price)
                     .writeComma()
-                    .writeObjectEntry("fee", event.fee);
+                    .writeObjectEntry("fee", event.fee)
+                    .writeComma();
+            writeNullableName("liquidity", event.liquidity);
         }
         json.writeObjectEnd();
     }

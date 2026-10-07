@@ -4,8 +4,12 @@ import group.gnometrading.collections.buffer.MessageConsumer;
 import group.gnometrading.collections.buffer.OneToOneRingBuffer;
 import group.gnometrading.oms.position.Position;
 import group.gnometrading.oms.position.PositionTracker;
+import group.gnometrading.oms.state.OrderState;
+import group.gnometrading.schemas.Liquidity;
 import group.gnometrading.schemas.OrderExecutionReport;
+import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.schemas.Side;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Hands the OMS's ledger events to the {@link LedgerAgent}, which writes them to the registry.
@@ -20,6 +24,12 @@ import group.gnometrading.schemas.Side;
 public final class LedgerRing implements LedgerSink {
 
     private static final int MAX_PENDING_GAPS = 64;
+    // Refusal counts are cumulative, so publishing them at most this often loses nothing and keeps a burst of
+    // refusals from filling the ring.
+    private static final long REJECT_PUBLISH_INTERVAL_NS = TimeUnit.SECONDS.toNanos(1);
+    // More listing and reason pairs than a session plausibly trades; past it, refusals are still logged, only not
+    // counted.
+    private static final int MAX_REJECT_KEYS = 256;
 
     private final OneToOneRingBuffer<LedgerEvent> ring;
     private final PositionTracker positions;
@@ -38,6 +48,14 @@ public final class LedgerRing implements LedgerSink {
     private final int[] gapListings = new int[MAX_PENDING_GAPS];
     private final long[] gapCounters = new long[MAX_PENDING_GAPS];
     private int gapCount;
+
+    private final int[] rejectListings = new int[MAX_REJECT_KEYS];
+    private final RejectReason[] rejectReasons = new RejectReason[MAX_REJECT_KEYS];
+    private final long[] rejectCounts = new long[MAX_REJECT_KEYS];
+    private final boolean[] rejectChanged = new boolean[MAX_REJECT_KEYS];
+    private int rejectKeyCount;
+    private boolean rejectsChanged;
+    private long nextRejectPublishNs;
 
     public LedgerRing(
             final int capacity, final int maxBatchEvents, final long maxLagNs, final PositionTracker positions) {
@@ -104,6 +122,7 @@ public final class LedgerRing implements LedgerSink {
             final long price,
             final long fee,
             final long eventTimeNs,
+            final Liquidity liquidity,
             final Position after) {
         final LedgerEvent event = claim(strategyId, listingId, clientOidCounter, eventTimeNs);
         if (event == null) {
@@ -115,6 +134,7 @@ public final class LedgerRing implements LedgerSink {
         event.size = qty;
         event.price = price;
         event.fee = fee;
+        event.liquidity = liquidity;
         event.setPosition(after);
         commit();
     }
@@ -126,6 +146,8 @@ public final class LedgerRing implements LedgerSink {
             final int exchangeId,
             final long clientOidCounter,
             final long filledQty,
+            final OrderState state,
+            final RejectReason rejectReason,
             final long timeNs) {
         final LedgerEvent event = claim(strategyId, listingId, clientOidCounter, timeNs);
         if (event == null) {
@@ -134,12 +156,35 @@ public final class LedgerRing implements LedgerSink {
         event.type = LedgerEventType.ORDER_CLOSED;
         event.exchangeId = exchangeId;
         event.cumQtyAfter = filledQty;
+        event.closeState = state;
+        event.rejectReason = rejectReason;
         commit();
+    }
+
+    @Override
+    public void orderRefused(final int listingId, final RejectReason reason) {
+        for (int i = 0; i < rejectKeyCount; i++) {
+            if (rejectListings[i] == listingId && rejectReasons[i] == reason) {
+                rejectCounts[i]++;
+                rejectChanged[i] = true;
+                rejectsChanged = true;
+                return;
+            }
+        }
+        if (rejectKeyCount < MAX_REJECT_KEYS) {
+            rejectListings[rejectKeyCount] = listingId;
+            rejectReasons[rejectKeyCount] = reason;
+            rejectCounts[rejectKeyCount] = 1;
+            rejectChanged[rejectKeyCount] = true;
+            rejectKeyCount++;
+            rejectsChanged = true;
+        }
     }
 
     @Override
     public boolean isFailing(final long nowNs) {
         publishPendingGaps(nowNs);
+        publishRejectCounts(nowNs);
         if (overflowed || fenced) {
             return true;
         }
@@ -236,5 +281,34 @@ public final class LedgerRing implements LedgerSink {
             published++;
             gapCount = last;
         }
+    }
+
+    private void publishRejectCounts(final long nowNs) {
+        if (!rejectsChanged || nowNs < nextRejectPublishNs) {
+            return;
+        }
+        nextRejectPublishNs = nowNs + REJECT_PUBLISH_INTERVAL_NS;
+        for (int i = 0; i < rejectKeyCount; i++) {
+            if (!rejectChanged[i]) {
+                continue;
+            }
+            final int index = ring.tryClaim();
+            if (index < 0) {
+                // The rest stay changed and go out on a later pass; a count is never lost, only late.
+                return;
+            }
+            publishTimes[slotOf(published)] = nowNs;
+            final LedgerEvent event = ring.indexAt(index);
+            event.type = LedgerEventType.REJECT_COUNT;
+            event.listingId = rejectListings[i];
+            event.rejectReason = rejectReasons[i];
+            event.count = rejectCounts[i];
+            event.eventTimeNs = nowNs;
+            event.exchangeOrderIdLength = 0;
+            ring.commit(index);
+            published++;
+            rejectChanged[i] = false;
+        }
+        rejectsChanged = false;
     }
 }

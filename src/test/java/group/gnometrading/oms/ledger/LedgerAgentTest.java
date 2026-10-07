@@ -17,8 +17,11 @@ import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.DefaultPositionTracker;
 import group.gnometrading.oms.position.Position;
 import group.gnometrading.oms.position.SharedPositionBuffer;
+import group.gnometrading.oms.state.OrderState;
+import group.gnometrading.schemas.Liquidity;
 import group.gnometrading.schemas.OrderDecoder;
 import group.gnometrading.schemas.OrderExecutionReport;
+import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.schemas.Side;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
@@ -72,8 +75,9 @@ class LedgerAgentTest {
         final OrderExecutionReport ack = new OrderExecutionReport();
         ack.encoder.exchangeOrderId("0x" + "ab".repeat(32)).timestampRecv(2L);
         ring.orderAcked(7, 100, 1, 3L, ack);
-        ring.fillBooked(7, 100, 3L, 4_000_000, Side.Bid, 4_000_000, 500_000_000L, 1_000_000, 3L, after);
-        ring.orderClosed(7, 100, 1, 3L, 4_000_000, 4L);
+        ring.fillBooked(
+                7, 100, 3L, 4_000_000, Side.Bid, 4_000_000, 500_000_000L, 1_000_000, 3L, Liquidity.MAKER, after);
+        ring.orderClosed(7, 100, 1, 3L, 4_000_000, OrderState.FILLED, null, 4L);
 
         agent.doWork();
 
@@ -86,12 +90,75 @@ class LedgerAgentTest {
         assertEquals(0, fill.get("side").asInt(), "a buy");
         assertEquals(2_000_000_000L, fill.get("totalCostAfter").asLong());
         assertEquals(1, fill.get("positionVersion").asLong());
+        assertEquals("MAKER", fill.get("liquidity").asText());
         assertEquals(10_000_000, batch.get("orderOpens").get(0).get("size").asLong());
         assertEquals(
                 "0x" + "ab".repeat(32),
                 batch.get("orderAcks").get(0).get("exchangeOrderId").asText());
-        assertEquals(4_000_000, batch.get("orderCloses").get(0).get("filledQty").asLong());
+        final JsonNode close = batch.get("orderCloses").get(0);
+        assertEquals(4_000_000, close.get("filledQty").asLong());
+        assertEquals("FILLED", close.get("state").asText());
+        assertTrue(close.get("rejectReason").isNull());
         assertFalse(ring.isFailing(MAX_LAG_NS * 2), "every event confirmed");
+    }
+
+    @Test
+    void aFillWithoutLiquidityAndARejectedOrderSayWhatTheyKnow() throws Exception {
+        final Position after = new Position();
+        after.init(100);
+        ring.fillBooked(7, 100, 3L, 1, Side.Ask, 1, 1, 0, 3L, null, after);
+        ring.orderClosed(7, 100, 1, 4L, 0, OrderState.REJECTED, RejectReason.POST_ONLY_WOULD_CROSS, 4L);
+
+        agent.doWork();
+
+        final JsonNode batch = mapper.readTree(posted.get(0));
+        assertTrue(batch.get("fills").get(0).get("liquidity").isNull());
+        final JsonNode close = batch.get("orderCloses").get(0);
+        assertEquals("REJECTED", close.get("state").asText());
+        assertEquals("POST_ONLY_WOULD_CROSS", close.get("rejectReason").asText());
+    }
+
+    @Test
+    void sendsRefusalCountsAsRunningTotals() throws Exception {
+        ring.orderRefused(100, RejectReason.HALTED);
+        ring.orderRefused(100, RejectReason.HALTED);
+        ring.orderRefused(100, RejectReason.INVALID_PRICE);
+        ring.isFailing(1L);
+        agent.doWork();
+
+        ring.orderRefused(100, RejectReason.HALTED);
+        ring.isFailing(2L);
+        now[0] += FLUSH_MS;
+        agent.doWork();
+        assertEquals(1, posted.size(), "counts go out at most once a second");
+
+        ring.isFailing(1_000_000_001L);
+        now[0] += FLUSH_MS;
+        agent.doWork();
+
+        final JsonNode first = mapper.readTree(posted.get(0)).get("rejectCounts");
+        assertEquals(2, first.size());
+        assertEquals("HALTED", first.get(0).get("reason").asText());
+        assertEquals(2, first.get(0).get("count").asLong());
+        assertEquals(1, first.get(1).get("count").asLong());
+        final JsonNode second = mapper.readTree(posted.get(1)).get("rejectCounts");
+        assertEquals(1, second.size(), "only what changed");
+        assertEquals(3, second.get(0).get("count").asLong(), "the total so far, not the change");
+    }
+
+    @Test
+    void reportsItsHealthForTheSessionHeartbeat() {
+        assertEquals(0, agent.lastAcceptedMs());
+        ring.orderOpened(7, 100, 1, 3L, Side.Bid, 1, 1, 1L);
+        statuses.add(503);
+
+        agent.doWork();
+        assertEquals(1, agent.consecutiveFailures());
+
+        now[0] += 250;
+        agent.doWork();
+        assertEquals(0, agent.consecutiveFailures());
+        assertEquals(now[0], agent.lastAcceptedMs());
     }
 
     @Test

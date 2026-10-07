@@ -279,11 +279,20 @@ public final class OrderManagementSystem {
                     report.decoder.fillPrice(),
                     feeOf(report),
                     eventTimeOf(report),
+                    liquidityOf(report),
                     positionTracker.getStrategyPosition(strategyId, listingId));
         }
-        if (tracked.getState().isTerminal()) {
+        final OrderState state = tracked.getState();
+        if (state.isTerminal()) {
             ledger.orderClosed(
-                    strategyId, listingId, tracked.getExchangeId(), counter, tracked.getFilledQty(), clock.nanoTime());
+                    strategyId,
+                    listingId,
+                    tracked.getExchangeId(),
+                    counter,
+                    tracked.getFilledQty(),
+                    state,
+                    state == OrderState.REJECTED ? report.decoder.rejectReason() : null,
+                    clock.nanoTime());
         }
     }
 
@@ -490,6 +499,11 @@ public final class OrderManagementSystem {
         return event == OrderExecutionReportDecoder.timestampEventNullValue() ? report.decoder.timestampRecv() : event;
     }
 
+    private static Liquidity liquidityOf(OrderExecutionReport report) {
+        final Liquidity liquidity = report.decoder.liquidity();
+        return liquidity == Liquidity.NULL_VAL ? null : liquidity;
+    }
+
     /** A fill without its quantity or price cannot be booked. */
     private static boolean isMalformedFill(OrderExecutionReport report) {
         return report.decoder.filledQty() == OrderExecutionReportDecoder.filledQtyNullValue()
@@ -617,6 +631,7 @@ public final class OrderManagementSystem {
         }
 
         private void emitNewOrderRejection(final Order order, final int listingId, final RejectReason reason) {
+            ledger.orderRefused(listingId, reason);
             final long now = clock.nanoTime();
             syntheticReject.encodeClientOid(order.getClientOidCounter(), order.getClientOidStrategyId());
             syntheticReject
@@ -698,6 +713,7 @@ public final class OrderManagementSystem {
 
         private void emitModifyRejection(
                 final ModifyOrder modify, final TrackedOrder original, final int listingId, final RejectReason reason) {
+            ledger.orderRefused(listingId, reason);
             final long now = clock.nanoTime();
             syntheticReject.encodeClientOid(original.getClientOidCounter(), original.getStrategyId());
             syntheticReject

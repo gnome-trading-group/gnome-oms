@@ -13,6 +13,9 @@ import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.logging.NullLogger;
 import group.gnometrading.oms.action.ActionSink;
+import group.gnometrading.oms.ledger.LedgerEvent;
+import group.gnometrading.oms.ledger.LedgerEventType;
+import group.gnometrading.oms.ledger.LedgerRing;
 import group.gnometrading.oms.ledger.LedgerSink;
 import group.gnometrading.oms.pnl.PriceSlotRegistry;
 import group.gnometrading.oms.pnl.SharedPriceBuffer;
@@ -413,6 +416,51 @@ class OrderManagementSystemTest {
         assertEquals(List.of(RejectReason.RISK_LIMIT_EXCEEDED), delegate.rejects);
         // The OMS stamps its own rejects with its clock rather than leaving the venue-time fields empty.
         assertEquals(List.of(5_000L), delegate.rejectTimestamps);
+    }
+
+    @Test
+    void testARefusedOrderIsCountedInTheLedgerWithoutAnOrderRecord() {
+        LedgerRing ledger =
+                new LedgerRing(16, 4, Long.MAX_VALUE, new DefaultPositionTracker(new SharedPositionBuffer(8)));
+        OrderManagementSystem fullOms = new OrderManagementSystem(
+                new NullLogger(),
+                new PooledOrderStateManager(1),
+                new DefaultPositionTracker(new SharedPositionBuffer(8)),
+                new RiskEngine(),
+                securityMaster,
+                new SharedPriceBuffer(1),
+                new PriceSlotRegistry(1),
+                ledger,
+                () -> 5_000L);
+        stubSpec(0, 0);
+        Intent both = new Intent();
+        both.encoder
+                .strategyId(STRATEGY_ID)
+                .exchangeId(EXCHANGE_ID)
+                .securityId(SECURITY_ID)
+                .bidPrice(100L)
+                .bidSize(UNIT)
+                .askPrice(110L)
+                .askSize(UNIT);
+
+        fullOms.processIntent(both, delegate);
+        ledger.isFailing(5_000L);
+
+        List<LedgerEvent> events = new ArrayList<>();
+        ledger.read(
+                event -> {
+                    LedgerEvent copy = new LedgerEvent();
+                    copy.copyFrom(event);
+                    events.add(copy);
+                },
+                16);
+        assertEquals(
+                List.of(LedgerEventType.ORDER_OPENED, LedgerEventType.REJECT_COUNT),
+                events.stream().map(event -> event.type).toList(),
+                "the accepted bid is recorded; the refused ask is only counted");
+        assertEquals(LISTING_ID, events.get(1).listingId);
+        assertEquals(RejectReason.RISK_LIMIT_EXCEEDED, events.get(1).rejectReason);
+        assertEquals(1, events.get(1).count);
     }
 
     @Test

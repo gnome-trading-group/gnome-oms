@@ -1,7 +1,10 @@
 package group.gnometrading.oms.ledger;
 
 import group.gnometrading.oms.position.Position;
+import group.gnometrading.oms.state.OrderState;
+import group.gnometrading.schemas.Liquidity;
 import group.gnometrading.schemas.OrderExecutionReportDecoder;
+import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.schemas.Side;
 
 /** One ledger event, preallocated in the ring and overwritten in place. Fields a type doesn't use are left stale. */
@@ -25,6 +28,11 @@ public final class LedgerEvent {
     public long realizedPnlAfter;
     public long feesAfter;
     public long positionVersion;
+
+    public Liquidity liquidity;
+    public OrderState closeState;
+    public RejectReason rejectReason;
+    public long count;
 
     public final byte[] exchangeOrderId = new byte[EXCHANGE_ORDER_ID_LENGTH];
     public int exchangeOrderIdLength;
@@ -53,6 +61,10 @@ public final class LedgerEvent {
         this.realizedPnlAfter = src.realizedPnlAfter;
         this.feesAfter = src.feesAfter;
         this.positionVersion = src.positionVersion;
+        this.liquidity = src.liquidity;
+        this.closeState = src.closeState;
+        this.rejectReason = src.rejectReason;
+        this.count = src.count;
         this.exchangeOrderIdLength = src.exchangeOrderIdLength;
         System.arraycopy(src.exchangeOrderId, 0, this.exchangeOrderId, 0, src.exchangeOrderIdLength);
     }

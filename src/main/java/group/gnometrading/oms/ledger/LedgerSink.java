@@ -1,7 +1,10 @@
 package group.gnometrading.oms.ledger;
 
 import group.gnometrading.oms.position.Position;
+import group.gnometrading.oms.state.OrderState;
+import group.gnometrading.schemas.Liquidity;
 import group.gnometrading.schemas.OrderExecutionReport;
+import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.schemas.Side;
 
 /**
@@ -39,11 +42,22 @@ public interface LedgerSink {
                 long price,
                 long fee,
                 long eventTimeNs,
+                Liquidity liquidity,
                 Position after) {}
 
         @Override
         public void orderClosed(
-                int strategyId, int listingId, int exchangeId, long clientOidCounter, long filledQty, long timeNs) {}
+                int strategyId,
+                int listingId,
+                int exchangeId,
+                long clientOidCounter,
+                long filledQty,
+                OrderState state,
+                RejectReason rejectReason,
+                long timeNs) {}
+
+        @Override
+        public void orderRefused(int listingId, RejectReason reason) {}
 
         @Override
         public boolean isFailing(long nowNs) {
@@ -65,7 +79,10 @@ public interface LedgerSink {
     /** The venue acknowledged an order; the report carries the id the venue knows it by. */
     void orderAcked(int strategyId, int listingId, int exchangeId, long clientOidCounter, OrderExecutionReport report);
 
-    /** The OMS booked a fill; {@code after} is the strategy's position on the listing once it was applied. */
+    /**
+     * The OMS booked a fill; {@code after} is the strategy's position on the listing once it was applied, and
+     * {@code liquidity} is null when the venue didn't say whether it made or took.
+     */
     void fillBooked(
             int strategyId,
             int listingId,
@@ -76,10 +93,25 @@ public interface LedgerSink {
             long price,
             long fee,
             long eventTimeNs,
+            Liquidity liquidity,
             Position after);
 
-    /** An order reached a terminal state. */
-    void orderClosed(int strategyId, int listingId, int exchangeId, long clientOidCounter, long filledQty, long timeNs);
+    /** An order reached a terminal state; {@code rejectReason} is set only when it ended rejected. */
+    void orderClosed(
+            int strategyId,
+            int listingId,
+            int exchangeId,
+            long clientOidCounter,
+            long filledQty,
+            OrderState state,
+            RejectReason rejectReason,
+            long timeNs);
+
+    /**
+     * The OMS refused an order or a modify before it reached the venue, so no order record exists for it. Only
+     * counted: a burst of refusals must never crowd out the events that positions depend on.
+     */
+    void orderRefused(int listingId, RejectReason reason);
 
     /**
      * Whether trading must stop because the ledger can't be trusted to hold what happens next: events were lost,
