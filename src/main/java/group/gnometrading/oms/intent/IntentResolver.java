@@ -12,6 +12,7 @@ import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.schemas.OrderExecutionReportDecoder;
 import group.gnometrading.schemas.OrderFlagsDecoder;
 import group.gnometrading.schemas.OrderType;
+import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.TimeInForce;
 import java.util.function.Consumer;
@@ -26,6 +27,7 @@ public final class IntentResolver {
     private final LongSupplier oidSupplier;
     private final int strategyId;
     private final IntPredicate nativeModifyByListing;
+    private final LongSupplier nanoClock;
     private final Order pendingOrder = new Order();
     private final CancelOrder pendingCancel = new CancelOrder();
     private final ModifyOrder pendingModify = new ModifyOrder();
@@ -41,9 +43,12 @@ public final class IntentResolver {
     /**
      * @param nativeModifyByListing whether a listing's venue can change a working order in place; asked
      *     once per listing, when its slots are created
+     * @param nanoClock times the cooldown after a rate-limit refusal
      */
-    public IntentResolver(LongSupplier oidSupplier, int strategyId, IntPredicate nativeModifyByListing) {
+    public IntentResolver(
+            LongSupplier oidSupplier, int strategyId, IntPredicate nativeModifyByListing, LongSupplier nanoClock) {
         this.oidSupplier = oidSupplier;
+        this.nanoClock = nanoClock;
         this.strategyId = strategyId;
         this.nativeModifyByListing = nativeModifyByListing;
     }
@@ -142,6 +147,9 @@ public final class IntentResolver {
                 // Order still live, no state change
             }
             case CANCEL, REJECT, EXPIRE -> {
+                if (exec == ExecType.REJECT && report.decoder.rejectReason() == RejectReason.RATE_LIMITED) {
+                    slot.onRateLimited(nanoClock.getAsLong());
+                }
                 slot.onTerminal();
                 if (slot.hasQueuedIntent() && slot.getQueuedSize() > 0) {
                     long price = slot.getQueuedPrice();
@@ -156,6 +164,9 @@ public final class IntentResolver {
             default -> {
                 // CANCEL_REJECT: order remains live, revert pending state
                 if (slot.getState() == OrderSlot.State.PENDING_MODIFY) {
+                    if (report.decoder.rejectReason() == RejectReason.RATE_LIMITED) {
+                        slot.onRateLimited(nanoClock.getAsLong());
+                    }
                     slot.onModifyRejected();
                     if (slot.hasQueuedIntent()) {
                         processQueuedIntentOnLive(exchangeId, securityId, slot, handler);
@@ -237,6 +248,9 @@ public final class IntentResolver {
             long restingQty,
             short flags,
             ActionSink handler) {
+        if (isCoolingDown(slot)) {
+            return;
+        }
         if (slot.supportsNativeModify()) {
             final long orderQty = slot.orderQtyForResting(restingQty);
             slot.onModifySubmitted(price, orderQty);
@@ -288,6 +302,9 @@ public final class IntentResolver {
             short flags,
             OrderSlot slot,
             ActionSink handler) {
+        if (isCoolingDown(slot)) {
+            return;
+        }
         long oid = oidSupplier.getAsLong();
         pendingOrder.encodeClientOid(oid, strategyId);
         pendingOrder
@@ -303,6 +320,14 @@ public final class IntentResolver {
         pendingOrder.encoder.flags().postOnly(OrderFlagsDecoder.postOnly((byte) flags));
         slot.onNewSubmitted(oid, price, size, flags);
         handler.onNewOrder(pendingOrder);
+    }
+
+    /**
+     * Held back after a rate-limit refusal: the strategy's next intent once the cooldown is over places
+     * what it then wants, so nothing is queued meanwhile.
+     */
+    private boolean isCoolingDown(OrderSlot slot) {
+        return slot.hasCooldown() && slot.isCoolingDown(nanoClock.getAsLong());
     }
 
     private void resolveTake(Intent intent, long takeSize, ActionSink handler) {

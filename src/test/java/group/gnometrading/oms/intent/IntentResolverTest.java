@@ -11,6 +11,7 @@ import group.gnometrading.schemas.ModifyOrder;
 import group.gnometrading.schemas.Order;
 import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.schemas.OrderType;
+import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.TimeInForce;
 import java.util.ArrayList;
@@ -26,6 +27,7 @@ class IntentResolverTest {
     private static final int LISTING_ID = 100;
     private static final int STRATEGY_ID = 7;
 
+    private final AtomicLong clock = new AtomicLong(1_000_000_000_000L);
     private AtomicLong oidCounter;
     private IntentResolver resolver;
     private CapturingSink sink;
@@ -33,7 +35,7 @@ class IntentResolverTest {
     @BeforeEach
     void setUp() {
         oidCounter = new AtomicLong(0);
-        resolver = new IntentResolver(oidCounter::incrementAndGet, STRATEGY_ID, listingId -> true);
+        resolver = new IntentResolver(oidCounter::incrementAndGet, STRATEGY_ID, listingId -> true, clock::get);
         sink = new CapturingSink();
     }
 
@@ -981,10 +983,14 @@ class IntentResolverTest {
     @Test
     void nativeModifyCapabilityAskedOncePerSlot() {
         AtomicLong lookups = new AtomicLong();
-        resolver = new IntentResolver(oidCounter::incrementAndGet, STRATEGY_ID, listingId -> {
-            lookups.incrementAndGet();
-            return true;
-        });
+        resolver = new IntentResolver(
+                oidCounter::incrementAndGet,
+                STRATEGY_ID,
+                listingId -> {
+                    lookups.incrementAndGet();
+                    return true;
+                },
+                clock::get);
 
         resolve(100L, 10L, 101L, 5L);
         resolve(100L, 10L, 101L, 5L);
@@ -1015,6 +1021,141 @@ class IntentResolverTest {
 
         assertEquals(1, sink.modifies.size(), "slot must be LIVE, not stuck PENDING_MODIFY");
         assertEquals(103L, sink.modifies.get(0).price());
+    }
+
+    // --- rate-limit cooldown ---
+
+    @Test
+    void rateLimitedRejectHoldsNewOrdersUntilTheCooldownEnds() {
+        resolve(100L, 10L, nullPrice(), 0L);
+        rejectRateLimited(sink.newOrders.get(0).clientOidCounter);
+        sink.clear();
+
+        resolve(100L, 10L, nullPrice(), 0L);
+        clock.addAndGet(OrderSlot.INITIAL_COOLDOWN_NANOS - 1);
+        resolve(100L, 10L, nullPrice(), 0L);
+        assertEquals(0, sink.newOrders.size(), "held through the cooldown");
+
+        clock.addAndGet(1);
+        resolve(100L, 10L, nullPrice(), 0L);
+        assertEquals(1, sink.newOrders.size());
+    }
+
+    @Test
+    void rejectionStormSendsOneOrderPerCooldownAndTheCooldownDoublesToItsCap() {
+        long expectedCooldown = OrderSlot.INITIAL_COOLDOWN_NANOS;
+        for (int i = 0; i < 8; i++) {
+            sink.clear();
+            for (int tick = 0; tick < 50; tick++) {
+                resolve(100L, 10L, nullPrice(), 0L);
+            }
+            assertEquals(1, sink.newOrders.size(), "round " + i);
+            rejectRateLimited(sink.newOrders.get(0).clientOidCounter);
+
+            clock.addAndGet(expectedCooldown - 1);
+            sink.clear();
+            resolve(100L, 10L, nullPrice(), 0L);
+            assertEquals(0, sink.newOrders.size(), "still cooling down in round " + i);
+            clock.addAndGet(1);
+            expectedCooldown = Math.min(OrderSlot.MAX_COOLDOWN_NANOS, expectedCooldown * 2);
+        }
+    }
+
+    @Test
+    void ackResetsTheCooldown() {
+        resolve(100L, 10L, nullPrice(), 0L);
+        rejectRateLimited(sink.newOrders.get(0).clientOidCounter);
+        clock.addAndGet(OrderSlot.INITIAL_COOLDOWN_NANOS);
+        sink.clear();
+        resolve(100L, 10L, nullPrice(), 0L);
+        long oid = sink.newOrders.get(0).clientOidCounter;
+        ack(oid, Side.Bid);
+        resolve(nullPrice(), 0L, nullPrice(), 0L);
+        report(oid, ExecType.CANCEL, 0L);
+        sink.clear();
+
+        resolve(100L, 10L, nullPrice(), 0L);
+        rejectRateLimited(sink.newOrders.get(0).clientOidCounter);
+        clock.addAndGet(OrderSlot.INITIAL_COOLDOWN_NANOS);
+        sink.clear();
+        resolve(100L, 10L, nullPrice(), 0L);
+
+        assertEquals(1, sink.newOrders.size(), "the cooldown started again from its first step");
+    }
+
+    @Test
+    void otherRejectsStartNoCooldown() {
+        resolve(100L, 10L, nullPrice(), 0L);
+        resolver.onExecutionReport(
+                EXCHANGE_ID,
+                SECURITY_ID,
+                LISTING_ID,
+                buildReport(sink.newOrders.get(0).clientOidCounter, ExecType.REJECT, 0L, 0L),
+                Side.Bid,
+                sink);
+        sink.clear();
+
+        resolve(100L, 10L, nullPrice(), 0L);
+
+        assertEquals(1, sink.newOrders.size());
+    }
+
+    @Test
+    void cancelsAreNeverHeldBack() {
+        long oid = goLiveReturningOid(100L, 10L);
+        resolve(101L, 10L, nullPrice(), 0L);
+        rejectRateLimitedModify(oid);
+        sink.clear();
+
+        resolve(nullPrice(), 0L, nullPrice(), 0L);
+
+        assertEquals(1, sink.cancels.size());
+    }
+
+    @Test
+    void rateLimitedModifyHoldsAmendsAndLeavesTheOrderAsItWas() {
+        long oid = goLiveReturningOid(100L, 10L);
+        resolve(101L, 10L, nullPrice(), 0L);
+        assertEquals(1, sink.modifies.size());
+        rejectRateLimitedModify(oid);
+        sink.clear();
+
+        resolve(102L, 10L, nullPrice(), 0L);
+        assertEquals(0, sink.modifies.size(), "held through the cooldown");
+        assertEquals(0, sink.cancels.size());
+
+        clock.addAndGet(OrderSlot.INITIAL_COOLDOWN_NANOS);
+        resolve(102L, 10L, nullPrice(), 0L);
+        assertEquals(1, sink.modifies.size());
+        assertEquals(102L, sink.modifies.get(0).price);
+    }
+
+    @Test
+    void cancelReplaceVenueHoldsTheReplacementAfterARateLimitedReject() {
+        useCancelReplaceVenue();
+        resolve(100L, 10L, nullPrice(), 0L);
+        long oid = sink.newOrders.get(0).clientOidCounter;
+        resolve(101L, 10L, nullPrice(), 0L); // queued behind the pending order
+        sink.clear();
+
+        rejectRateLimited(oid);
+
+        assertEquals(0, sink.newOrders.size(), "the queued order isn't sent straight into the limit");
+        clock.addAndGet(OrderSlot.INITIAL_COOLDOWN_NANOS);
+        resolve(101L, 10L, nullPrice(), 0L);
+        assertEquals(1, sink.newOrders.size());
+    }
+
+    private void rejectRateLimited(long clientOidCounter) {
+        OrderExecutionReport report = buildReport(clientOidCounter, ExecType.REJECT, 0L, 0L);
+        report.encoder.rejectReason(RejectReason.RATE_LIMITED);
+        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, LISTING_ID, report, Side.Bid, sink);
+    }
+
+    private void rejectRateLimitedModify(long clientOidCounter) {
+        OrderExecutionReport report = buildReport(clientOidCounter, ExecType.CANCEL_REJECT, 100L, 10L);
+        report.encoder.rejectReason(RejectReason.RATE_LIMITED);
+        resolver.onExecutionReport(EXCHANGE_ID, SECURITY_ID, LISTING_ID, report, Side.Bid, sink);
     }
 
     private void resolve(long bidPrice, long bidSize, long askPrice, long askSize) {
@@ -1085,7 +1226,7 @@ class IntentResolverTest {
     }
 
     private void useCancelReplaceVenue() {
-        resolver = new IntentResolver(oidCounter::incrementAndGet, STRATEGY_ID, listingId -> false);
+        resolver = new IntentResolver(oidCounter::incrementAndGet, STRATEGY_ID, listingId -> false, clock::get);
     }
 
     private long goLiveReturningOid(long bidPrice, long bidSize) {

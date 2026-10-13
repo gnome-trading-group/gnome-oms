@@ -10,13 +10,13 @@ import org.junit.jupiter.params.provider.ValueSource;
 class VenueCapabilitiesTest {
 
     @ParameterizedTest
-    @ValueSource(strings = {"KALSHI", "BINANCE", "HYPERLIQUID", "LIGHTER"})
+    @ValueSource(strings = {"KALSHI", "BINANCE", "HYPERLIQUID", "LIGHTER", "POLYMARKET_US"})
     void venuesWithAmendSupportNativeModify(String exchangeCode) {
         assertTrue(VenueCapabilities.supportsNativeModify(exchangeCode));
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"POLYMARKET_INTL", "POLYMARKET_US", "SOMETHING_NEW", "kalshi", ""})
+    @ValueSource(strings = {"POLYMARKET_INTL", "SOMETHING_NEW", "kalshi", ""})
     void everythingElseCancelsThenSubmits(String exchangeCode) {
         assertFalse(VenueCapabilities.supportsNativeModify(exchangeCode));
     }

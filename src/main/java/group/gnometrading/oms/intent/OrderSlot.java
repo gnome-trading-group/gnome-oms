@@ -14,8 +14,15 @@ package group.gnometrading.oms.intent;
  *
  * <p>On a venue without native modify a slot never enters PENDING_MODIFY: changing a live order
  * cancels it and submits the target as a new order once the cancel is confirmed.
+ *
+ * <p>An order or amend refused for the venue's rate limit starts a cooldown, doubling with each
+ * refusal in a row, during which the slot sends nothing new; resending on every intent would only
+ * be refused again. Cancels are never held back.
  */
 public final class OrderSlot {
+
+    static final long INITIAL_COOLDOWN_NANOS = 100_000_000L;
+    static final long MAX_COOLDOWN_NANOS = 2_000_000_000L;
 
     public enum State {
         EMPTY,
@@ -46,6 +53,9 @@ public final class OrderSlot {
     private long queuedSize;
     private short queuedFlags;
     private boolean hasQueuedIntent;
+
+    private long cooldownStepNanos;
+    private long cooldownUntilNanos;
 
     public OrderSlot(boolean nativeModify, int listingId, int exchangeId, long securityId) {
         this.nativeModify = nativeModify;
@@ -101,6 +111,7 @@ public final class OrderSlot {
 
     public void onNewAcked() {
         this.state = State.LIVE;
+        this.cooldownStepNanos = 0;
     }
 
     public void onCancelSubmitted() {
@@ -142,6 +153,7 @@ public final class OrderSlot {
 
     public void onModifyConfirmed() {
         this.state = State.LIVE;
+        this.cooldownStepNanos = 0;
         this.activePrice = this.pendingModifyPrice;
         this.activeOrderQty = this.pendingModifyOrderQty;
         this.pendingModifyPrice = 0;
@@ -175,6 +187,24 @@ public final class OrderSlot {
         this.activeFlags = 0;
         this.pendingModifyPrice = 0;
         this.pendingModifyOrderQty = 0;
+    }
+
+    /** The venue refused this slot's order or amend for its rate limit. */
+    public void onRateLimited(long nowNanos) {
+        this.cooldownStepNanos = this.cooldownStepNanos == 0
+                ? INITIAL_COOLDOWN_NANOS
+                : Math.min(MAX_COOLDOWN_NANOS, this.cooldownStepNanos * 2);
+        this.cooldownUntilNanos = nowNanos + this.cooldownStepNanos;
+    }
+
+    /** Whether a rate-limit refusal has been seen since the venue last accepted this slot's order. */
+    public boolean hasCooldown() {
+        return this.cooldownStepNanos != 0;
+    }
+
+    /** Whether new orders and amends are held back at {@code nowNanos}. */
+    public boolean isCoolingDown(long nowNanos) {
+        return this.cooldownStepNanos != 0 && this.cooldownUntilNanos - nowNanos > 0;
     }
 
     public void queueIntent(long price, long size, short flags) {

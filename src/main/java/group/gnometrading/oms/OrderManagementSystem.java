@@ -355,7 +355,8 @@ public final class OrderManagementSystem {
     public IntentResolver getOrCreateResolver(int strategyId) {
         IntentResolver resolver = resolvers.get(strategyId);
         if (resolver == null) {
-            resolver = new IntentResolver(this::nextOid, strategyId, this::listingSupportsNativeModify);
+            resolver = new IntentResolver(
+                    this::nextOid, strategyId, this::listingSupportsNativeModify, this.clock::nanoTime);
             resolvers.put(strategyId, resolver);
         }
         return resolver;

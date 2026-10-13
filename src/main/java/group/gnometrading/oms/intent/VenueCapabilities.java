@@ -19,7 +19,7 @@ public final class VenueCapabilities {
             return false;
         }
         return switch (exchangeCode) {
-            case "KALSHI", "BINANCE", "HYPERLIQUID", "LIGHTER" -> true;
+            case "KALSHI", "BINANCE", "HYPERLIQUID", "LIGHTER", "POLYMARKET_US" -> true;
             default -> false;
         };
     }
