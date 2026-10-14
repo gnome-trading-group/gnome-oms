@@ -348,6 +348,7 @@ public final class RiskSyncAgent implements GnomeAgent {
                     record.policyId,
                     e);
             snapshot.addKill(record.strategyId, record.listingId, record.exchangeId);
+            snapshot.unbuildablePolicies++;
             return false;
         }
     }

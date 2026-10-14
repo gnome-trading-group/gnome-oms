@@ -104,6 +104,28 @@ class RiskEngineTest {
     }
 
     @Test
+    void testStalenessIsReadableFromAnotherThreadBeforeTheOmsNotices() {
+        final long[] now = {1_000};
+        final RiskEngine engine =
+                RiskEngine.syncedFromRegistry(() -> now[0], Duration.ofSeconds(30), ListingDirectory.EMPTY, 1);
+        assertTrue(engine.isStale(now[0]), "never refreshed");
+        engine.recordRefresh(now[0]);
+        assertFalse(engine.isStale(now[0] + 30_000));
+        assertTrue(engine.isStale(now[0] + 30_001));
+        assertFalse(new RiskEngine().isStale(now[0]), "an engine without a registry is never stale");
+    }
+
+    @Test
+    void testLatchesThatDontFitTheRingAreCountedRatherThanLostSilently() {
+        final RiskEngine engine = new RiskEngine();
+        final int capacity = 1024;
+        for (int strategy = 1; strategy <= capacity + 2; strategy++) {
+            assertTrue(engine.latch(strategy, 0, 0, RiskEngine.CAUSE_MARKET_LIMIT, 0), "still halted in the OMS");
+        }
+        assertEquals(2, engine.droppedLatches());
+    }
+
+    @Test
     void testKillScopesBlockOnlyWhatTheyCover() {
         final RiskEngine engine = new RiskEngine();
         final RiskEngineSnapshot snapshot = new RiskEngineSnapshot();
@@ -602,6 +624,7 @@ class RiskEngineTest {
         final RiskEngineSnapshot unguarded = new RiskEngineSnapshot();
         unguarded.unguarded = true;
         engine.publishSnapshot(unguarded);
+        assertTrue(engine.isUnguarded());
 
         final RecordingKillHandler handler = new RecordingKillHandler();
         engine.applyChanges(handler);

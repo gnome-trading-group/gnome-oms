@@ -29,6 +29,8 @@ final class RiskEngineSnapshot {
      * kill until the policies are added.
      */
     boolean unguarded;
+    /** Policies that couldn't be built, so each killed its target instead; only this session knows of those kills. */
+    int unbuildablePolicies;
 
     final IntHashSet killedStrategies = new IntHashSet();
     final IntHashSet killedExchanges = new IntHashSet();

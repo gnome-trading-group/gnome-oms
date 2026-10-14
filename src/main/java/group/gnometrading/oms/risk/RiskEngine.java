@@ -14,6 +14,7 @@ import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.schemas.Side;
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.IntConsumer;
 import java.util.function.LongConsumer;
@@ -76,6 +77,8 @@ public final class RiskEngine {
     private final int staleCheckPasses;
     private volatile long lastRefreshMs = NEVER;
     private volatile long appliedSequence;
+    // Latches that didn't fit the ring, so were never recorded in the registry; written by the OMS thread only.
+    private final AtomicLong droppedLatches = new AtomicLong();
     private boolean stale;
     private int violatedPolicyId;
     private int breachedPolicyId;
@@ -326,7 +329,9 @@ public final class RiskEngine {
         }
         rejectStreaks.clear(strategyId, exchangeId, listingId);
         final int index = latchedHalts.tryClaim();
-        if (index >= 0) {
+        if (index < 0) {
+            droppedLatches.incrementAndGet();
+        } else {
             final LatchedHalt halt = latchedHalts.indexAt(index);
             halt.strategyId = strategyId;
             halt.exchangeId = exchangeId;
@@ -452,6 +457,30 @@ public final class RiskEngine {
             current.killedStrategyListings.forEachLong(releaseStrategyListingLatch);
             current.confirmedStrategyListingHalts.forEachLong(releaseStrategyListingLatch);
         }
+    }
+
+    /**
+     * Whether risk is stale as of {@code nowMs}: what the OMS will find on its next check. Any thread, for reporting;
+     * the OMS's own decisions read its cached flag.
+     */
+    public boolean isStale(final long nowMs) {
+        final long refreshedAt = lastRefreshMs;
+        return clock != null && (refreshedAt == NEVER || nowMs - refreshedAt > staleAfterMs);
+    }
+
+    /** Whether the latest policies leave a required one missing, so every order is refused. Any thread. */
+    public boolean isUnguarded() {
+        return snapshot.get().unguarded;
+    }
+
+    /** How many policies in the latest snapshot couldn't be built and killed their targets instead. Any thread. */
+    public int unbuildablePolicies() {
+        return snapshot.get().unbuildablePolicies;
+    }
+
+    /** Latches never recorded in the registry because the ring was full. Any thread. */
+    public long droppedLatches() {
+        return droppedLatches.get();
     }
 
     /** Whether anything is killed or latched, so its orders may still need cancelling. OMS thread only. */

@@ -265,6 +265,7 @@ class RiskSyncAgentTest {
         assertNull(riskEngine.check(order, positions, orders, STRATEGY_ID + 1, LISTING_ID + 1, EXCHANGE_ID));
         order.encoder.size(11);
         assertNotNull(riskEngine.check(order, positions, orders, STRATEGY_ID + 1, LISTING_ID + 1, EXCHANGE_ID));
+        assertEquals(2, riskEngine.unbuildablePolicies(), "reported, since the registry never hears of these kills");
     }
 
     @Test
