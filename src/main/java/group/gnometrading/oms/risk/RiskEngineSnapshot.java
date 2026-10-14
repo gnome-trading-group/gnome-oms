@@ -1,5 +1,6 @@
 package group.gnometrading.oms.risk;
 
+import group.gnometrading.oms.risk.policy.MarketOrderSlippagePolicy;
 import group.gnometrading.risk.RiskMaster;
 import org.agrona.collections.IntHashSet;
 import org.agrona.collections.LongHashSet;
@@ -17,6 +18,7 @@ final class RiskEngineSnapshot {
             new ScopedGroups<>(() -> new OrderPolicyGroup(MAX_POLICIES_PER_GROUP));
     final ScopedGroups<MarketPolicyGroup> marketGroups =
             new ScopedGroups<>(() -> new MarketPolicyGroup(MAX_POLICIES_PER_GROUP));
+    final ScopedGroups<SlippageLimit> slippageLimits = new ScopedGroups<>(SlippageLimit::new);
 
     /** Increases with each published snapshot, so the sync thread can tell which ones the OMS has applied. */
     long sequence;
@@ -54,6 +56,8 @@ final class RiskEngineSnapshot {
             final int policyId) {
         if (policy instanceof OrderRiskPolicy orderPolicy) {
             orderGroups.groupFor(strategyId, listingId, exchangeId).add(orderPolicy, policyId);
+        } else if (policy instanceof MarketOrderSlippagePolicy slippage) {
+            slippageLimits.groupFor(strategyId, listingId, exchangeId).tighten(slippage.maxSlippage());
         } else {
             marketGroups.groupFor(strategyId, listingId, exchangeId).add((MarketRiskPolicy) policy, policyId);
         }

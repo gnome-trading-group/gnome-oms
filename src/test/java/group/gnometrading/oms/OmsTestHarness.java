@@ -6,6 +6,7 @@ import static org.mockito.Mockito.when;
 
 import group.gnometrading.RegistryConnection;
 import group.gnometrading.SecurityMaster;
+import group.gnometrading.collections.IntToIntHashMap;
 import group.gnometrading.logging.NullLogger;
 import group.gnometrading.oms.action.ActionSink;
 import group.gnometrading.oms.ledger.LedgerSink;
@@ -29,6 +30,7 @@ import group.gnometrading.schemas.OrderStatus;
 import group.gnometrading.schemas.OrderType;
 import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.schemas.Side;
+import group.gnometrading.schemas.Statics;
 import group.gnometrading.schemas.TimeInForce;
 import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
@@ -52,6 +54,10 @@ public final class OmsTestHarness {
     static final int STRATEGY_ID = 7;
     static final String NATIVE_MODIFY_EXCHANGE_CODE = "KALSHI";
     static final String CANCEL_REPLACE_EXCHANGE_CODE = "POLYMARKET_INTL";
+    /** The default listing's book: a market take is priced off it. */
+    static final long TOUCH_BID = Statics.PRICE_SCALING_FACTOR * 4 / 10;
+
+    static final long TOUCH_ASK = Statics.PRICE_SCALING_FACTOR * 6 / 10;
 
     final OrderManagementSystem oms;
     final RecordingSink sink;
@@ -59,6 +65,8 @@ public final class OmsTestHarness {
     final DefaultPositionTracker positionTracker;
     final PooledOrderStateManager orderStateManager;
     final RiskEngine riskEngine;
+    private final SharedPriceBuffer priceBuffer;
+    private final PriceSlotRegistry priceSlots;
     private long nowNanos = 1;
     private final EpochNanoClock clock = () -> nowNanos;
 
@@ -67,11 +75,14 @@ public final class OmsTestHarness {
     }
 
     OmsTestHarness(RiskEngine riskEngine) {
-        this(riskEngine, new SharedPriceBuffer(1), new PriceSlotRegistry(1));
+        this(riskEngine, new SharedPriceBuffer(4), new PriceSlotRegistry(4));
+        quote(LISTING_ID, TOUCH_BID, TOUCH_ASK);
     }
 
     OmsTestHarness(RiskEngine riskEngine, SharedPriceBuffer priceBuffer, PriceSlotRegistry priceSlots) {
         this.riskEngine = riskEngine;
+        this.priceBuffer = priceBuffer;
+        this.priceSlots = priceSlots;
         this.securityMaster = mock(SecurityMaster.class);
         this.orderStateManager = new PooledOrderStateManager(64);
         this.positionTracker = new DefaultPositionTracker(new SharedPositionBuffer(16));
@@ -87,6 +98,15 @@ public final class OmsTestHarness {
                 clock);
         this.sink = new RecordingSink();
         stubDefaultListing();
+    }
+
+    /** Sets a listing's best bid and ask, as market data would; 0 is an empty side. */
+    void quote(int listingId, long bid, long ask) {
+        int slot = priceSlots.getSlot(listingId);
+        if (slot == IntToIntHashMap.MISSING) {
+            slot = priceSlots.register(listingId);
+        }
+        priceBuffer.writeQuote(slot, bid, ask);
     }
 
     /** What the OMS agent does at the top of its loop, over enough passes to reach the periodic re-sweep check. */

@@ -11,6 +11,7 @@ import group.gnometrading.oms.pnl.PriceSlotRegistry;
 import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.DefaultPositionTracker;
 import group.gnometrading.oms.position.SharedPositionBuffer;
+import group.gnometrading.oms.risk.policy.MarketOrderSlippagePolicy;
 import group.gnometrading.oms.risk.policy.MaxConsecutiveRejectsPolicy;
 import group.gnometrading.oms.risk.policy.MaxOrderSizePolicy;
 import group.gnometrading.oms.risk.policy.MaxTotalPnlLossPolicy;
@@ -44,6 +45,27 @@ class RiskEngineTest {
         positions = new DefaultPositionTracker(new SharedPositionBuffer(8));
         order = new Order();
         order.encoder.side(Side.Bid).size(1).price(100);
+    }
+
+    // --- market order slippage ---
+
+    @Test
+    void testMarketSlippageIsTheTightestThatAppliesAndNothingWithoutOne() {
+        assertEquals(0, new RiskEngine().marketSlippage(7, 100, 1), "none set: take at the touch");
+
+        final RiskEngine engine = RiskEngine.withScopedPolicies(
+                List.of(
+                        new RiskEngine.ScopedPolicy(0, 0, 0, new MarketOrderSlippagePolicy(50)),
+                        new RiskEngine.ScopedPolicy(0, 0, 1, new MarketOrderSlippagePolicy(30)),
+                        new RiskEngine.ScopedPolicy(7, 100, 0, new MarketOrderSlippagePolicy(10)),
+                        new RiskEngine.ScopedPolicy(8, 0, 0, new MarketOrderSlippagePolicy(5))),
+                ListingDirectory.EMPTY,
+                new RejectStreaks());
+        assertEquals(10, engine.marketSlippage(7, 100, 1));
+        assertEquals(30, engine.marketSlippage(7, 101, 1), "the exchange row, not another listing's");
+        assertEquals(50, engine.marketSlippage(7, 101, 2));
+        assertEquals(5, engine.marketSlippage(8, 101, 1));
+        assertNull(engine.check(order, positions, orders, 7, 100, 1), "slippage prices orders; it never refuses one");
     }
 
     // --- kill scopes ---

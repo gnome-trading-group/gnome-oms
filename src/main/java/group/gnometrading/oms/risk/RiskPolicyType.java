@@ -11,14 +11,20 @@ public enum RiskPolicyType {
     PRICE_COLLAR(Category.ORDER),
     MAX_COMMITTED_CAPITAL(Category.ORDER),
     MAX_TOTAL_PNL_LOSS(Category.MARKET),
-    MAX_CONSECUTIVE_REJECTS(Category.MARKET);
+    MAX_CONSECUTIVE_REJECTS(Category.MARKET),
+    MARKET_ORDER_SLIPPAGE(Category.PRICING);
 
     public enum Category {
         ORDER,
         MARKET,
+        /** Not a check: a value that prices orders before the checks judge them. */
+        PRICING,
         /** Not a policy: an enabled row blocks its target and cancels everything in it. */
         KILL
     }
+
+    // values() copies its array on every call.
+    private static final RiskPolicyType[] ALL = values();
 
     private final Category category;
 
@@ -31,24 +37,10 @@ public enum RiskPolicyType {
     }
 
     public static RiskPolicyType fromString(final GnomeString type) {
-        if (type.equals("KILL_SWITCH")) {
-            return KILL_SWITCH;
-        } else if (type.equals("MAX_ORDER_NOTIONAL")) {
-            return MAX_ORDER_NOTIONAL;
-        } else if (type.equals("MAX_ORDER_SIZE")) {
-            return MAX_ORDER_SIZE;
-        } else if (type.equals("MAX_POSITION")) {
-            return MAX_POSITION;
-        } else if (type.equals("MAX_OPEN_ORDERS")) {
-            return MAX_OPEN_ORDERS;
-        } else if (type.equals("PRICE_COLLAR")) {
-            return PRICE_COLLAR;
-        } else if (type.equals("MAX_COMMITTED_CAPITAL")) {
-            return MAX_COMMITTED_CAPITAL;
-        } else if (type.equals("MAX_TOTAL_PNL_LOSS")) {
-            return MAX_TOTAL_PNL_LOSS;
-        } else if (type.equals("MAX_CONSECUTIVE_REJECTS")) {
-            return MAX_CONSECUTIVE_REJECTS;
+        for (final RiskPolicyType candidate : ALL) {
+            if (type.equals(candidate.name())) {
+                return candidate;
+            }
         }
         return null;
     }

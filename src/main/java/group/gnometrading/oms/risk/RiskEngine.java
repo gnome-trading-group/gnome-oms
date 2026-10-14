@@ -687,6 +687,25 @@ public final class RiskEngine {
                         groups.listing(listingId), strategyId, listingId, positions, orders, 0, listingId);
     }
 
+    /**
+     * How far past the touch a market order may fill: the tightest {@code MARKET_ORDER_SLIPPAGE} that applies, or 0
+     * (the touch itself) when none does.
+     */
+    public long marketSlippage(final int strategyId, final int listingId, final int exchangeId) {
+        final ScopedGroups<SlippageLimit> limits = snapshot.get().slippageLimits;
+        long tightest = limits.global.maxSlippage;
+        tightest = tighter(tightest, limits.exchange(exchangeId));
+        tightest = tighter(tightest, limits.strategy(strategyId));
+        tightest = tighter(tightest, limits.strategyExchange(strategyId, exchangeId));
+        tightest = tighter(tightest, limits.strategyListing(strategyId, listingId));
+        tightest = tighter(tightest, limits.listing(listingId));
+        return tightest == SlippageLimit.NONE ? 0 : tightest;
+    }
+
+    private static long tighter(final long tightest, final SlippageLimit limit) {
+        return limit == null ? tightest : Math.min(tightest, limit.maxSlippage);
+    }
+
     private boolean checkOrderGroup(
             final OrderPolicyGroup group,
             final Order order,

@@ -132,15 +132,16 @@ intent: with 3 of 10 filled, an unchanged intent for 10 sends a modify to order 
 
 ### Exchange constraints
 
-Before risk checks, every new order and modify (including a cancel-then-new replacement) is checked
-against the listing's `ListingSpec` from the security master. A zero field is not checked, and a
+Before risk checks, a market order is priced (see *Market orders* below), then every new order and
+modify (including a cancel-then-new replacement) is checked against the listing's `ListingSpec` from
+the security master. A zero field is not checked, and a
 listing with no spec passes everything.
 
 | Rule | Check | Reject reason |
 |---|---|---|
 | Lot size | size (a modify's: the new leaves) is a multiple of `lotSize` | `INVALID_SIZE` |
-| Tick size | price is a multiple of `tickSize`; market orders have no price and skip it | `INVALID_PRICE` |
-| Min notional | price × size ≥ `minNotional`; a market order uses the last trade price | `INVALID_SIZE` |
+| Tick size | price is a multiple of `tickSize` | `INVALID_PRICE` |
+| Min notional | price × size ≥ `minNotional` | `INVALID_SIZE` |
 
 The OMS does not round prices: strategies must send prices on the tick, and an off-tick intent is
 rejected like any other constraint failure. `tickSize` is the increment the venue accepts everywhere
@@ -173,7 +174,8 @@ A take intent goes through `resolveTake`, which bypasses the slot mechanism enti
 1. Determine order type: `takeOrderType` == null → `MARKET`; else use as given.
 2. Allocate a fresh OID from the shared counter.
 3. Build a new order with `TimeInForce.IMMEDIATE_OR_CANCEL` and the chosen order type.
-4. Send it through `RiskCheckingSink.onNewOrder` — same risk gate as make orders.
+4. Send it through `RiskCheckingSink.onNewOrder` — same risk gate as make orders. A `MARKET` take is
+   priced there first (see *Market orders*).
 5. If accepted, the take order is tracked in the state manager and position leaves are
    updated, just like any other new order.
 
@@ -181,6 +183,24 @@ Take orders have **no slot**. When exec reports arrive for a take OID, the resol
 `onExecutionReport` returns early (no slot has that OID as its active order). Position
 tracking (`updatePositionTracking`) still runs before the resolver is called, so fills,
 cancels, and rejects all update the position correctly without slot involvement.
+
+### Market orders
+
+No venue we trade takes a market order without a price: Kalshi removed them from its API, and every
+Polymarket order is signed with one. So `RiskCheckingSink.onNewOrder` turns a `MARKET` order into an
+immediate-or-cancel `LIMIT` before any check runs, the way CME's market-with-protection does:
+
+- **Price:** a buy at the best ask plus the slippage allowance, rounded down to the tick; a sell at the
+  best bid less it, rounded up. Either way it always crosses the touch, even when the touch is finer than
+  the listing's tick. A binary listing's price stays within `[tick, $1 − tick]`.
+- **Allowance:** the tightest `MARKET_ORDER_SLIPPAGE` policy that applies (`maxSlippage`, price units),
+  or 0 when none does, which takes at the touch.
+- **No price:** with no best price on the side it would take (`SharedPriceBuffer`), the order is
+  rejected `INVALID_PRICE` (logged as rule `NO_MARKET_PRICE`) and nothing is sent.
+
+Every check after that (tick, min notional, price collar, notional and committed-capital limits) and the
+ledger see the real price. The gateways never receive a `MARKET` order; a strategy that wants to choose
+its own worst price sends a `LIMIT` take with `takeLimitPrice`.
 
 ### Side Effect on Make Orders
 

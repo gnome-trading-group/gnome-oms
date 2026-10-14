@@ -19,7 +19,6 @@ import group.gnometrading.oms.position.Position;
 import group.gnometrading.oms.position.SharedPositionBuffer;
 import group.gnometrading.oms.state.OrderState;
 import group.gnometrading.schemas.Liquidity;
-import group.gnometrading.schemas.OrderDecoder;
 import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.schemas.Side;
@@ -159,19 +158,6 @@ class LedgerAgentTest {
         agent.doWork();
         assertEquals(0, agent.consecutiveFailures());
         assertEquals(now[0], agent.lastAcceptedMs());
-    }
-
-    @Test
-    void aMarketOrderIsRecordedWithoutAPrice() throws Exception {
-        ring.orderOpened(7, 100, 1, 3L, Side.Bid, OrderDecoder.priceNullValue(), 10_000_000, 1L);
-
-        agent.doWork();
-
-        assertTrue(mapper.readTree(posted.get(0))
-                .get("orderOpens")
-                .get(0)
-                .get("price")
-                .isNull());
     }
 
     @Test

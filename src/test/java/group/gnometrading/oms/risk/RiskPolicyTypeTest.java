@@ -27,6 +27,7 @@ class RiskPolicyTypeTest {
                 Arguments.of("MAX_TOTAL_PNL_LOSS", RiskPolicyType.MAX_TOTAL_PNL_LOSS),
                 Arguments.of("MAX_COMMITTED_CAPITAL", RiskPolicyType.MAX_COMMITTED_CAPITAL),
                 Arguments.of("MAX_CONSECUTIVE_REJECTS", RiskPolicyType.MAX_CONSECUTIVE_REJECTS),
+                Arguments.of("MARKET_ORDER_SLIPPAGE", RiskPolicyType.MARKET_ORDER_SLIPPAGE),
                 Arguments.of("MAX_NOTIONAL", null),
                 Arguments.of("MAX_PNL_LOSS", null),
                 Arguments.of("UNKNOWN", null));
@@ -48,6 +49,7 @@ class RiskPolicyTypeTest {
                 Arguments.of(RiskPolicyType.PRICE_COLLAR, RiskPolicyType.Category.ORDER),
                 Arguments.of(RiskPolicyType.MAX_COMMITTED_CAPITAL, RiskPolicyType.Category.ORDER),
                 Arguments.of(RiskPolicyType.MAX_TOTAL_PNL_LOSS, RiskPolicyType.Category.MARKET),
-                Arguments.of(RiskPolicyType.MAX_CONSECUTIVE_REJECTS, RiskPolicyType.Category.MARKET));
+                Arguments.of(RiskPolicyType.MAX_CONSECUTIVE_REJECTS, RiskPolicyType.Category.MARKET),
+                Arguments.of(RiskPolicyType.MARKET_ORDER_SLIPPAGE, RiskPolicyType.Category.PRICING));
     }
 }

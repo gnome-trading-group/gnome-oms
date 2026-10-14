@@ -2,6 +2,7 @@ package group.gnometrading.oms.risk;
 
 import group.gnometrading.oms.pnl.PriceSlotRegistry;
 import group.gnometrading.oms.pnl.SharedPriceBuffer;
+import group.gnometrading.oms.risk.policy.MarketOrderSlippagePolicy;
 import group.gnometrading.oms.risk.policy.MaxCommittedCapitalPolicy;
 import group.gnometrading.oms.risk.policy.MaxConsecutiveRejectsPolicy;
 import group.gnometrading.oms.risk.policy.MaxOpenOrdersPolicy;
@@ -48,12 +49,13 @@ public final class PolicyFactory {
     public Configurable create(final RiskPolicyType type, final int listingId, final int exchangeId) {
         return switch (type) {
             case KILL_SWITCH -> throw new IllegalArgumentException("KILL_SWITCH is a kill, not a policy");
-            case MAX_ORDER_NOTIONAL -> new MaxOrderNotionalPolicy(priceBuffer, priceSlotRegistry);
+            case MAX_ORDER_NOTIONAL -> new MaxOrderNotionalPolicy();
             case MAX_ORDER_SIZE -> new MaxOrderSizePolicy();
             case MAX_POSITION -> new MaxPositionPolicy();
             case MAX_OPEN_ORDERS -> new MaxOpenOrdersPolicy(directory, listingId, exchangeId);
             case MAX_COMMITTED_CAPITAL -> new MaxCommittedCapitalPolicy(directory, listingId, exchangeId);
             case MAX_CONSECUTIVE_REJECTS -> new MaxConsecutiveRejectsPolicy(rejectStreaks, listingId, exchangeId);
+            case MARKET_ORDER_SLIPPAGE -> new MarketOrderSlippagePolicy();
             case PRICE_COLLAR -> {
                 if (priceBuffer == null || priceSlotRegistry == null) {
                     throw new IllegalArgumentException("PRICE_COLLAR requires SharedPriceBuffer and PriceSlotRegistry");

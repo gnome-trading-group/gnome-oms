@@ -26,6 +26,7 @@ import group.gnometrading.oms.risk.MarketRiskPolicy;
 import group.gnometrading.oms.risk.OrderRiskPolicy;
 import group.gnometrading.oms.risk.RejectStreaks;
 import group.gnometrading.oms.risk.RiskEngine;
+import group.gnometrading.oms.risk.policy.MarketOrderSlippagePolicy;
 import group.gnometrading.oms.risk.policy.MaxConsecutiveRejectsPolicy;
 import group.gnometrading.oms.risk.policy.MaxOrderSizePolicy;
 import group.gnometrading.oms.risk.policy.MaxTotalPnlLossPolicy;
@@ -41,6 +42,7 @@ import group.gnometrading.schemas.OrderType;
 import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.Statics;
+import group.gnometrading.schemas.TimeInForce;
 import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.ListingSpec;
@@ -58,6 +60,7 @@ class OrderManagementSystemTest {
 
     // Quantities in whole units; money then reads as price × units.
     private static final long UNIT = Statics.SIZE_SCALING_FACTOR;
+    private static final long CENT = Statics.PRICE_SCALING_FACTOR / 100;
 
     private static final int EXCHANGE_ID = 1;
     private static final int SECURITY_ID = 42;
@@ -211,7 +214,7 @@ class OrderManagementSystemTest {
                 new DefaultPositionTracker(new SharedPositionBuffer(8)),
                 engine,
                 securityMaster,
-                new SharedPriceBuffer(1),
+                priceBuffer,
                 slots,
                 LedgerSink.NONE,
                 () -> 0L);
@@ -298,20 +301,55 @@ class OrderManagementSystemTest {
         assertEquals(0, delegate.newOrders.size());
     }
 
+    // --- market orders are sent as priced immediate-or-cancel limits ---
+
     @Test
-    void testMarketOrderFallsBackToLastTradeWhenSideEmpty() {
-        stubSpec(0, Statics.PRICE_SCALING_FACTOR);
-        priceBuffer.writeTrade(priceSlot, Statics.PRICE_SCALING_FACTOR / 2);
-        priceBuffer.writeQuote(priceSlot, Statics.PRICE_SCALING_FACTOR / 10, 0);
-        submitMarketIntent(Side.Bid, 2 * UNIT); // no ask; 2 at the $0.50 last trade = $1.00
+    void testMarketOrderGoesOutAsAnImmediateLimitAtTheTouch() {
+        stubSpec(0, 0);
+        priceBuffer.writeQuote(priceSlot, 40 * CENT, 60 * CENT);
+        submitMarketIntent(Side.Bid, UNIT);
         assertEquals(1, delegate.newOrders.size());
+        final Order buy = delegate.newOrders.get(0);
+        assertEquals(OrderType.LIMIT, buy.decoder.orderType());
+        assertEquals(TimeInForce.IMMEDIATE_OR_CANCELED, buy.decoder.timeInForce());
+        assertEquals(60 * CENT, buy.decoder.price());
+
+        submitMarketIntent(Side.Ask, UNIT);
+        assertEquals(40 * CENT, delegate.newOrders.get(0).decoder.price());
     }
 
     @Test
-    void testMarketOrderWithNoPriceIsRejected() {
-        stubSpec(0, Statics.PRICE_SCALING_FACTOR);
-        submitMarketIntent(Side.Bid, 100 * UNIT);
-        assertEquals(0, delegate.newOrders.size());
+    void testMarketOrderIsPricedTheAllowedSlippagePastTheTouch() {
+        oms = omsWith(RiskEngine.withScopedPolicies(
+                List.of(
+                        new RiskEngine.ScopedPolicy(0, 0, 0, new MarketOrderSlippagePolicy(5 * CENT)),
+                        new RiskEngine.ScopedPolicy(
+                                STRATEGY_ID, 0, EXCHANGE_ID, new MarketOrderSlippagePolicy(2 * CENT))),
+                ListingDirectory.EMPTY,
+                new RejectStreaks()));
+        stubSpec(0, 0);
+        priceBuffer.writeQuote(priceSlot, 40 * CENT, 60 * CENT);
+
+        submitMarketIntent(Side.Bid, UNIT);
+        assertEquals(62 * CENT, delegate.newOrders.get(0).decoder.price(), "the tightest slippage that applies");
+        submitMarketIntent(Side.Ask, UNIT);
+        assertEquals(38 * CENT, delegate.newOrders.get(0).decoder.price());
+    }
+
+    @Test
+    void testMarketOrderWithNoPriceOnItsSideIsRejected() {
+        stubSpec(0, 0);
+        priceBuffer.writeTrade(priceSlot, 50 * CENT);
+        priceBuffer.writeQuote(priceSlot, 40 * CENT, 0);
+        submitMarketIntent(Side.Bid, UNIT);
+        assertEquals(0, delegate.newOrders.size(), "a trade price is not a price to take at");
+        assertEquals(List.of(RejectReason.INVALID_PRICE), delegate.rejects);
+        assertTrue(logger.linesFor(LogMessage.ORDER_REJECTED_EXCHANGE_CONSTRAINTS)
+                .get(0)
+                .endsWith(" 4"));
+
+        submitMarketIntent(Side.Ask, UNIT);
+        assertEquals(1, delegate.newOrders.size(), "the bid is there to sell into");
     }
 
     // --- minSize constraint ---

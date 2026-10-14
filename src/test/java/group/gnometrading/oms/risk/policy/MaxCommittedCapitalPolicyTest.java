@@ -11,7 +11,6 @@ import group.gnometrading.oms.risk.TestListings;
 import group.gnometrading.oms.state.PooledOrderStateManager;
 import group.gnometrading.oms.state.TrackedOrder;
 import group.gnometrading.schemas.Order;
-import group.gnometrading.schemas.OrderDecoder;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.Statics;
 import group.gnometrading.strings.ViewString;
@@ -90,18 +89,6 @@ class MaxCommittedCapitalPolicyTest {
 
         assertFalse(violates(policy, modifyOf(working, 40 * CENT, 5 * UNIT)));
         assertTrue(violates(policy, modifyOf(working, 41 * CENT, 10 * UNIT)));
-    }
-
-    @Test
-    void aPricelessMarketOrderIsValuedAtADollarOnABinaryListingAndRefusedElsewhere() {
-        final MaxCommittedCapitalPolicy policy = strategyWide(10 * DOLLAR);
-        final long noPrice = OrderDecoder.priceNullValue();
-        assertFalse(violates(policy, BINARY, Side.Bid, noPrice, 10 * UNIT));
-        assertTrue(violates(policy, BINARY, Side.Bid, noPrice, 11 * UNIT));
-        assertFalse(violates(policy, BINARY, Side.Ask, noPrice, 10 * UNIT), "a sell at no price commits $1 a unit");
-        assertTrue(violates(policy, BINARY, Side.Ask, noPrice, 11 * UNIT));
-
-        assertTrue(violates(policy, PERP, Side.Bid, noPrice, 1), "nothing to value it at");
     }
 
     @Test

@@ -13,6 +13,7 @@ import group.gnometrading.oms.pnl.PriceSlotRegistry;
 import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.Position;
 import group.gnometrading.oms.position.PositionTracker;
+import group.gnometrading.oms.risk.MarketOrderPricing;
 import group.gnometrading.oms.risk.RejectStreaks;
 import group.gnometrading.oms.risk.RiskEngine;
 import group.gnometrading.oms.state.OrderState;
@@ -24,10 +25,10 @@ import group.gnometrading.schemas.Intent;
 import group.gnometrading.schemas.Liquidity;
 import group.gnometrading.schemas.ModifyOrder;
 import group.gnometrading.schemas.Order;
-import group.gnometrading.schemas.OrderDecoder;
 import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.schemas.OrderExecutionReportDecoder;
 import group.gnometrading.schemas.OrderStatus;
+import group.gnometrading.schemas.OrderType;
 import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.sm.Listing;
@@ -49,6 +50,10 @@ public final class OrderManagementSystem {
     private static final int RULE_MIN_SIZE = 1;
     private static final int RULE_TICK = 2;
     private static final int RULE_MIN_NOTIONAL = 3;
+    private static final int RULE_NO_MARKET_PRICE = 4;
+    // Where SharedPriceBuffer.readTop puts the best bid and ask.
+    private static final int TOP_BID = 0;
+    private static final int TOP_ASK = 1;
     private static final int NOT_HALTED = -1;
 
     private final Logger logger;
@@ -72,6 +77,7 @@ public final class OrderManagementSystem {
     private final ScopeCanceller scopeCanceller = new ScopeCanceller();
     private final CancelOrder directCancel = new CancelOrder();
     private final long[] seenSlotVersions;
+    private final long[] marketTop = new long[3];
     private final MarkMoveChecker markMoveChecker = new MarkMoveChecker();
     private long seenPriceEpoch;
     private long nextResweepNanos;
@@ -667,7 +673,9 @@ public final class OrderManagementSystem {
             final int strategyId = order.getClientOidStrategyId();
             final int listingId = resolveListingId(order.decoder.exchangeId(), order.decoder.securityId());
             final int rule =
-                    brokenListingRule(listingId, order.decoder.side(), order.decoder.price(), order.decoder.size());
+                    order.decoder.orderType() == OrderType.MARKET && !priceMarketOrder(order, strategyId, listingId)
+                            ? RULE_NO_MARKET_PRICE
+                            : brokenListingRule(listingId, order.decoder.price(), order.decoder.size());
             if (rule != NO_RULE) {
                 logConstraintRejection(order, listingId, rule);
                 emitNewOrderRejection(order, listingId, rejectReasonFor(rule));
@@ -725,6 +733,34 @@ public final class OrderManagementSystem {
                     order.decoder.price(),
                     order.decoder.size(),
                     bookFull ? 0 : riskEngine.violatedPolicyId());
+        }
+
+        /**
+         * Turns a market order into an immediate-or-cancel limit at the worst price risk allows, so every check after
+         * this, and the venue, sees a real price. False when the listing has no price on the side it would take.
+         */
+        private boolean priceMarketOrder(final Order order, final int strategyId, final int listingId) {
+            final int slot = priceSlotRegistry.getSlot(listingId);
+            if (slot == IntToIntHashMap.MISSING) {
+                return false;
+            }
+            priceBuffer.readTop(slot, marketTop);
+            final Side side = order.decoder.side();
+            final long touch = side == Side.Bid ? marketTop[TOP_ASK] : marketTop[TOP_BID];
+            if (touch <= 0) {
+                return false;
+            }
+            final int exchangeId = order.decoder.exchangeId();
+            final long slippage = riskEngine.marketSlippage(strategyId, listingId, exchangeId);
+            final ListingSpec spec = securityMaster.getListingSpec(listingId);
+            final long price = MarketOrderPricing.worstPrice(
+                    side,
+                    touch,
+                    slippage,
+                    spec == null ? 0 : spec.tickSize(),
+                    riskEngine.directory().isBinary(listingId));
+            order.encoder.price(price).orderType(OrderType.LIMIT);
+            return true;
         }
 
         private void logConstraintRejection(final Order order, final int listingId, final int rule) {
@@ -799,7 +835,7 @@ public final class OrderManagementSystem {
                     .orderType(original.getOrderType())
                     .timeInForce(original.getTimeInForce());
             final int listingId = resolveListingId(modify.decoder.exchangeId(), modify.decoder.securityId());
-            final int rule = brokenListingRule(listingId, original.getSide(), modify.decoder.price(), newLeaves);
+            final int rule = brokenListingRule(listingId, modify.decoder.price(), newLeaves);
             if (rule != NO_RULE) {
                 logConstraintRejection(riskCheckOrder, listingId, rule);
                 emitModifyRejection(modify, original, listingId, rejectReasonFor(rule));
@@ -867,7 +903,7 @@ public final class OrderManagementSystem {
          * The listing rule an order breaks, or {@link #NO_RULE}. A listing without a spec, or with a zero field, is
          * not checked on that field.
          */
-        private int brokenListingRule(int listingId, Side side, long price, long size) {
+        private int brokenListingRule(int listingId, long price, long size) {
             ListingSpec spec = securityMaster.getListingSpec(listingId);
             if (spec == null) {
                 return NO_RULE;
@@ -881,30 +917,24 @@ public final class OrderManagementSystem {
             if (isOffTick(spec, price)) {
                 return RULE_TICK;
             }
-            return isBelowMinNotional(spec, listingId, side, price, size) ? RULE_MIN_NOTIONAL : NO_RULE;
+            return isBelowMinNotional(spec, price, size) ? RULE_MIN_NOTIONAL : NO_RULE;
         }
 
         private RejectReason rejectReasonFor(int rule) {
-            return rule == RULE_TICK ? RejectReason.INVALID_PRICE : RejectReason.INVALID_SIZE;
+            return rule == RULE_TICK || rule == RULE_NO_MARKET_PRICE
+                    ? RejectReason.INVALID_PRICE
+                    : RejectReason.INVALID_SIZE;
         }
 
-        // A market order has no price to check.
         private boolean isOffTick(ListingSpec spec, long price) {
-            return spec.tickSize() > 0 && price != OrderDecoder.priceNullValue() && price % spec.tickSize() != 0;
+            return spec.tickSize() > 0 && price % spec.tickSize() != 0;
         }
 
-        private boolean isBelowMinNotional(ListingSpec spec, int listingId, Side side, long price, long size) {
+        private boolean isBelowMinNotional(ListingSpec spec, long price, long size) {
             if (spec.minNotional() <= 0) {
                 return false;
             }
-            long effectivePrice = price;
-            if (effectivePrice <= 0 && priceSlotRegistry != null) {
-                int slot = priceSlotRegistry.getSlot(listingId);
-                if (slot != IntToIntHashMap.MISSING) {
-                    effectivePrice = priceBuffer.executionPrice(slot, side);
-                }
-            }
-            return size <= 0 || Position.notional(effectivePrice, size) < spec.minNotional();
+            return size <= 0 || Position.notional(price, size) < spec.minNotional();
         }
     }
 }

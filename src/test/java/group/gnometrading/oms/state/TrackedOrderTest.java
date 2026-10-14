@@ -7,7 +7,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import group.gnometrading.oms.OmsTestHarness;
 import group.gnometrading.schemas.ExecType;
 import group.gnometrading.schemas.Order;
-import group.gnometrading.schemas.OrderDecoder;
 import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.schemas.OrderExecutionReportDecoder;
 import group.gnometrading.schemas.OrderStatus;
@@ -271,16 +270,6 @@ class TrackedOrderTest {
 
         applyReport(ExecType.CANCEL_REJECT, 0, 0, 0, 10 * UNIT, 0);
         assertEquals(6 * DOLLAR, order.workingNotional(), "refused: back to the original");
-    }
-
-    @Test
-    void aMarketBuyIsValuedAtADollarAndAMarketSellAtNothing() {
-        final long noPrice = OrderDecoder.priceNullValue();
-        order.init(OmsTestHarness.buildOrder(7, 1L, 1, 42, Side.Bid, noPrice, 3 * UNIT));
-        assertEquals(3 * DOLLAR, order.workingNotional());
-        order.init(OmsTestHarness.buildOrder(7, 2L, 1, 42, Side.Ask, noPrice, 3 * UNIT));
-        assertEquals(0, order.workingNotional());
-        assertEquals(3 * DOLLAR, TrackedOrder.notional(Side.Bid, noPrice, 3 * UNIT));
     }
 
     private void initOrder(long size) {

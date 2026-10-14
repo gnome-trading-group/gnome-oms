@@ -253,13 +253,13 @@ class OmsScenarioTest {
                 .takeOrderType(group.gnometrading.schemas.OrderType.NULL_VAL);
         h.oms.processIntent(takeIntent, h.sink);
 
-        // One IOC market order emitted
+        // One IOC limit at the touch: a market take is priced before it leaves the OMS
         assertEquals(1, h.sink.newOrders.size());
         assertEquals(
                 group.gnometrading.schemas.TimeInForce.IMMEDIATE_OR_CANCELED,
                 h.sink.newOrders.get(0).timeInForce());
         assertEquals(
-                group.gnometrading.schemas.OrderType.MARKET,
+                group.gnometrading.schemas.OrderType.LIMIT,
                 h.sink.newOrders.get(0).orderType());
         h.sink.clear();
 

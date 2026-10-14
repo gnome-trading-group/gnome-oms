@@ -3,12 +3,10 @@ package group.gnometrading.oms.state;
 import group.gnometrading.oms.position.Position;
 import group.gnometrading.schemas.ExecType;
 import group.gnometrading.schemas.Order;
-import group.gnometrading.schemas.OrderDecoder;
 import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.schemas.OrderExecutionReportDecoder;
 import group.gnometrading.schemas.OrderType;
 import group.gnometrading.schemas.Side;
-import group.gnometrading.schemas.Statics;
 import group.gnometrading.schemas.TimeInForce;
 
 public final class TrackedOrder {
@@ -159,29 +157,15 @@ public final class TrackedOrder {
      */
     public long workingNotional() {
         final long workingPrice = modifyPending ? worsePrice(side, preModifyPrice, price) : price;
-        return notional(side, workingPrice, workingQty());
+        return Position.notional(workingPrice, workingQty());
     }
 
     /** What {@link #workingNotional} would be once modified to {@code newPrice} and {@code newOrderQty}. */
     public long workingNotionalIfModified(long newPrice, long newOrderQty) {
-        return notional(side, worsePrice(side, price, newPrice), workingQtyIfModified(newOrderQty));
-    }
-
-    /**
-     * The notional of {@code qty} on {@code side} at {@code price}. A market order has no price, so a buy is valued
-     * at the most a contract can cost and a sell at nothing, the most either could commit.
-     */
-    public static long notional(Side side, long price, long qty) {
-        if (price == OrderDecoder.priceNullValue()) {
-            return side == Side.Bid ? Position.notional(Statics.PRICE_SCALING_FACTOR, qty) : 0;
-        }
-        return Position.notional(price, qty);
+        return Position.notional(worsePrice(side, price, newPrice), workingQtyIfModified(newOrderQty));
     }
 
     private static long worsePrice(Side side, long first, long second) {
-        if (first == OrderDecoder.priceNullValue() || second == OrderDecoder.priceNullValue()) {
-            return OrderDecoder.priceNullValue();
-        }
         return side == Side.Bid ? Math.max(first, second) : Math.min(first, second);
     }
 

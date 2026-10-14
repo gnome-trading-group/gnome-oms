@@ -8,7 +8,6 @@ import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.PositionTracker;
 import group.gnometrading.oms.state.OrderStateManager;
 import group.gnometrading.schemas.Order;
-import group.gnometrading.schemas.OrderDecoder;
 import group.gnometrading.schemas.OrderType;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.Statics;
@@ -70,12 +69,6 @@ class PriceCollarPolicyTest {
     @Test
     void aPassiveAskFarAboveTheMarkPasses() {
         assertFalse(violated(Side.Ask, 99 * CENT));
-    }
-
-    @Test
-    void aMarketOrderHasNoPriceToCollar() {
-        order.encoder.side(Side.Bid).orderType(OrderType.MARKET).price(OrderDecoder.priceNullValue());
-        assertFalse(policy.isViolated(0, LISTING_ID, order, positions, orders));
     }
 
     @Test

@@ -289,13 +289,14 @@ class OrderManagementSystemIntegrationTest {
     }
 
     @Test
-    void exchangeConstraint_marketOrderHasNoPriceToCheck() {
+    void exchangeConstraint_marketOrderIsPricedOnTheTick() {
         h.stubTickSize(OmsTestHarness.LISTING_ID, 10);
 
         h.submitTakeIntent(5L, Side.Bid);
 
         assertEquals(1, h.sink.newOrders.size());
         assertEquals(0, h.sink.execReports.size());
+        assertEquals(OmsTestHarness.TOUCH_ASK, h.sink.newOrders.get(0).price());
     }
 
     @Test
@@ -582,7 +583,8 @@ class OrderManagementSystemIntegrationTest {
         long counter = h.submitTakeIntent(5, Side.Bid);
         assertEquals(1, h.sink.newOrders.size());
         assertEquals(TimeInForce.IMMEDIATE_OR_CANCELED, h.sink.newOrders.get(0).timeInForce());
-        assertEquals(OrderType.MARKET, h.sink.newOrders.get(0).orderType());
+        assertEquals(OrderType.LIMIT, h.sink.newOrders.get(0).orderType());
+        assertEquals(OmsTestHarness.TOUCH_ASK, h.sink.newOrders.get(0).price());
         assertEquals(Side.Bid, h.sink.newOrders.get(0).side());
 
         h.injectAck(counter, 5);

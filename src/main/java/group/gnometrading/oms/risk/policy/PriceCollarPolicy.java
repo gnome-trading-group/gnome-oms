@@ -8,7 +8,6 @@ import group.gnometrading.oms.risk.OrderRiskPolicy;
 import group.gnometrading.oms.risk.util.PolicyParameters;
 import group.gnometrading.oms.state.OrderStateManager;
 import group.gnometrading.schemas.Order;
-import group.gnometrading.schemas.OrderDecoder;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.strings.GnomeString;
 
@@ -17,7 +16,7 @@ import group.gnometrading.strings.GnomeString;
  * {@code maxDeviation} below it, in price units (1e9 per dollar). Judged per order, whatever the policy applies to.
  *
  * <p>Only the aggressive side is collared: a passive quote far from the market cannot fill at a bad price. A market
- * order has no price to collar, and a listing with no mark yet has nothing to collar against, so both pass.
+ * listing with no mark yet has nothing to collar against, so it passes.
  */
 public final class PriceCollarPolicy extends AbstractConfigurablePolicy implements OrderRiskPolicy {
 
@@ -49,9 +48,6 @@ public final class PriceCollarPolicy extends AbstractConfigurablePolicy implemen
             final PositionTracker positions,
             final OrderStateManager orders) {
         final long price = order.decoder.price();
-        if (price == OrderDecoder.priceNullValue()) {
-            return false;
-        }
         final int slot = priceSlotRegistry.getSlot(listingId);
         if (slot == IntToIntHashMap.MISSING) {
             return false;

@@ -9,7 +9,6 @@ import group.gnometrading.oms.risk.util.PolicyParameters;
 import group.gnometrading.oms.state.OrderStateManager;
 import group.gnometrading.oms.state.TrackedOrder;
 import group.gnometrading.schemas.Order;
-import group.gnometrading.schemas.OrderDecoder;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.strings.GnomeString;
 import java.util.function.Consumer;
@@ -21,8 +20,7 @@ import java.util.function.Consumer;
  * order.
  *
  * <p>Only an order that adds to the commitment can break the limit, so one that closes a position, or shrinks a
- * working order, always passes, even while the strategy is over the limit. A market order with no price can't be
- * valued on a listing that isn't binary, so it is rejected there.
+ * working order, always passes, even while the strategy is over the limit.
  */
 public final class MaxCommittedCapitalPolicy extends AbstractConfigurablePolicy implements OrderRiskPolicy {
 
@@ -59,9 +57,6 @@ public final class MaxCommittedCapitalPolicy extends AbstractConfigurablePolicy 
             final OrderStateManager orders) {
         final boolean binary = directory.isBinary(listingId);
         final long price = order.decoder.price();
-        if (!binary && price == OrderDecoder.priceNullValue()) {
-            return true;
-        }
         final Position position = positions.getStrategyPosition(strategyId, listingId);
         final long before = committedBefore(strategyId, position, positions, binary);
         final long listingBefore = position == null ? 0 : CommittedCapital.of(binary, position);
@@ -73,7 +68,7 @@ public final class MaxCommittedCapitalPolicy extends AbstractConfigurablePolicy 
         final long notionalChange;
         if (replaced == null) {
             qtyChange = qty;
-            notionalChange = TrackedOrder.notional(side, price, qty);
+            notionalChange = Position.notional(price, qty);
         } else {
             // A modify is checked with its size as what can still execute; the order's own size includes the fills.
             final long newOrderQty = qty + replaced.getFilledQty();

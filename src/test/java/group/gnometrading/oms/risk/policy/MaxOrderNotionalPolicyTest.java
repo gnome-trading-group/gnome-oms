@@ -3,14 +3,9 @@ package group.gnometrading.oms.risk.policy;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import group.gnometrading.oms.pnl.PriceSlotRegistry;
-import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.PositionTracker;
 import group.gnometrading.oms.state.OrderStateManager;
 import group.gnometrading.schemas.Order;
-import group.gnometrading.schemas.OrderDecoder;
-import group.gnometrading.schemas.OrderType;
-import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.Statics;
 import group.gnometrading.strings.ViewString;
 import org.junit.jupiter.api.Test;
@@ -63,66 +58,6 @@ class MaxOrderNotionalPolicyTest {
 
         final MaxOrderNotionalPolicy tight = new MaxOrderNotionalPolicy(49_999 * DOLLAR);
         assertTrue(tight.isViolated(0, LISTING_ID, order, positions, orders));
-    }
-
-    @Test
-    void testMarketOrderIsValuedAtTheSideItWouldExecuteAgainst() {
-        final SharedPriceBuffer priceBuffer = new SharedPriceBuffer(4);
-        final PriceSlotRegistry registry = new PriceSlotRegistry(4);
-        final int slot = registry.register(LISTING_ID);
-        priceBuffer.writeTrade(slot, 10 * DOLLAR);
-        priceBuffer.writeQuote(slot, 90 * DOLLAR, 110 * DOLLAR);
-        final MaxOrderNotionalPolicy policy = new MaxOrderNotionalPolicy(priceBuffer, registry);
-        policy.reconfigure(new ViewString("{\"maxOrderNotional\": " + 10_000 * DOLLAR + "}"));
-
-        order.encoder
-                .orderType(OrderType.MARKET)
-                .price(OrderDecoder.priceNullValue())
-                .size(91 * UNIT);
-        order.encoder.side(Side.Bid);
-        assertTrue(policy.isViolated(0, LISTING_ID, order, positions, orders)); // 91 at the $110 ask
-        order.encoder.side(Side.Ask);
-        assertFalse(policy.isViolated(0, LISTING_ID, order, positions, orders)); // 91 at the $90 bid
-    }
-
-    @Test
-    void testMarketOrderFallsBackToLastTradeWithoutAQuote() {
-        final SharedPriceBuffer priceBuffer = new SharedPriceBuffer(4);
-        final PriceSlotRegistry registry = new PriceSlotRegistry(4);
-        priceBuffer.writeTrade(registry.register(LISTING_ID), 100 * DOLLAR);
-        final MaxOrderNotionalPolicy policy = new MaxOrderNotionalPolicy(priceBuffer, registry);
-        policy.reconfigure(new ViewString("{\"maxOrderNotional\": " + 10_000 * DOLLAR + "}"));
-
-        order.encoder.orderType(OrderType.MARKET).price(OrderDecoder.priceNullValue());
-        order.encoder.size(50 * UNIT);
-        assertFalse(policy.isViolated(0, LISTING_ID, order, positions, orders));
-        order.encoder.size(101 * UNIT);
-        assertTrue(policy.isViolated(0, LISTING_ID, order, positions, orders));
-    }
-
-    @Test
-    void testMarketOrderWithoutAMarkPriceIsRejected() {
-        final SharedPriceBuffer priceBuffer = new SharedPriceBuffer(4);
-        final PriceSlotRegistry registry = new PriceSlotRegistry(4);
-        registry.register(LISTING_ID);
-        final MaxOrderNotionalPolicy policy = new MaxOrderNotionalPolicy(priceBuffer, registry);
-        policy.reconfigure(new ViewString("{\"maxOrderNotional\": " + 10_000 * DOLLAR + "}"));
-
-        order.encoder
-                .orderType(OrderType.MARKET)
-                .price(OrderDecoder.priceNullValue())
-                .size(UNIT);
-        assertTrue(policy.isViolated(0, LISTING_ID, order, positions, orders));
-    }
-
-    @Test
-    void testMarketOrderWithNoPriceBufferIsRejected() {
-        final MaxOrderNotionalPolicy policy = new MaxOrderNotionalPolicy(10_000 * DOLLAR);
-        order.encoder
-                .orderType(OrderType.MARKET)
-                .price(OrderDecoder.priceNullValue())
-                .size(UNIT);
-        assertTrue(policy.isViolated(0, LISTING_ID, order, positions, orders));
     }
 
     @Test

@@ -7,7 +7,6 @@ import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
 import group.gnometrading.oms.pnl.PriceSlotRegistry;
 import group.gnometrading.oms.pnl.SharedPriceBuffer;
-import group.gnometrading.schemas.OrderDecoder;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.strings.GnomeString;
 import group.gnometrading.strings.MutableString;
@@ -284,7 +283,7 @@ public final class LedgerAgent implements GnomeAgent {
                 first = separate(first);
                 writeOrderKey(event);
                 json.writeComma().writeObjectEntry("side", sideOf(event.side)).writeComma();
-                writePrice(event.price);
+                json.writeObjectEntry("price", event.price);
                 json.writeComma().writeObjectEntry("size", event.size).writeObjectEnd();
             }
         }
@@ -320,7 +319,7 @@ public final class LedgerAgent implements GnomeAgent {
                 first = separate(first);
                 writeOrderKey(event);
                 json.writeComma();
-                writePrice(event.price);
+                json.writeObjectEntry("price", event.price);
                 json.writeComma().writeObjectEntry("size", event.size).writeObjectEnd();
             }
         }
@@ -364,15 +363,6 @@ public final class LedgerAgent implements GnomeAgent {
             }
         }
         json.writeArrayEnd();
-    }
-
-    // A market order has no price; the schema's null marker would otherwise be stored as a number.
-    private void writePrice(final long price) {
-        if (price == OrderDecoder.priceNullValue()) {
-            json.writeString("price").writeColon().writeNull();
-        } else {
-            json.writeObjectEntry("price", price);
-        }
     }
 
     private void writeNullableName(final String key, final Enum<?> value) {
