@@ -361,6 +361,33 @@ public final class OmsTestHarness {
                 OrderExecutionReportDecoder.feeNullValue());
     }
 
+    void injectReject(long clientOidCounter, RejectReason reason) {
+        injectReject(STRATEGY_ID, clientOidCounter, EXCHANGE_ID, SECURITY_ID, reason);
+    }
+
+    void injectReject(int strategyId, long clientOidCounter, int exchangeId, int securityId, RejectReason reason) {
+        OrderExecutionReport report = buildExecReport(
+                strategyId,
+                clientOidCounter,
+                exchangeId,
+                securityId,
+                ExecType.REJECT,
+                0,
+                0,
+                0,
+                0,
+                OrderExecutionReportDecoder.feeNullValue());
+        report.encoder.rejectReason(reason);
+        oms.processExecutionReport(report, sink);
+    }
+
+    long submitBidIntentOn(int exchangeId, long securityId, long price, long size) {
+        oms.processIntent(
+                buildIntent(STRATEGY_ID, exchangeId, securityId, price, size, IntentDecoder.askPriceNullValue(), 0),
+                sink);
+        return sink.lastNewOrderCounter();
+    }
+
     Position getPosition(int listingId) {
         return oms.getPosition(listingId);
     }

@@ -7,6 +7,7 @@ import group.gnometrading.oms.pnl.PriceSlotRegistry;
 import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.DefaultPositionTracker;
 import group.gnometrading.oms.position.SharedPositionBuffer;
+import group.gnometrading.oms.risk.ListingDirectory;
 import group.gnometrading.oms.risk.MarketRiskPolicy;
 import group.gnometrading.oms.risk.OrderRiskPolicy;
 import group.gnometrading.oms.risk.RiskEngine;
@@ -53,9 +54,9 @@ class OmsLatencyBenchmarkTest {
         slot = slots.register(LISTING_ID);
         prices.register();
         prices.writeQuote(slot, PRICE - 10_000_000L, PRICE + 10_000_000L);
-        final RiskEngine engine = RiskEngine.withPolicies(
-                new OrderRiskPolicy[] {},
-                new MarketRiskPolicy[] {new MaxTotalPnlLossPolicy(prices, slots, true, Long.MAX_VALUE / 4)});
+        final RiskEngine engine = RiskEngine.withPolicies(new OrderRiskPolicy[] {}, new MarketRiskPolicy[] {
+            new MaxTotalPnlLossPolicy(prices, slots, ListingDirectory.EMPTY, 0, 0, Long.MAX_VALUE / 4)
+        });
         oms = new OrderManagementSystem(
                 new NullLogger(),
                 new PooledOrderStateManager(64),

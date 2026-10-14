@@ -7,16 +7,21 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import group.gnometrading.oms.OmsTestHarness;
 import group.gnometrading.schemas.ExecType;
 import group.gnometrading.schemas.Order;
+import group.gnometrading.schemas.OrderDecoder;
 import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.schemas.OrderExecutionReportDecoder;
 import group.gnometrading.schemas.OrderStatus;
 import group.gnometrading.schemas.OrderType;
 import group.gnometrading.schemas.Side;
+import group.gnometrading.schemas.Statics;
 import group.gnometrading.schemas.TimeInForce;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 class TrackedOrderTest {
+
+    private static final long UNIT = Statics.SIZE_SCALING_FACTOR;
+    private static final long DOLLAR = Statics.PRICE_SCALING_FACTOR;
 
     private TrackedOrder order;
 
@@ -228,6 +233,54 @@ class TrackedOrderTest {
 
         applyReport(ExecType.CANCEL_REJECT, 0, 0, 0, 10, 0);
         assertEquals(10L, order.workingQty());
+    }
+
+    // --- working notional ---
+
+    @Test
+    void workingNotionalIsTheWorkingQuantityAtTheOrdersPrice() {
+        order.init(OmsTestHarness.buildOrder(7, 1L, 1, 42, Side.Bid, 400_000_000L, 10 * UNIT));
+        assertEquals(4 * DOLLAR, order.workingNotional());
+
+        applyReport(ExecType.PARTIAL_FILL, 4 * UNIT, 400_000_000L, 4 * UNIT, 6 * UNIT, 0);
+        assertEquals(2_400_000_000L, order.workingNotional());
+
+        applyReport(ExecType.CANCEL, 0, 0, 4 * UNIT, 0, 0);
+        assertEquals(0, order.workingNotional());
+    }
+
+    @Test
+    void aPendingModifyCountsTheWorsePriceAndTheLargerSize() {
+        order.init(OmsTestHarness.buildOrder(7, 1L, 1, 42, Side.Bid, 400_000_000L, 10 * UNIT));
+        applyReport(ExecType.NEW, 0, 0, 0, 10 * UNIT, 0);
+        assertEquals(5 * DOLLAR, order.workingNotionalIfModified(500_000_000L, 5 * UNIT), "a buy's worse is higher");
+
+        order.modify(500_000_000L, 5 * UNIT);
+        assertEquals(5 * DOLLAR, order.workingNotional());
+
+        applyReport(ExecType.NEW, 0, 0, 0, 5 * UNIT, 0);
+        assertEquals(2_500_000_000L, order.workingNotional(), "confirmed: only the new order is working");
+    }
+
+    @Test
+    void aSellsWorsePriceIsTheLowerOne() {
+        order.init(OmsTestHarness.buildOrder(7, 1L, 1, 42, Side.Ask, 600_000_000L, 10 * UNIT));
+        applyReport(ExecType.NEW, 0, 0, 0, 10 * UNIT, 0);
+        order.modify(700_000_000L, 10 * UNIT);
+        assertEquals(6 * DOLLAR, order.workingNotional());
+
+        applyReport(ExecType.CANCEL_REJECT, 0, 0, 0, 10 * UNIT, 0);
+        assertEquals(6 * DOLLAR, order.workingNotional(), "refused: back to the original");
+    }
+
+    @Test
+    void aMarketBuyIsValuedAtADollarAndAMarketSellAtNothing() {
+        final long noPrice = OrderDecoder.priceNullValue();
+        order.init(OmsTestHarness.buildOrder(7, 1L, 1, 42, Side.Bid, noPrice, 3 * UNIT));
+        assertEquals(3 * DOLLAR, order.workingNotional());
+        order.init(OmsTestHarness.buildOrder(7, 2L, 1, 42, Side.Ask, noPrice, 3 * UNIT));
+        assertEquals(0, order.workingNotional());
+        assertEquals(3 * DOLLAR, TrackedOrder.notional(Side.Bid, noPrice, 3 * UNIT));
     }
 
     private void initOrder(long size) {

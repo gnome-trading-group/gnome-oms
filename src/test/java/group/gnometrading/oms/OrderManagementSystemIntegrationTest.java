@@ -1,13 +1,17 @@
 package group.gnometrading.oms;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import group.gnometrading.oms.pnl.PriceSlotRegistry;
 import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.Position;
+import group.gnometrading.oms.risk.ListingDirectory;
+import group.gnometrading.oms.risk.RejectStreaks;
 import group.gnometrading.oms.risk.RiskEngine;
+import group.gnometrading.oms.risk.policy.MaxConsecutiveRejectsPolicy;
 import group.gnometrading.oms.risk.policy.MaxOrderSizePolicy;
 import group.gnometrading.oms.risk.policy.MaxPositionPolicy;
 import group.gnometrading.oms.risk.policy.MaxTotalPnlLossPolicy;
@@ -358,7 +362,8 @@ class OrderManagementSystemIntegrationTest {
         RiskEngine re = RiskEngine.withPolicies(
                 new group.gnometrading.oms.risk.OrderRiskPolicy[] {},
                 new group.gnometrading.oms.risk.MarketRiskPolicy[] {
-                    new MaxTotalPnlLossPolicy(new SharedPriceBuffer(1), new PriceSlotRegistry(1), true, 100L)
+                    new MaxTotalPnlLossPolicy(
+                            new SharedPriceBuffer(1), new PriceSlotRegistry(1), ListingDirectory.EMPTY, 0, 0, 100L)
                 });
         OmsTestHarness h2 = new OmsTestHarness(re);
 
@@ -372,7 +377,7 @@ class OrderManagementSystemIntegrationTest {
         h2.sink.clear();
         h2.injectFill(askCounter, 10, 180 * PX, 10, 0); // loss of 200 > maxLoss of 100
 
-        assertTrue(re.isLatched(OmsTestHarness.STRATEGY_ID));
+        assertTrue(re.isLatchedAt(OmsTestHarness.STRATEGY_ID, 0, 0));
     }
 
     @Test
@@ -381,7 +386,8 @@ class OrderManagementSystemIntegrationTest {
         RiskEngine re = RiskEngine.withPolicies(
                 new group.gnometrading.oms.risk.OrderRiskPolicy[] {},
                 new group.gnometrading.oms.risk.MarketRiskPolicy[] {
-                    new MaxTotalPnlLossPolicy(new SharedPriceBuffer(1), new PriceSlotRegistry(1), true, 100L)
+                    new MaxTotalPnlLossPolicy(
+                            new SharedPriceBuffer(1), new PriceSlotRegistry(1), ListingDirectory.EMPTY, 0, 0, 100L)
                 });
         OmsTestHarness h2 = new OmsTestHarness(re);
         // Need two securities for independent bid/ask
@@ -416,7 +422,7 @@ class OrderManagementSystemIntegrationTest {
         h2.injectFill(closeCounter, 10, 100 * PX, 10, 0); // loss = 10*(200-100) = 1000
 
         // Cancel should have been sent for the open ask on security 43
-        assertTrue(re.isLatched(OmsTestHarness.STRATEGY_ID));
+        assertTrue(re.isLatchedAt(OmsTestHarness.STRATEGY_ID, 0, 0));
         // At least one cancel should have been emitted for the remaining open order
         assertEquals(List.of(askCounter), h2.sink.cancels, "the breach cancels the strategy's open order");
     }
@@ -426,7 +432,8 @@ class OrderManagementSystemIntegrationTest {
         RiskEngine re = RiskEngine.withPolicies(
                 new group.gnometrading.oms.risk.OrderRiskPolicy[] {},
                 new group.gnometrading.oms.risk.MarketRiskPolicy[] {
-                    new MaxTotalPnlLossPolicy(new SharedPriceBuffer(1), new PriceSlotRegistry(1), true, 100L)
+                    new MaxTotalPnlLossPolicy(
+                            new SharedPriceBuffer(1), new PriceSlotRegistry(1), ListingDirectory.EMPTY, 0, 0, 100L)
                 });
         OmsTestHarness h2 = new OmsTestHarness(re);
         h2.stubListing(OmsTestHarness.EXCHANGE_ID, 43, 101, 0, 0);
@@ -439,11 +446,103 @@ class OrderManagementSystemIntegrationTest {
         long askCounter = h2.submitAskIntent(180L * PX, 10L);
         h2.injectAck(askCounter, 10);
         h2.injectFill(askCounter, 10, 180 * PX, 10, 0);
-        assertTrue(re.isLatched(OmsTestHarness.STRATEGY_ID));
+        assertTrue(re.isLatchedAt(OmsTestHarness.STRATEGY_ID, 0, 0));
 
         // A report on another listing passes the per-listing loss check; it used to clear the halt.
         h2.injectAck(OmsTestHarness.STRATEGY_ID, otherListing, OmsTestHarness.EXCHANGE_ID, 43, 10);
-        assertTrue(re.isLatched(OmsTestHarness.STRATEGY_ID));
+        assertTrue(re.isLatchedAt(OmsTestHarness.STRATEGY_ID, 0, 0));
+    }
+
+    // --- reject streaks ---
+
+    private static final long CENT = Statics.PRICE_SCALING_FACTOR / 100;
+    private static final int OTHER_SECURITY = 43;
+    private static final int OTHER_LISTING = 101;
+    private static final int OTHER_EXCHANGE = 2;
+    private static final int OTHER_EXCHANGE_SECURITY = 44;
+    private static final int OTHER_EXCHANGE_LISTING = 102;
+
+    /** A harness whose strategy latches once {@code maxRejects} venue rejects come in a row, anywhere. */
+    private static OmsTestHarness withRejectLimit(int maxRejects) {
+        RejectStreaks streaks = new RejectStreaks();
+        OmsTestHarness harness = new OmsTestHarness(RiskEngine.withScopedPolicies(
+                List.of(new RiskEngine.ScopedPolicy(
+                        0, 0, 0, new MaxConsecutiveRejectsPolicy(streaks, 0, 0, maxRejects))),
+                ListingDirectory.EMPTY,
+                streaks));
+        harness.stubListing(OmsTestHarness.EXCHANGE_ID, OTHER_SECURITY, OTHER_LISTING, 0, 0);
+        harness.stubListing(OTHER_EXCHANGE, OTHER_EXCHANGE_SECURITY, OTHER_EXCHANGE_LISTING, 0, 0);
+        return harness;
+    }
+
+    @Test
+    void rejectStreak_latchesBeforeTheResolverResubmitsWhatItQueued() {
+        OmsTestHarness h2 = withRejectLimit(2);
+        long first = h2.submitBidIntent(40 * CENT, 10 * PX);
+        h2.injectReject(first, RejectReason.EXCHANGE_REJECTED);
+        assertFalse(h2.riskEngine.isLatchedAt(OmsTestHarness.STRATEGY_ID, 0, 0));
+
+        long second = h2.submitBidIntent(41 * CENT, 10 * PX);
+        h2.submitBidIntent(42 * CENT, 10 * PX); // queued behind the unacknowledged order
+        h2.sink.clear();
+        h2.injectReject(second, RejectReason.GATEWAY_REJECTED);
+
+        assertTrue(h2.riskEngine.isLatchedAt(OmsTestHarness.STRATEGY_ID, 0, 0));
+        assertTrue(h2.sink.newOrders.isEmpty(), "the queued intent never reaches the venue");
+        assertEquals(RejectReason.HALTED, h2.sink.execReports.get(0).rejectReason());
+    }
+
+    @Test
+    void rejectStreak_anAcceptedOrderStartsItAgain() {
+        OmsTestHarness h2 = withRejectLimit(2);
+        h2.injectReject(h2.submitBidIntent(40 * CENT, 10 * PX), RejectReason.EXCHANGE_REJECTED);
+        h2.injectAck(h2.submitBidIntent(40 * CENT, 10 * PX), 10 * PX);
+        h2.injectReject(h2.submitAskIntent(60 * CENT, 10 * PX), RejectReason.EXCHANGE_REJECTED);
+
+        assertFalse(h2.riskEngine.isLatchedAt(OmsTestHarness.STRATEGY_ID, 0, 0));
+    }
+
+    @Test
+    void rejectStreak_ignoresRefusalsThatAreNotTheVenueRefusingTheStrategy() {
+        OmsTestHarness h2 = withRejectLimit(1);
+        for (RejectReason reason : new RejectReason[] {
+            RejectReason.POST_ONLY_WOULD_CROSS,
+            RejectReason.HALTED,
+            RejectReason.RISK_LIMIT_EXCEEDED,
+            RejectReason.SELF_TRADE,
+            RejectReason.MARKET_CLOSED,
+            RejectReason.RATE_LIMITED
+        }) {
+            h2.advanceNanos(10_000_000_000L);
+            long counter = h2.submitBidIntent(40 * CENT, 10 * PX);
+            h2.injectReject(counter, reason);
+            assertFalse(h2.riskEngine.isLatchedAt(OmsTestHarness.STRATEGY_ID, 0, 0), reason.name());
+        }
+
+        h2.sink.clear();
+        h2.submitBidIntent(41 * CENT, 10 * PX);
+        assertTrue(h2.sink.newOrders.isEmpty(), "the rate limit's own cooldown still holds the next order back");
+    }
+
+    @Test
+    void rejectStreak_forInsufficientFundsHaltsOnlyThatExchange() {
+        OmsTestHarness h2 = withRejectLimit(1);
+        long elsewhere = h2.submitBidIntentOn(OTHER_EXCHANGE, OTHER_EXCHANGE_SECURITY, 40 * CENT, 10 * PX);
+        h2.injectAck(OmsTestHarness.STRATEGY_ID, elsewhere, OTHER_EXCHANGE, OTHER_EXCHANGE_SECURITY, 10 * PX);
+        long resting = h2.submitBidIntentOn(OmsTestHarness.EXCHANGE_ID, OTHER_SECURITY, 30 * CENT, 10 * PX);
+        h2.injectAck(OmsTestHarness.STRATEGY_ID, resting, OmsTestHarness.EXCHANGE_ID, OTHER_SECURITY, 10 * PX);
+        h2.sink.clear();
+
+        h2.injectReject(h2.submitBidIntent(40 * CENT, 10 * PX), RejectReason.INSUFFICIENT_FUNDS);
+
+        assertTrue(h2.riskEngine.isLatchedAt(OmsTestHarness.STRATEGY_ID, OmsTestHarness.EXCHANGE_ID, 0));
+        assertFalse(h2.riskEngine.isStrategyHalted(OmsTestHarness.STRATEGY_ID));
+        assertEquals(List.of(resting), h2.sink.cancels, "only the empty account's exchange is cancelled");
+
+        h2.sink.clear();
+        h2.submitAskIntent(OmsTestHarness.STRATEGY_ID, OTHER_SECURITY, 60 * CENT, 10 * PX);
+        h2.submitBidIntentOn(OTHER_EXCHANGE, OTHER_EXCHANGE_SECURITY, 41 * CENT, 10 * PX);
+        assertEquals(1, h2.sink.modifies.size() + h2.sink.newOrders.size(), "the other exchange trades on");
     }
 
     // --- multi-strategy ---
@@ -514,7 +613,7 @@ class OrderManagementSystemIntegrationTest {
         long counter = h.submitTakeIntent(5, Side.Ask);
         h.injectReject(counter);
 
-        // Position object is created by addStrategyLeaves on submission; all values must be zero.
+        // Position object is created by adjustStrategyLeaves on submission; all values must be zero.
         Position pos = h.getPosition(OmsTestHarness.LISTING_ID);
         long netQty = pos == null ? 0 : pos.netQuantity;
         long leavesBuy = pos == null ? 0 : pos.leavesBuyQty;

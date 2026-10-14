@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import group.gnometrading.oms.pnl.PriceSlotRegistry;
 import group.gnometrading.oms.pnl.SharedPriceBuffer;
+import group.gnometrading.oms.risk.ListingDirectory;
 import group.gnometrading.oms.risk.MarketRiskPolicy;
 import group.gnometrading.oms.risk.OrderRiskPolicy;
 import group.gnometrading.oms.risk.RiskEngine;
@@ -25,7 +26,7 @@ class OrderLimitsScenarioTest {
 
     @Test
     void ordersUpToTheLimitPassAndTheNextIsRejectedUntilOneIsReleased() {
-        withPolicies(new MaxOpenOrdersPolicy(true, 2));
+        withPolicies(new MaxOpenOrdersPolicy(ListingDirectory.EMPTY, 0, 0, 2));
         long bid = h.submitBidIntent(40 * CENT, 10);
         h.injectAck(bid, 10);
         long ask = h.submitAskIntent(60 * CENT, 10);
@@ -45,7 +46,7 @@ class OrderLimitsScenarioTest {
 
     @Test
     void aCancelThenReplaceRepriceAtTheLimitIsNotBlockedByTheOrderItReplaces() {
-        withPolicies(new MaxOpenOrdersPolicy(false, 1));
+        withPolicies(new MaxOpenOrdersPolicy(ListingDirectory.EMPTY, OmsTestHarness.LISTING_ID, 0, 1));
         h.stubListing(
                 OmsTestHarness.EXCHANGE_ID,
                 OmsTestHarness.SECURITY_ID,

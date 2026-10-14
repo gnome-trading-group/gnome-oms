@@ -4,13 +4,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import group.gnometrading.oms.pnl.PriceSlotRegistry;
 import group.gnometrading.oms.pnl.SharedPriceBuffer;
-import group.gnometrading.oms.risk.MarketRiskPolicy;
-import group.gnometrading.oms.risk.OrderRiskPolicy;
+import group.gnometrading.oms.risk.ListingDirectory;
+import group.gnometrading.oms.risk.RejectStreaks;
 import group.gnometrading.oms.risk.RiskEngine;
+import group.gnometrading.oms.risk.RiskEngine.ScopedPolicy;
 import group.gnometrading.oms.risk.RiskSnapshots;
+import group.gnometrading.oms.risk.TestListings;
+import group.gnometrading.oms.risk.policy.MaxConsecutiveRejectsPolicy;
 import group.gnometrading.oms.risk.policy.MaxTotalPnlLossPolicy;
 import group.gnometrading.schemas.Statics;
 import java.lang.management.ManagementFactory;
+import java.util.List;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
@@ -36,6 +40,12 @@ class OmsAllocationTest {
         RiskSnapshots.publishKills(engine, false, new int[] {OmsTestHarness.STRATEGY_ID + 1}, new int[] {});
         h.applyRiskChanges();
         assertTrue(steadyStateAllocation(h) < ALLOWED_BYTES, "with a kill active");
+
+        RiskSnapshots.publishExchangeKills(engine, OmsTestHarness.EXCHANGE_ID + 1);
+        engine.latch(OmsTestHarness.STRATEGY_ID + 1, OmsTestHarness.EXCHANGE_ID, 0, RiskEngine.CAUSE_REJECT_STREAK, 0);
+        engine.latch(OmsTestHarness.STRATEGY_ID + 1, 0, OmsTestHarness.LISTING_ID, RiskEngine.CAUSE_MARKET_LIMIT, 0);
+        h.applyRiskChanges();
+        assertTrue(steadyStateAllocation(h) < ALLOWED_BYTES, "with exchange kills and scoped latches active");
     }
 
     @Test
@@ -47,9 +57,28 @@ class OmsAllocationTest {
         final PriceSlotRegistry slots = new PriceSlotRegistry(2);
         final int slot = slots.register(OmsTestHarness.LISTING_ID);
         final int otherSlot = slots.register(otherListing);
-        final RiskEngine engine = RiskEngine.withPolicies(
-                new OrderRiskPolicy[] {},
-                new MarketRiskPolicy[] {new MaxTotalPnlLossPolicy(prices, slots, true, Long.MAX_VALUE / 4)});
+        final ListingDirectory directory = TestListings.directory(
+                TestListings.binary(OmsTestHarness.LISTING_ID, OmsTestHarness.EXCHANGE_ID),
+                TestListings.binary(otherListing, OmsTestHarness.EXCHANGE_ID));
+        final RejectStreaks streaks = new RejectStreaks();
+        final long unlimited = Long.MAX_VALUE / 4;
+        final RiskEngine engine = RiskEngine.withScopedPolicies(
+                List.of(
+                        new ScopedPolicy(0, 0, 0, new MaxTotalPnlLossPolicy(prices, slots, directory, 0, 0, unlimited)),
+                        new ScopedPolicy(
+                                OmsTestHarness.STRATEGY_ID,
+                                0,
+                                OmsTestHarness.EXCHANGE_ID,
+                                new MaxTotalPnlLossPolicy(
+                                        prices, slots, directory, 0, OmsTestHarness.EXCHANGE_ID, unlimited)),
+                        new ScopedPolicy(0, 0, 0, new MaxConsecutiveRejectsPolicy(streaks, 0, 0, 1_000)),
+                        new ScopedPolicy(
+                                0,
+                                0,
+                                OmsTestHarness.EXCHANGE_ID,
+                                new MaxConsecutiveRejectsPolicy(streaks, 0, OmsTestHarness.EXCHANGE_ID, 1_000))),
+                directory,
+                streaks);
         final OmsTestHarness h = new OmsTestHarness(engine, prices, slots);
         h.stubListing(OmsTestHarness.EXCHANGE_ID, otherSecurity, otherListing, 0, 0);
         final long buy = h.submitBidIntent(100L * px, 10L);

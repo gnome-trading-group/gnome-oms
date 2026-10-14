@@ -23,4 +23,21 @@ public final class VenueCapabilities {
             default -> false;
         };
     }
+
+    /**
+     * Whether selling more than the account holds opens a short: Kalshi books it as a NO, Polymarket US holds its
+     * payout as margin, and the perpetual venues have no inventory to run out of. Elsewhere it's refused or sells
+     * someone else's: a Polymarket International wallet is shared by strategies, so one selling beyond what it holds
+     * would sell another's tokens. Venues not listed here may only sell what is held, so an unclassified venue fails
+     * safe.
+     */
+    public static boolean supportsShortSelling(final String exchangeCode) {
+        if (exchangeCode == null) {
+            return false;
+        }
+        return switch (exchangeCode) {
+            case "KALSHI", "POLYMARKET_US", "HYPERLIQUID", "LIGHTER" -> true;
+            default -> false;
+        };
+    }
 }

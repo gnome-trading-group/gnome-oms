@@ -21,6 +21,22 @@ public final class RiskSnapshots {
         engine.publishSnapshot(snapshot);
     }
 
+    /** Kills each exchange outright, for every strategy. */
+    public static void publishExchangeKills(final RiskEngine engine, final int... exchangeIds) {
+        final RiskEngineSnapshot snapshot = new RiskEngineSnapshot();
+        for (final int exchangeId : exchangeIds) {
+            snapshot.killedExchanges.add(exchangeId);
+        }
+        engine.publishSnapshot(snapshot);
+    }
+
+    /** Marks the session as missing a required policy, which stops everything. */
+    public static void publishUnguarded(final RiskEngine engine) {
+        final RiskEngineSnapshot snapshot = new RiskEngineSnapshot();
+        snapshot.unguarded = true;
+        engine.publishSnapshot(snapshot);
+    }
+
     /** Kills each {strategyId, listingId} pair: that strategy on that listing only. */
     public static void publishStrategyListingKills(final RiskEngine engine, final int[]... pairs) {
         final RiskEngineSnapshot snapshot = new RiskEngineSnapshot();
@@ -38,6 +54,14 @@ public final class RiskSnapshots {
     public static List<Integer> drainLatchedHalts(final RiskEngine engine) {
         final List<Integer> halts = new ArrayList<>();
         engine.drainLatchedHalts(halt -> halts.add(halt.strategyId));
+        return halts;
+    }
+
+    /** As {@link #drainLatchedHalts}, describing each halt as "strategy/exchange/listing cause policy rejects". */
+    public static List<String> drainLatchedHaltScopes(final RiskEngine engine) {
+        final List<String> halts = new ArrayList<>();
+        engine.drainLatchedHalts(halt -> halts.add(halt.strategyId + "/" + halt.exchangeId + "/" + halt.listingId
+                + " cause " + halt.cause + " policy " + halt.policyId + " rejects " + halt.rejects));
         return halts;
     }
 

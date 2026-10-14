@@ -175,6 +175,24 @@ class LedgerAgentTest {
     }
 
     @Test
+    void postsAConfirmedModifyKeyedLikeTheOrder() throws Exception {
+        ring.orderModified(7, 100, 1, 3L, 450_000_000L, 20_000_000, 5L);
+
+        agent.doWork();
+
+        final JsonNode batch = mapper.readTree(posted.get(0));
+        assertEquals(1, batch.get("orderModifies").size());
+        final JsonNode modify = batch.get("orderModifies").get(0);
+        assertEquals(3L, modify.get("clientOidCounter").asLong());
+        assertEquals(100, modify.get("listingId").asInt());
+        assertEquals(1, modify.get("exchangeId").asInt());
+        assertEquals(5L, modify.get("eventTimeNs").asLong());
+        assertEquals(450_000_000L, modify.get("price").asLong());
+        assertEquals(20_000_000, modify.get("size").asLong());
+        assertEquals(0, batch.get("orderOpens").size());
+    }
+
+    @Test
     void retriesTheSameBatchAfterAFailureAndConfirmsOnlyOnSuccess() throws Exception {
         ring.orderOpened(7, 100, 1, 3L, Side.Bid, 1, 1, 1L);
         statuses.add(503);

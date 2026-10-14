@@ -255,6 +255,7 @@ public final class LedgerAgent implements GnomeAgent {
         writeFills();
         writeOrderOpens();
         writeOrderAcks();
+        writeOrderModifies();
         writeOrderCloses();
         writeRejectCounts();
         writeMarks();
@@ -283,12 +284,7 @@ public final class LedgerAgent implements GnomeAgent {
                 first = separate(first);
                 writeOrderKey(event);
                 json.writeComma().writeObjectEntry("side", sideOf(event.side)).writeComma();
-                // A market order has no price; the schema's null marker would otherwise be stored as a number.
-                if (event.price == OrderDecoder.priceNullValue()) {
-                    json.writeString("price").writeColon().writeNull();
-                } else {
-                    json.writeObjectEntry("price", event.price);
-                }
+                writePrice(event.price);
                 json.writeComma().writeObjectEntry("size", event.size).writeObjectEnd();
             }
         }
@@ -310,6 +306,22 @@ public final class LedgerAgent implements GnomeAgent {
                 json.writeComma()
                         .writeObjectEntry("exchangeOrderId", exchangeOrderId)
                         .writeObjectEnd();
+            }
+        }
+        json.writeArrayEnd();
+    }
+
+    private void writeOrderModifies() {
+        json.writeComma().writeString("orderModifies").writeColon().writeArrayStart();
+        boolean first = true;
+        for (int i = 0; i < batchCount; i++) {
+            final LedgerEvent event = batch[i];
+            if (event.type == LedgerEventType.ORDER_MODIFIED) {
+                first = separate(first);
+                writeOrderKey(event);
+                json.writeComma();
+                writePrice(event.price);
+                json.writeComma().writeObjectEntry("size", event.size).writeObjectEnd();
             }
         }
         json.writeArrayEnd();
@@ -352,6 +364,15 @@ public final class LedgerAgent implements GnomeAgent {
             }
         }
         json.writeArrayEnd();
+    }
+
+    // A market order has no price; the schema's null marker would otherwise be stored as a number.
+    private void writePrice(final long price) {
+        if (price == OrderDecoder.priceNullValue()) {
+            json.writeString("price").writeColon().writeNull();
+        } else {
+            json.writeObjectEntry("price", price);
+        }
     }
 
     private void writeNullableName(final String key, final Enum<?> value) {

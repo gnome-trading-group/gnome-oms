@@ -32,6 +32,16 @@ public interface LedgerSink {
                 int strategyId, int listingId, int exchangeId, long clientOidCounter, OrderExecutionReport report) {}
 
         @Override
+        public void orderModified(
+                int strategyId,
+                int listingId,
+                int exchangeId,
+                long clientOidCounter,
+                long price,
+                long size,
+                long timeNs) {}
+
+        @Override
         public void fillBooked(
                 int strategyId,
                 int listingId,
@@ -78,6 +88,13 @@ public interface LedgerSink {
 
     /** The venue acknowledged an order; the report carries the id the venue knows it by. */
     void orderAcked(int strategyId, int listingId, int exchangeId, long clientOidCounter, OrderExecutionReport report);
+
+    /**
+     * The venue confirmed a modify; {@code size} is the order's new FIX quantity, fills included. Recorded so what the
+     * registry counts as working matches the order the venue holds.
+     */
+    void orderModified(
+            int strategyId, int listingId, int exchangeId, long clientOidCounter, long price, long size, long timeNs);
 
     /**
      * The OMS booked a fill; {@code after} is the strategy's position on the listing once it was applied, and

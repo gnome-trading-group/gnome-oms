@@ -4,12 +4,14 @@ import group.gnometrading.strings.GnomeString;
 
 public enum RiskPolicyType {
     KILL_SWITCH(Category.KILL),
-    MAX_NOTIONAL(Category.ORDER),
+    MAX_ORDER_NOTIONAL(Category.ORDER),
     MAX_ORDER_SIZE(Category.ORDER),
     MAX_POSITION(Category.ORDER),
     MAX_OPEN_ORDERS(Category.ORDER),
     PRICE_COLLAR(Category.ORDER),
-    MAX_TOTAL_PNL_LOSS(Category.MARKET);
+    MAX_COMMITTED_CAPITAL(Category.ORDER),
+    MAX_TOTAL_PNL_LOSS(Category.MARKET),
+    MAX_CONSECUTIVE_REJECTS(Category.MARKET);
 
     public enum Category {
         ORDER,
@@ -31,8 +33,8 @@ public enum RiskPolicyType {
     public static RiskPolicyType fromString(final GnomeString type) {
         if (type.equals("KILL_SWITCH")) {
             return KILL_SWITCH;
-        } else if (type.equals("MAX_NOTIONAL")) {
-            return MAX_NOTIONAL;
+        } else if (type.equals("MAX_ORDER_NOTIONAL")) {
+            return MAX_ORDER_NOTIONAL;
         } else if (type.equals("MAX_ORDER_SIZE")) {
             return MAX_ORDER_SIZE;
         } else if (type.equals("MAX_POSITION")) {
@@ -41,8 +43,12 @@ public enum RiskPolicyType {
             return MAX_OPEN_ORDERS;
         } else if (type.equals("PRICE_COLLAR")) {
             return PRICE_COLLAR;
+        } else if (type.equals("MAX_COMMITTED_CAPITAL")) {
+            return MAX_COMMITTED_CAPITAL;
         } else if (type.equals("MAX_TOTAL_PNL_LOSS")) {
             return MAX_TOTAL_PNL_LOSS;
+        } else if (type.equals("MAX_CONSECUTIVE_REJECTS")) {
+            return MAX_CONSECUTIVE_REJECTS;
         }
         return null;
     }

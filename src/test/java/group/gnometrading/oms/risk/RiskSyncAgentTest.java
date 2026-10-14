@@ -1,5 +1,6 @@
 package group.gnometrading.oms.risk;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -13,7 +14,8 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import group.gnometrading.logging.NullLogger;
+import group.gnometrading.logging.LogMessage;
+import group.gnometrading.oms.RecordingLogger;
 import group.gnometrading.oms.pnl.PriceSlotRegistry;
 import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.DefaultPositionTracker;
@@ -25,6 +27,7 @@ import group.gnometrading.schemas.Order;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.strings.ViewString;
 import java.time.Duration;
+import java.util.List;
 import org.agrona.concurrent.EpochClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -37,6 +40,8 @@ class RiskSyncAgentTest {
 
     private static final int STRATEGY_ID = 1;
     private static final int LISTING_ID = 100;
+    private static final int EXCHANGE_ID = 3;
+    private static final int OTHER_EXCHANGE_ID = 4;
     private static final Duration INTERVAL = Duration.ofMillis(1);
     private static final Duration STALE_AFTER = Duration.ofSeconds(30);
 
@@ -49,6 +54,7 @@ class RiskSyncAgentTest {
     @Mock
     private OrderStateManager orders;
 
+    private final RecordingLogger logger = new RecordingLogger();
     private RiskEngine riskEngine;
     private RiskSyncAgent agent;
     private DefaultPositionTracker positions;
@@ -56,18 +62,24 @@ class RiskSyncAgentTest {
 
     @BeforeEach
     void setUp() {
-        riskEngine = RiskEngine.syncedFromRegistry(clock, STALE_AFTER, 1);
+        useAgent(ListingDirectory.EMPTY, false);
+        positions = new DefaultPositionTracker(new SharedPositionBuffer(8));
+        order = new Order();
+        order.encoder.side(Side.Bid).size(1).price(100);
+    }
+
+    private void useAgent(final ListingDirectory directory, final boolean live) {
+        riskEngine = RiskEngine.syncedFromRegistry(clock, STALE_AFTER, directory, 1);
         agent = new RiskSyncAgent(
                 riskMaster,
                 riskEngine,
                 clock,
                 INTERVAL,
-                new NullLogger(),
+                logger,
                 new SharedPriceBuffer(1),
-                new PriceSlotRegistry(1));
-        positions = new DefaultPositionTracker(new SharedPositionBuffer(8));
-        order = new Order();
-        order.encoder.side(Side.Bid).size(1).price(100);
+                new PriceSlotRegistry(1),
+                STRATEGY_ID,
+                live);
     }
 
     // The OMS thread applies what the sync thread published, as it would on its next loop pass.
@@ -95,6 +107,12 @@ class RiskSyncAgentTest {
 
         @Override
         public void onListingKilled(final int listingId) {}
+
+        @Override
+        public void onExchangeKilled(final int exchangeId) {}
+
+        @Override
+        public void onStrategyExchangeKilled(final int strategyId, final int exchangeId) {}
     };
 
     private static RiskPolicyRecord createRecord(
@@ -112,6 +130,21 @@ class RiskSyncAgentTest {
         record.parametersJson.copy(new ViewString(params));
         record.enabled = enabled;
         return record;
+    }
+
+    private static RiskPolicyRecord onExchange(final int exchangeId, final RiskPolicyRecord record) {
+        record.exchangeId = exchangeId;
+        return record;
+    }
+
+    /** One row of each policy a live session must have, for every strategy and listing. */
+    private static RiskPolicyRecord[] requiredEverywhere() {
+        return new RiskPolicyRecord[] {
+            createRecord(91, "MAX_COMMITTED_CAPITAL", 0, 0, "{\"maxCapital\": 1000}", true),
+            createRecord(92, "MAX_TOTAL_PNL_LOSS", 0, 0, "{\"maxLoss\": 1000}", true),
+            createRecord(93, "MAX_POSITION", 0, 0, "{\"maxPosition\": 1000}", true),
+            createRecord(94, "MAX_CONSECUTIVE_REJECTS", 0, 0, "{\"maxRejects\": 5}", true)
+        };
     }
 
     private static RiskPolicyRecord forSession(final String sessionId, final RiskPolicyRecord record) {
@@ -132,10 +165,10 @@ class RiskSyncAgentTest {
         triggerSync();
 
         order.encoder.size(11);
-        assertNotNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID));
+        assertNotNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID, EXCHANGE_ID));
 
         order.encoder.size(5);
-        assertNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID));
+        assertNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID, EXCHANGE_ID));
     }
 
     @Test
@@ -146,11 +179,15 @@ class RiskSyncAgentTest {
         triggerSync();
 
         positions.addOpenOrder(STRATEGY_ID, LISTING_ID + 1);
-        assertNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID), "1 open elsewhere");
+        assertNull(
+                riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID, EXCHANGE_ID), "1 open elsewhere");
 
         positions.addOpenOrder(STRATEGY_ID, LISTING_ID);
-        assertNotNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID), "listing limit of 1");
-        assertNotNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID + 1), "strategy limit of 2");
+        assertNotNull(
+                riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID, EXCHANGE_ID), "listing limit of 1");
+        assertNotNull(
+                riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID + 1, EXCHANGE_ID),
+                "strategy limit of 2");
     }
 
     @Test
@@ -162,12 +199,16 @@ class RiskSyncAgentTest {
 
         positions.applyStrategyFill(STRATEGY_ID, LISTING_ID + 1, Side.Bid, 1, 100, 0);
         positions.getStrategyPosition(STRATEGY_ID, LISTING_ID + 1).realizedPnl = -51L;
-        assertFalse(riskEngine.checkMarketPolicies(STRATEGY_ID, LISTING_ID, positions, orders), "loss elsewhere");
+        assertFalse(
+                riskEngine.checkMarketPolicies(STRATEGY_ID, LISTING_ID, EXCHANGE_ID, positions, orders),
+                "loss elsewhere");
 
         positions.applyStrategyFill(STRATEGY_ID + 1, LISTING_ID + 1, Side.Bid, 1, 100, 0);
         positions.getStrategyPosition(STRATEGY_ID + 1, LISTING_ID + 1).realizedPnl = -51L;
         positions.applyStrategyFill(STRATEGY_ID + 1, LISTING_ID + 2, Side.Bid, 1, 100, 0);
-        assertTrue(riskEngine.checkMarketPolicies(STRATEGY_ID + 1, LISTING_ID + 2, positions, orders), "summed");
+        assertTrue(
+                riskEngine.checkMarketPolicies(STRATEGY_ID + 1, LISTING_ID + 2, EXCHANGE_ID, positions, orders),
+                "summed");
     }
 
     @Test
@@ -178,7 +219,7 @@ class RiskSyncAgentTest {
         positions.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 1, 100, 0);
         positions.getStrategyPosition(STRATEGY_ID, LISTING_ID).realizedPnl = -51L;
 
-        assertTrue(riskEngine.checkMarketPolicies(STRATEGY_ID, LISTING_ID, positions, orders));
+        assertTrue(riskEngine.checkMarketPolicies(STRATEGY_ID, LISTING_ID, EXCHANGE_ID, positions, orders));
     }
 
     @Test
@@ -187,7 +228,7 @@ class RiskSyncAgentTest {
         triggerSync();
 
         // Disabled kill switch — everything trades
-        assertNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID));
+        assertNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID, EXCHANGE_ID));
     }
 
     @Test
@@ -195,8 +236,8 @@ class RiskSyncAgentTest {
         setupRiskMaster(createRecord(1, "KILL_SWITCH", STRATEGY_ID, 0, "{}", true));
         triggerSync();
 
-        assertNotNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID));
-        assertNull(riskEngine.check(order, positions, orders, STRATEGY_ID + 1, LISTING_ID));
+        assertNotNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID, EXCHANGE_ID));
+        assertNull(riskEngine.check(order, positions, orders, STRATEGY_ID + 1, LISTING_ID, EXCHANGE_ID));
     }
 
     @Test
@@ -204,8 +245,8 @@ class RiskSyncAgentTest {
         setupRiskMaster(createRecord(1, "KILL_SWITCH", 0, LISTING_ID, "{}", true));
         triggerSync();
 
-        assertNotNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID));
-        assertNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID + 1));
+        assertNotNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID, EXCHANGE_ID));
+        assertNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID + 1, EXCHANGE_ID));
     }
 
     @Test
@@ -216,12 +257,14 @@ class RiskSyncAgentTest {
                 createRecord(3, "MAX_ORDER_SIZE", 0, 0, "{\"maxOrderSize\": 10}", true));
         triggerSync();
 
-        assertTrue(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID + 1), "unknown type kills its strategy");
-        assertTrue(riskEngine.isBlocked(STRATEGY_ID + 1, LISTING_ID), "unreadable parameters kill their listing");
+        assertTrue(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID + 1, EXCHANGE_ID), "unknown type kills its strategy");
+        assertTrue(
+                riskEngine.isBlocked(STRATEGY_ID + 1, LISTING_ID, EXCHANGE_ID),
+                "unreadable parameters kill their listing");
         order.encoder.size(5);
-        assertNull(riskEngine.check(order, positions, orders, STRATEGY_ID + 1, LISTING_ID + 1));
+        assertNull(riskEngine.check(order, positions, orders, STRATEGY_ID + 1, LISTING_ID + 1, EXCHANGE_ID));
         order.encoder.size(11);
-        assertNotNull(riskEngine.check(order, positions, orders, STRATEGY_ID + 1, LISTING_ID + 1));
+        assertNotNull(riskEngine.check(order, positions, orders, STRATEGY_ID + 1, LISTING_ID + 1, EXCHANGE_ID));
     }
 
     @Test
@@ -231,7 +274,7 @@ class RiskSyncAgentTest {
                 createRecord(2, "KILL_SWITCH", 0, 0, "{}", true));
         triggerSync();
 
-        assertTrue(riskEngine.isBlocked(STRATEGY_ID + 1, LISTING_ID + 1));
+        assertTrue(riskEngine.isBlocked(STRATEGY_ID + 1, LISTING_ID + 1, EXCHANGE_ID));
     }
 
     @Test
@@ -242,14 +285,14 @@ class RiskSyncAgentTest {
 
         // First sync: maxOrderSize = 100
         order.encoder.size(50);
-        assertNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID));
+        assertNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID, EXCHANGE_ID));
 
         // Second sync: update same policyId to maxOrderSize = 10
         record.parametersJson.copy(new ViewString("{\"maxOrderSize\": 10}"));
         advance(10);
 
         order.encoder.size(50);
-        assertNotNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID));
+        assertNotNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID, EXCHANGE_ID));
     }
 
     @Test
@@ -260,8 +303,8 @@ class RiskSyncAgentTest {
         positions.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 1, 100, 0);
         positions.getStrategyPosition(STRATEGY_ID, LISTING_ID).realizedPnl = -51L;
 
-        assertTrue(riskEngine.checkMarketPolicies(STRATEGY_ID, LISTING_ID, positions, orders));
-        assertFalse(riskEngine.checkMarketPolicies(STRATEGY_ID + 1, LISTING_ID, positions, orders));
+        assertTrue(riskEngine.checkMarketPolicies(STRATEGY_ID, LISTING_ID, EXCHANGE_ID, positions, orders));
+        assertFalse(riskEngine.checkMarketPolicies(STRATEGY_ID + 1, LISTING_ID, EXCHANGE_ID, positions, orders));
     }
 
     @Test
@@ -272,8 +315,8 @@ class RiskSyncAgentTest {
         positions.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 1, 100, 0);
         positions.getStrategyPosition(STRATEGY_ID, LISTING_ID).realizedPnl = -51L;
 
-        assertTrue(riskEngine.checkMarketPolicies(STRATEGY_ID, LISTING_ID, positions, orders));
-        assertFalse(riskEngine.checkMarketPolicies(STRATEGY_ID, LISTING_ID + 1, positions, orders));
+        assertTrue(riskEngine.checkMarketPolicies(STRATEGY_ID, LISTING_ID, EXCHANGE_ID, positions, orders));
+        assertFalse(riskEngine.checkMarketPolicies(STRATEGY_ID, LISTING_ID + 1, EXCHANGE_ID, positions, orders));
     }
 
     // --- load, staleness and escalation ---
@@ -281,11 +324,11 @@ class RiskSyncAgentTest {
     @Test
     void testPoliciesLoadImmediatelyAtStart() {
         setupRiskMaster();
-        assertTrue(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID), "nothing trades before the first load");
+        assertTrue(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID, EXCHANGE_ID), "nothing trades before the first load");
 
         triggerSync();
 
-        assertFalse(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID));
+        assertFalse(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID, EXCHANGE_ID));
     }
 
     @Test
@@ -295,10 +338,10 @@ class RiskSyncAgentTest {
                 createRecord(2, "KILL_SWITCH", 0, LISTING_ID + 1, "{}", true));
         triggerSync();
 
-        assertTrue(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID + 7));
-        assertFalse(riskEngine.isBlocked(STRATEGY_ID + 1, LISTING_ID), "another strategy");
-        assertTrue(riskEngine.isBlocked(STRATEGY_ID + 1, LISTING_ID + 1));
-        assertTrue(riskEngine.isBlocked(STRATEGY_ID + 2, LISTING_ID + 1));
+        assertTrue(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID + 7, EXCHANGE_ID));
+        assertFalse(riskEngine.isBlocked(STRATEGY_ID + 1, LISTING_ID, EXCHANGE_ID), "another strategy");
+        assertTrue(riskEngine.isBlocked(STRATEGY_ID + 1, LISTING_ID + 1, EXCHANGE_ID));
+        assertTrue(riskEngine.isBlocked(STRATEGY_ID + 2, LISTING_ID + 1, EXCHANGE_ID));
     }
 
     @Test
@@ -306,9 +349,9 @@ class RiskSyncAgentTest {
         setupRiskMaster(createRecord(1, "KILL_SWITCH", STRATEGY_ID, LISTING_ID, "{}", true));
         triggerSync();
 
-        assertTrue(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID));
-        assertFalse(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID + 1), "its other listings");
-        assertFalse(riskEngine.isBlocked(STRATEGY_ID + 1, LISTING_ID), "other strategies on the listing");
+        assertTrue(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID, EXCHANGE_ID));
+        assertFalse(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID + 1, EXCHANGE_ID), "its other listings");
+        assertFalse(riskEngine.isBlocked(STRATEGY_ID + 1, LISTING_ID, EXCHANGE_ID), "other strategies on the listing");
     }
 
     @Test
@@ -317,9 +360,9 @@ class RiskSyncAgentTest {
         triggerSync();
 
         order.encoder.size(11);
-        assertNotNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID));
-        assertNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID + 1));
-        assertNull(riskEngine.check(order, positions, orders, STRATEGY_ID + 1, LISTING_ID));
+        assertNotNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID, EXCHANGE_ID));
+        assertNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID + 1, EXCHANGE_ID));
+        assertNull(riskEngine.check(order, positions, orders, STRATEGY_ID + 1, LISTING_ID, EXCHANGE_ID));
     }
 
     @Test
@@ -330,10 +373,12 @@ class RiskSyncAgentTest {
         positions.applyStrategyFill(STRATEGY_ID, LISTING_ID + 1, Side.Bid, 1, 100, 0);
         positions.getStrategyPosition(STRATEGY_ID, LISTING_ID + 1).realizedPnl = -500L;
         positions.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 1, 100, 0);
-        assertFalse(riskEngine.checkMarketPolicies(STRATEGY_ID, LISTING_ID, positions, orders), "loss elsewhere");
+        assertFalse(
+                riskEngine.checkMarketPolicies(STRATEGY_ID, LISTING_ID, EXCHANGE_ID, positions, orders),
+                "loss elsewhere");
 
         positions.getStrategyPosition(STRATEGY_ID, LISTING_ID).realizedPnl = -51L;
-        assertTrue(riskEngine.checkMarketPolicies(STRATEGY_ID, LISTING_ID, positions, orders));
+        assertTrue(riskEngine.checkMarketPolicies(STRATEGY_ID, LISTING_ID, EXCHANGE_ID, positions, orders));
     }
 
     @Test
@@ -344,9 +389,11 @@ class RiskSyncAgentTest {
                 forSession("theirs", createRecord(2, "KILL_SWITCH", STRATEGY_ID, 0, "{}", true)));
         triggerSync();
 
-        assertFalse(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID), "another session's kill");
+        assertFalse(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID, EXCHANGE_ID), "another session's kill");
         order.encoder.size(11);
-        assertNotNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID), "this session's limit");
+        assertNotNull(
+                riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID, EXCHANGE_ID),
+                "this session's limit");
     }
 
     @Test
@@ -354,7 +401,7 @@ class RiskSyncAgentTest {
         setupRiskMaster(forSession("any", createRecord(1, "KILL_SWITCH", STRATEGY_ID, 0, "{}", true)));
         triggerSync();
 
-        assertFalse(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID));
+        assertFalse(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID, EXCHANGE_ID));
     }
 
     @Test
@@ -362,7 +409,7 @@ class RiskSyncAgentTest {
         setupRiskMaster(createRecord(1, "KILL_SWITCH", -1, 0, "{}", true));
         triggerSync();
 
-        assertTrue(riskEngine.isBlocked(STRATEGY_ID + 5, LISTING_ID + 5));
+        assertTrue(riskEngine.isBlocked(STRATEGY_ID + 5, LISTING_ID + 5, EXCHANGE_ID));
     }
 
     @Test
@@ -374,9 +421,9 @@ class RiskSyncAgentTest {
         advance(1_000);
 
         order.encoder.size(5);
-        assertNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID));
+        assertNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID, EXCHANGE_ID));
         order.encoder.size(11);
-        assertNotNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID));
+        assertNotNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID, EXCHANGE_ID));
     }
 
     @Test
@@ -386,14 +433,14 @@ class RiskSyncAgentTest {
         doThrow(new RuntimeException("registry down")).when(riskMaster).refresh();
 
         advance(29_000);
-        assertFalse(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID), "still inside the window");
+        assertFalse(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID, EXCHANGE_ID), "still inside the window");
         advance(2_000);
-        assertTrue(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID));
+        assertTrue(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID, EXCHANGE_ID));
         assertFalse(riskEngine.hasKills(), "stale blocks new orders but cancels nothing");
 
         doNothing().when(riskMaster).refresh();
         advance(1);
-        assertFalse(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID));
+        assertFalse(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID, EXCHANGE_ID));
     }
 
     @Test
@@ -413,47 +460,47 @@ class RiskSyncAgentTest {
         doThrow(new RuntimeException("registry down"))
                 .doNothing()
                 .when(riskMaster)
-                .requestHalt(eq(7), anyString());
-        riskEngine.latch(7);
+                .requestHalt(eq(7), eq(0), eq(0), anyString());
+        riskEngine.latch(7, 0, 0, RiskEngine.CAUSE_MARKET_LIMIT, 0);
 
         advance(1);
         advance(1);
 
-        verify(riskMaster, times(2)).requestHalt(eq(7), anyString());
+        verify(riskMaster, times(2)).requestHalt(eq(7), eq(0), eq(0), anyString());
         advance(1);
-        verify(riskMaster, times(2)).requestHalt(eq(7), anyString());
+        verify(riskMaster, times(2)).requestHalt(eq(7), eq(0), eq(0), anyString());
     }
 
     @Test
     void testOneHaltFailingDoesNotHoldUpAnother() {
         setupRiskMaster();
         triggerSync();
-        doThrow(new RuntimeException("rejected")).when(riskMaster).requestHalt(eq(7), anyString());
-        riskEngine.latch(7);
-        riskEngine.latch(8);
+        doThrow(new RuntimeException("rejected")).when(riskMaster).requestHalt(eq(7), eq(0), eq(0), anyString());
+        riskEngine.latch(7, 0, 0, RiskEngine.CAUSE_MARKET_LIMIT, 0);
+        riskEngine.latch(8, 0, 0, RiskEngine.CAUSE_MARKET_LIMIT, 0);
 
         advance(1);
 
-        verify(riskMaster).requestHalt(eq(8), anyString());
+        verify(riskMaster).requestHalt(eq(8), eq(0), eq(0), anyString());
     }
 
     @Test
     void testRecordedHaltReachesTheOmsEvenIfTheOperatorAlreadyResumedIt() {
         setupRiskMaster();
         triggerSync();
-        riskEngine.latch(7);
+        riskEngine.latch(7, 0, 0, RiskEngine.CAUSE_MARKET_LIMIT, 0);
 
         advance(1); // records the halt and forces a refresh
         advance(1); // that refresh, with policies unchanged, still publishes the confirmation
 
-        assertFalse(riskEngine.isLatched(7));
+        assertFalse(riskEngine.isLatchedAt(7, 0, 0));
     }
 
     @Test
     void testConfirmationKeepsRidingSnapshotsTheOmsSkipped() {
         setupRiskMaster();
         triggerSync();
-        riskEngine.latch(7);
+        riskEngine.latch(7, 0, 0, RiskEngine.CAUSE_MARKET_LIMIT, 0);
 
         now[0] += 1;
         agent.doWork(); // records the halt
@@ -464,6 +511,192 @@ class RiskSyncAgentTest {
         agent.doWork(); // so the snapshot it does see must carry the confirmation again
         riskEngine.applyChanges(IGNORE_KILLS);
 
-        assertFalse(riskEngine.isLatched(7));
+        assertFalse(riskEngine.isLatchedAt(7, 0, 0));
+    }
+
+    // --- exchange scope ---
+
+    @Test
+    void testExchangeRowsKillAndLimitOnlyThatExchange() {
+        setupRiskMaster(
+                onExchange(EXCHANGE_ID, createRecord(1, "KILL_SWITCH", 0, 0, "{}", true)),
+                onExchange(
+                        OTHER_EXCHANGE_ID,
+                        createRecord(2, "MAX_ORDER_SIZE", STRATEGY_ID, 0, "{\"maxOrderSize\": 10}", true)));
+        triggerSync();
+
+        assertTrue(riskEngine.isBlocked(STRATEGY_ID + 1, LISTING_ID, EXCHANGE_ID));
+        assertFalse(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID + 1, OTHER_EXCHANGE_ID));
+        order.encoder.size(11);
+        assertNotNull(riskEngine.check(order, positions, orders, STRATEGY_ID, LISTING_ID + 1, OTHER_EXCHANGE_ID));
+        assertNull(riskEngine.check(order, positions, orders, STRATEGY_ID + 1, LISTING_ID + 1, OTHER_EXCHANGE_ID));
+    }
+
+    @Test
+    void testAnExchangeLossLimitSumsOnlyThatExchangesListings() {
+        useAgent(
+                TestListings.directory(
+                        TestListings.binary(LISTING_ID, EXCHANGE_ID),
+                        TestListings.binary(LISTING_ID + 1, OTHER_EXCHANGE_ID)),
+                false);
+        setupRiskMaster(
+                onExchange(EXCHANGE_ID, createRecord(1, "MAX_TOTAL_PNL_LOSS", 0, 0, "{\"maxLoss\": 50}", true)));
+        triggerSync();
+
+        positions.applyStrategyFill(STRATEGY_ID, LISTING_ID + 1, Side.Bid, 1, 100, 0);
+        positions.getStrategyPosition(STRATEGY_ID, LISTING_ID + 1).realizedPnl = -500L;
+        positions.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 1, 100, 0);
+        positions.getStrategyPosition(STRATEGY_ID, LISTING_ID).realizedPnl = -40L;
+        assertFalse(riskEngine.checkMarketPolicies(STRATEGY_ID, LISTING_ID, EXCHANGE_ID, positions, orders));
+
+        positions.getStrategyPosition(STRATEGY_ID, LISTING_ID).realizedPnl = -51L;
+        assertTrue(riskEngine.checkMarketPolicies(STRATEGY_ID, LISTING_ID, EXCHANGE_ID, positions, orders));
+    }
+
+    @Test
+    void testChangingOnlyTheExchangePublishesAFreshSnapshot() {
+        final RiskPolicyRecord record = onExchange(EXCHANGE_ID, createRecord(1, "KILL_SWITCH", 0, 0, "{}", true));
+        setupRiskMaster(record);
+        triggerSync();
+        assertTrue(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID, EXCHANGE_ID));
+
+        record.exchangeId = OTHER_EXCHANGE_ID;
+        advance(10);
+        assertFalse(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID, EXCHANGE_ID));
+        assertTrue(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID, OTHER_EXCHANGE_ID));
+    }
+
+    // --- fail-closed ---
+
+    @Test
+    void testALiveSessionCoveredOnEveryListingTrades() {
+        useAgent(twoVenues(), true);
+        setupRiskMaster(requiredEverywhere());
+        triggerSync();
+
+        assertFalse(riskEngine.isBlocked(STRATEGY_ID, LISTING_ID, EXCHANGE_ID));
+        assertTrue(logger.linesFor(LogMessage.RISK_UNGUARDED).isEmpty());
+    }
+
+    @Test
+    void testALiveSessionMissingARequiredPolicyStopsEverythingAndSaysWhatIsMissingOnce() {
+        useAgent(twoVenues(), true);
+        final RiskPolicyRecord[] required = requiredEverywhere();
+        setupRiskMaster(
+                required[0],
+                required[1],
+                required[2],
+                onExchange(EXCHANGE_ID, createRecord(4, "MAX_CONSECUTIVE_REJECTS", 0, 0, "{\"maxRejects\": 5}", true)));
+        triggerSync();
+
+        assertTrue(riskEngine.isHalted(STRATEGY_ID, LISTING_ID, EXCHANGE_ID), "even where it is covered");
+        assertTrue(riskEngine.hasKills());
+        assertEquals(
+                List.of("RISK_UNGUARDED " + STRATEGY_ID + " " + (LISTING_ID + 1) + " 3"),
+                logger.linesFor(LogMessage.RISK_UNGUARDED));
+
+        riskEngine.latch(9, 0, 0, RiskEngine.CAUSE_MARKET_LIMIT, 0);
+        advance(1);
+        advance(1);
+        assertEquals(1, logger.linesFor(LogMessage.RISK_UNGUARDED).size(), "rebuilt for a halt, not a change");
+    }
+
+    @Test
+    void testAPaperSessionNeedsNoPolicies() {
+        useAgent(twoVenues(), false);
+        setupRiskMaster();
+        triggerSync();
+
+        assertFalse(riskEngine.isHalted(STRATEGY_ID, LISTING_ID, EXCHANGE_ID));
+    }
+
+    @Test
+    void testOnlyRowsThatBuildAndCoverTheListingCount() {
+        useAgent(twoVenues(), true);
+        final RiskPolicyRecord[] required = requiredEverywhere();
+        setupRiskMaster(
+                createRecord(1, "MAX_COMMITTED_CAPITAL", STRATEGY_ID + 1, 0, "{\"maxCapital\": 1}", true),
+                createRecord(2, "MAX_COMMITTED_CAPITAL", 0, LISTING_ID, "{\"maxCapital\": 1}", true),
+                onExchange(OTHER_EXCHANGE_ID, createRecord(3, "MAX_COMMITTED_CAPITAL", 0, 0, "{}", true)),
+                createRecord(4, "MAX_COMMITTED_CAPITAL", 0, 0, "{\"maxCapital\": 1}", false),
+                required[1],
+                required[2],
+                required[3]);
+        triggerSync();
+
+        assertEquals(
+                List.of("RISK_UNGUARDED " + STRATEGY_ID + " " + (LISTING_ID + 1) + " 0"),
+                logger.linesFor(LogMessage.RISK_UNGUARDED),
+                "another strategy's, another listing's, an unreadable and a disabled row all leave a gap");
+    }
+
+    @Test
+    void testRowsPerListingAndPerExchangeCoverTogether() {
+        useAgent(twoVenues(), true);
+        final RiskPolicyRecord[] required = requiredEverywhere();
+        setupRiskMaster(
+                createRecord(1, "MAX_COMMITTED_CAPITAL", STRATEGY_ID, LISTING_ID, "{\"maxCapital\": 1}", true),
+                onExchange(
+                        OTHER_EXCHANGE_ID, createRecord(2, "MAX_COMMITTED_CAPITAL", 0, 0, "{\"maxCapital\": 1}", true)),
+                required[1],
+                required[2],
+                required[3]);
+        triggerSync();
+
+        assertFalse(riskEngine.isHalted(STRATEGY_ID, LISTING_ID, EXCHANGE_ID));
+    }
+
+    @Test
+    void testAddingTheMissingPolicyLiftsTheStop() {
+        useAgent(twoVenues(), true);
+        final RiskPolicyRecord[] required = requiredEverywhere();
+        setupRiskMaster(required[0], required[1], required[2]);
+        triggerSync();
+        assertTrue(riskEngine.isHalted(STRATEGY_ID, LISTING_ID, EXCHANGE_ID));
+
+        setupRiskMaster(required);
+        advance(10);
+        assertFalse(riskEngine.isHalted(STRATEGY_ID, LISTING_ID, EXCHANGE_ID));
+    }
+
+    private static ListingDirectory twoVenues() {
+        return TestListings.directory(
+                TestListings.binary(LISTING_ID, EXCHANGE_ID), TestListings.binary(LISTING_ID + 1, OTHER_EXCHANGE_ID));
+    }
+
+    // --- scoped halts ---
+
+    @Test
+    void testARejectStreakHaltIsRecordedOnItsPolicysScopeWithItsLength() {
+        setupRiskMaster(onExchange(
+                EXCHANGE_ID, createRecord(31, "MAX_CONSECUTIVE_REJECTS", 0, 0, "{\"maxRejects\": 2}", true)));
+        triggerSync();
+        riskEngine.rejectStreaks().recordReject(STRATEGY_ID, EXCHANGE_ID, LISTING_ID);
+        riskEngine.rejectStreaks().recordReject(STRATEGY_ID, EXCHANGE_ID, LISTING_ID);
+        assertTrue(riskEngine.checkMarketPolicies(STRATEGY_ID, LISTING_ID, EXCHANGE_ID, positions, orders));
+        assertTrue(riskEngine.latchBreach(STRATEGY_ID, 0));
+
+        advance(1);
+        verify(riskMaster).requestHalt(STRATEGY_ID, EXCHANGE_ID, 0, "2 consecutive venue rejects (policy 31)");
+        advance(1);
+        assertFalse(riskEngine.isLatchedAt(STRATEGY_ID, EXCHANGE_ID, 0), "the registry holds it now");
+    }
+
+    @Test
+    void testEachHaltCauseNamesItself() {
+        setupRiskMaster();
+        triggerSync();
+        riskEngine.latch(7, 0, LISTING_ID, RiskEngine.CAUSE_MARKET_LIMIT, 12);
+        riskEngine.latch(8, 0, 0, RiskEngine.CAUSE_LEDGER, 0);
+        riskEngine.latch(9, 0, 0, RiskEngine.CAUSE_MARKET_LIMIT, 0);
+
+        advance(1);
+
+        verify(riskMaster).requestHalt(7, 0, LISTING_ID, "market risk limit breached (policy 12)");
+        verify(riskMaster).requestHalt(8, 0, 0, "ledger failing");
+        verify(riskMaster).requestHalt(9, 0, 0, "market risk limit breached");
+        advance(1);
+        assertFalse(riskEngine.isLatchedAt(7, 0, LISTING_ID));
+        assertFalse(riskEngine.isLatchedAt(8, 0, 0));
     }
 }

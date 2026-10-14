@@ -13,6 +13,7 @@ import group.gnometrading.oms.pnl.PriceSlotRegistry;
 import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.Position;
 import group.gnometrading.oms.position.PositionTracker;
+import group.gnometrading.oms.risk.RejectStreaks;
 import group.gnometrading.oms.risk.RiskEngine;
 import group.gnometrading.oms.state.OrderState;
 import group.gnometrading.oms.state.OrderStateManager;
@@ -115,7 +116,7 @@ public final class OrderManagementSystem {
         // A killed or latched scope's orders have been cancelled; letting an intent through would re-arm a slot whose
         // pending cancel it overwrites. Stale risk is not a halt: the strategy can still pull its quotes, and
         // RiskCheckingSink rejects anything new.
-        if (riskEngine.isHalted(intent.decoder.strategyId(), listingId)) {
+        if (riskEngine.isHalted(intent.decoder.strategyId(), listingId, intent.decoder.exchangeId())) {
             return;
         }
         IntentResolver resolver = getOrCreateResolver(intent.decoder.strategyId());
@@ -178,8 +179,8 @@ public final class OrderManagementSystem {
     }
 
     private void latchForLedger(final int strategyId) {
-        if (riskEngine.latch(strategyId)) {
-            scopeCanceller.cancel(strategyId, IntentResolver.ALL_LISTINGS);
+        if (riskEngine.latch(strategyId, 0, 0, RiskEngine.CAUSE_LEDGER, 0)) {
+            scopeCanceller.cancel(strategyId, IntentResolver.ALL_EXCHANGES, IntentResolver.ALL_LISTINGS);
         }
     }
 
@@ -203,6 +204,7 @@ public final class OrderManagementSystem {
             if (version != seenSlotVersions[slot]) {
                 seenSlotVersions[slot] = version;
                 markMoveChecker.listingId = priceSlotRegistry.listingId(slot);
+                markMoveChecker.exchangeId = riskEngine.directory().exchangeOf(markMoveChecker.listingId);
                 positionTracker.forEachStrategyId(markMoveChecker);
             }
         }
@@ -235,26 +237,71 @@ public final class OrderManagementSystem {
             }
         }
 
-        long workingBefore = tracked.workingQty();
+        final long workingBefore = tracked.workingQty();
+        final long notionalBefore = tracked.workingNotional();
         int strategyId = tracked.getStrategyId();
-        int listingId = resolveListingId(report.decoder.exchangeId(), report.decoder.securityId());
+        final int exchangeId = report.decoder.exchangeId();
+        int listingId = resolveListingId(exchangeId, report.decoder.securityId());
         final boolean awaitingAck = tracked.getState() == OrderState.PENDING_NEW;
+        final boolean modifyPending = tracked.isModifyPending();
 
         orderStateManager.applyExecutionReport(report);
-        updatePositionTracking(report, tracked, strategyId, workingBefore, listingId, bookFill);
-        recordInLedger(report, tracked, strategyId, listingId, awaitingAck, bookFill);
+        updatePositionTracking(report, tracked, strategyId, listingId, workingBefore, notionalBefore, bookFill);
+        recordInLedger(report, tracked, strategyId, listingId, awaitingAck, modifyPending, bookFill);
         final boolean terminal = tracked.getState().isTerminal();
         if (terminal) {
             // Before the resolver runs: it may send the replacement queued behind this order's cancel.
             positionTracker.removeOpenOrder(strategyId, listingId);
         }
+        // Latched before the resolver runs, so an intent it resubmits is refused as halted rather than sent to a
+        // venue that will reject it again.
+        final boolean latchedOnReject = trackRejectStreak(report, strategyId, listingId, exchangeId, bookFill);
         forwardToResolver(report, tracked, strategyId, listingId, sink);
 
         if (terminal) {
             orderStateManager.releaseOrder(tracked);
         }
 
-        checkMarketRisk(strategyId, listingId);
+        if (latchedOnReject) {
+            haltLatchedScope(strategyId);
+        } else {
+            checkMarketRisk(strategyId, listingId, exchangeId);
+        }
+    }
+
+    /**
+     * Counts a venue reject towards the strategy's streaks, or ends them when the venue took or filled an order.
+     *
+     * @return whether a reject streak breached its limit and newly latched, so its scope still needs cancelling
+     */
+    private boolean trackRejectStreak(
+            OrderExecutionReport report, int strategyId, int listingId, int exchangeId, boolean bookFill) {
+        final RejectStreaks streaks = riskEngine.rejectStreaks();
+        if (!countsTowardRejectStreak(report)) {
+            if (bookFill || report.decoder.execType() == ExecType.NEW) {
+                streaks.reset(strategyId, exchangeId, listingId);
+            }
+            return false;
+        }
+        streaks.recordReject(strategyId, exchangeId, listingId);
+        final int fundsExchangeId = report.decoder.rejectReason() == RejectReason.INSUFFICIENT_FUNDS ? exchangeId : 0;
+        return riskEngine.checkMarketPolicies(strategyId, listingId, exchangeId, positionTracker, orderStateManager)
+                && riskEngine.latchBreach(strategyId, fundsExchangeId);
+    }
+
+    /**
+     * Venue rejects that say the strategy is doing something the venue won't take, so a run of them means it is
+     * stuck. A refusal of a cancel or amend, a reject the OMS or the strategy's own settings caused, and one with its
+     * own remedy (a rate limit cools down) don't count.
+     */
+    private static boolean countsTowardRejectStreak(OrderExecutionReport report) {
+        if (report.decoder.execType() != ExecType.REJECT) {
+            return false;
+        }
+        final RejectReason reason = report.decoder.rejectReason();
+        return reason == RejectReason.EXCHANGE_REJECTED
+                || reason == RejectReason.GATEWAY_REJECTED
+                || reason == RejectReason.INSUFFICIENT_FUNDS;
     }
 
     private void recordInLedger(
@@ -263,10 +310,21 @@ public final class OrderManagementSystem {
             int strategyId,
             int listingId,
             boolean awaitingAck,
+            boolean modifyPending,
             boolean bookFill) {
         final long counter = tracked.getClientOidCounter();
         if (awaitingAck && report.decoder.execType() != ExecType.REJECT) {
             ledger.orderAcked(strategyId, listingId, tracked.getExchangeId(), counter, report);
+        }
+        if (modifyPending && report.decoder.execType() == ExecType.NEW) {
+            ledger.orderModified(
+                    strategyId,
+                    listingId,
+                    tracked.getExchangeId(),
+                    counter,
+                    tracked.getPrice(),
+                    tracked.getSize(),
+                    eventTimeOf(report));
         }
         if (bookFill) {
             ledger.fillBooked(
@@ -297,7 +355,7 @@ public final class OrderManagementSystem {
     }
 
     public void onOrderAccepted(Order order) {
-        orderStateManager.trackOrder(order);
+        final TrackedOrder tracked = orderStateManager.trackOrder(order);
         int listingId = resolveListingId(order.decoder.exchangeId(), order.decoder.securityId());
         // Recorded before the order is sent, so a later session can recognise it on the venue even if this process
         // dies before the venue answers.
@@ -310,8 +368,12 @@ public final class OrderManagementSystem {
                 order.decoder.price(),
                 order.decoder.size(),
                 clock.nanoTime());
-        positionTracker.addStrategyLeaves(
-                order.getClientOidStrategyId(), listingId, order.decoder.side(), order.decoder.size());
+        positionTracker.adjustStrategyLeaves(
+                order.getClientOidStrategyId(),
+                listingId,
+                order.decoder.side(),
+                tracked.workingQty(),
+                tracked.workingNotional());
         positionTracker.addOpenOrder(order.getClientOidStrategyId(), listingId);
     }
 
@@ -368,25 +430,45 @@ public final class OrderManagementSystem {
                 && VenueCapabilities.supportsNativeModify(listing.exchange().exchangeCode());
     }
 
-    /** A breach halts the strategy until an operator resumes it; a later recovery in PnL does not. */
-    private void checkMarketRisk(final int strategyId, final int listingId) {
-        if (riskEngine.checkMarketPolicies(strategyId, listingId, positionTracker, orderStateManager)
-                && riskEngine.latch(strategyId)) {
-            logger.log(LogMessage.STRATEGY_LATCHED_LOSS_LIMIT, strategyId, listingId, riskEngine.breachedPolicyId());
-            scopeCanceller.cancel(strategyId, IntentResolver.ALL_LISTINGS);
+    /**
+     * A breach halts the strategy in the breached policy's scope until an operator resumes it; a later recovery in
+     * PnL does not.
+     */
+    private void checkMarketRisk(final int strategyId, final int listingId, final int exchangeId) {
+        if (riskEngine.checkMarketPolicies(strategyId, listingId, exchangeId, positionTracker, orderStateManager)
+                && riskEngine.latchBreach(strategyId, 0)) {
+            haltLatchedScope(strategyId);
         }
+    }
+
+    /** Logs the latch {@link RiskEngine#latchBreach} just made and cancels every order in its scope. */
+    private void haltLatchedScope(final int strategyId) {
+        final int exchangeId = riskEngine.latchExchangeId();
+        final int listingId = riskEngine.latchListingId();
+        logger.log(
+                LogMessage.STRATEGY_LATCHED,
+                strategyId,
+                exchangeId,
+                listingId,
+                riskEngine.breachedCause(),
+                riskEngine.breachedPolicyId());
+        scopeCanceller.cancel(
+                strategyId,
+                exchangeId == 0 ? IntentResolver.ALL_EXCHANGES : exchangeId,
+                listingId == 0 ? IntentResolver.ALL_LISTINGS : listingId);
     }
 
     /** Checks each strategy with an open position on a listing whose mark just moved. */
     private final class MarkMoveChecker implements IntConsumer {
         int listingId;
+        int exchangeId;
 
         @Override
         public void accept(final int strategyId) {
             final Position position = positionTracker.getStrategyPosition(strategyId, listingId);
             // A flat position's PnL does not depend on the mark.
             if (position != null && position.netQuantity != 0 && !riskEngine.isStrategyHalted(strategyId)) {
-                checkMarketRisk(strategyId, listingId);
+                checkMarketRisk(strategyId, listingId, exchangeId);
             }
         }
     }
@@ -411,41 +493,53 @@ public final class OrderManagementSystem {
         // A sweep after the first also cancels orders still awaiting the venue's ack, in case it never comes.
         boolean resweep;
         private int strategyFilter;
+        private int exchangeFilter;
         private int listingFilter;
         private final Consumer<IntentResolver> resolverVisitor =
-                resolver -> resolver.cancelAll(listingFilter, sink, resweep);
+                resolver -> resolver.cancelAll(exchangeFilter, listingFilter, sink, resweep);
         private final Consumer<TrackedOrder> takeOrderVisitor = this::cancelIfTakeOrderInScope;
         private final Consumer<TrackedOrder> everyOrderVisitor = this::cancelIfOpen;
 
         @Override
         public void onEverythingKilled() {
-            cancel(ALL_STRATEGIES, IntentResolver.ALL_LISTINGS);
+            cancel(ALL_STRATEGIES, IntentResolver.ALL_EXCHANGES, IntentResolver.ALL_LISTINGS);
         }
 
         @Override
         public void onStrategyKilled(final int strategyId) {
-            cancel(strategyId, IntentResolver.ALL_LISTINGS);
+            cancel(strategyId, IntentResolver.ALL_EXCHANGES, IntentResolver.ALL_LISTINGS);
+        }
+
+        @Override
+        public void onExchangeKilled(final int exchangeId) {
+            cancel(ALL_STRATEGIES, exchangeId, IntentResolver.ALL_LISTINGS);
         }
 
         @Override
         public void onListingKilled(final int listingId) {
-            cancel(ALL_STRATEGIES, listingId);
+            cancel(ALL_STRATEGIES, IntentResolver.ALL_EXCHANGES, listingId);
+        }
+
+        @Override
+        public void onStrategyExchangeKilled(final int strategyId, final int exchangeId) {
+            cancel(strategyId, exchangeId, IntentResolver.ALL_LISTINGS);
         }
 
         @Override
         public void onStrategyListingKilled(final int strategyId, final int listingId) {
-            cancel(strategyId, listingId);
+            cancel(strategyId, IntentResolver.ALL_EXCHANGES, listingId);
         }
 
-        void cancel(final int strategyId, final int listingId) {
+        void cancel(final int strategyId, final int exchangeId, final int listingId) {
             strategyFilter = strategyId;
+            exchangeFilter = exchangeId;
             listingFilter = listingId;
             if (strategyId == ALL_STRATEGIES) {
                 resolvers.forEachValue(resolverVisitor);
             } else {
                 final IntentResolver resolver = resolvers.get(strategyId);
                 if (resolver != null) {
-                    resolver.cancelAll(listingId, sink, resweep);
+                    resolver.cancelAll(exchangeId, listingId, sink, resweep);
                 }
             }
             orderStateManager.forEachOrder(takeOrderVisitor);
@@ -461,6 +555,9 @@ public final class OrderManagementSystem {
                 return;
             }
             if (strategyFilter != ALL_STRATEGIES && tracked.getStrategyId() != strategyFilter) {
+                return;
+            }
+            if (exchangeFilter != IntentResolver.ALL_EXCHANGES && tracked.getExchangeId() != exchangeFilter) {
                 return;
             }
             final int listingId = resolveListingId(tracked.getExchangeId(), tracked.getSecurityId());
@@ -511,15 +608,21 @@ public final class OrderManagementSystem {
                 || report.decoder.fillPrice() == OrderExecutionReportDecoder.fillPriceNullValue();
     }
 
-    /** Keeps the position's working quantity equal to what the OMS has working on the order. */
+    /** Keeps the position's working quantity and notional equal to what the OMS has working on the order. */
     private void updatePositionTracking(
             OrderExecutionReport report,
             TrackedOrder tracked,
             int strategyId,
-            long workingBefore,
             int listingId,
+            long workingBefore,
+            long notionalBefore,
             boolean bookFill) {
-        adjustLeaves(strategyId, listingId, tracked.getSide(), tracked.workingQty() - workingBefore);
+        adjustLeaves(
+                strategyId,
+                listingId,
+                tracked.getSide(),
+                tracked.workingQty() - workingBefore,
+                tracked.workingNotional() - notionalBefore);
         if (bookFill) {
             positionTracker.applyStrategyFill(
                     strategyId,
@@ -531,11 +634,9 @@ public final class OrderManagementSystem {
         }
     }
 
-    private void adjustLeaves(int strategyId, int listingId, Side side, long change) {
-        if (change > 0) {
-            positionTracker.addStrategyLeaves(strategyId, listingId, side, change);
-        } else if (change < 0) {
-            positionTracker.removeStrategyLeaves(strategyId, listingId, side, -change);
+    private void adjustLeaves(int strategyId, int listingId, Side side, long qtyChange, long notionalChange) {
+        if (qtyChange != 0 || notionalChange != 0) {
+            positionTracker.adjustStrategyLeaves(strategyId, listingId, side, qtyChange, notionalChange);
         }
     }
 
@@ -576,7 +677,13 @@ public final class OrderManagementSystem {
             final boolean bookFull = orderStateManager.isFull();
             final RejectReason riskReject = bookFull
                     ? RejectReason.RISK_LIMIT_EXCEEDED
-                    : riskEngine.check(order, positionTracker, orderStateManager, strategyId, listingId);
+                    : riskEngine.check(
+                            order,
+                            positionTracker,
+                            orderStateManager,
+                            strategyId,
+                            listingId,
+                            order.decoder.exchangeId());
             if (riskReject == null) {
                 loggedHaltCauses.remove(strategyId);
                 onOrderAccepted(order);
@@ -699,12 +806,22 @@ public final class OrderManagementSystem {
                 return;
             }
             final RejectReason riskReject = riskEngine.check(
-                    riskCheckOrder, positionTracker, orderStateManager, original.getStrategyId(), listingId);
+                    riskCheckOrder,
+                    positionTracker,
+                    orderStateManager,
+                    original.getStrategyId(),
+                    listingId,
+                    modify.decoder.exchangeId());
             if (riskReject == null) {
                 final long workingBefore = original.workingQty();
+                final long notionalBefore = original.workingNotional();
                 original.modify(modify.decoder.price(), modify.decoder.size());
                 adjustLeaves(
-                        original.getStrategyId(), listingId, original.getSide(), original.workingQty() - workingBefore);
+                        original.getStrategyId(),
+                        listingId,
+                        original.getSide(),
+                        original.workingQty() - workingBefore,
+                        original.workingNotional() - notionalBefore);
                 delegate.onModify(modify);
             } else {
                 logRiskRejection(riskCheckOrder, original.getStrategyId(), listingId, riskReject, false);

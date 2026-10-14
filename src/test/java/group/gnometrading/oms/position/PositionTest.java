@@ -205,34 +205,49 @@ class PositionTest {
         assertEquals(150, position.getAvgEntryPrice());
     }
 
-    // --- addLeaves / removeLeaves ---
+    // --- adjustLeaves ---
 
     @Test
-    void addLeaves_bid() {
-        position.addLeaves(Side.Bid, 5);
+    void adjustLeaves_bidMovesBuyQtyAndNotional() {
+        position.adjustLeaves(Side.Bid, 5, 300);
         assertEquals(5, position.leavesBuyQty);
+        assertEquals(300, position.leavesBuyNotional);
         assertEquals(0, position.leavesSellQty);
+        assertEquals(0, position.leavesSellNotional);
     }
 
     @Test
-    void addLeaves_ask() {
-        position.addLeaves(Side.Ask, 5);
+    void adjustLeaves_askMovesSellQtyAndNotional() {
+        position.adjustLeaves(Side.Ask, 5, 300);
         assertEquals(0, position.leavesBuyQty);
+        assertEquals(0, position.leavesBuyNotional);
         assertEquals(5, position.leavesSellQty);
+        assertEquals(300, position.leavesSellNotional);
     }
 
     @Test
-    void removeLeaves_bid() {
-        position.addLeaves(Side.Bid, 10);
-        position.removeLeaves(Side.Bid, 4);
+    void adjustLeaves_decrements() {
+        position.adjustLeaves(Side.Bid, 10, 1000);
+        position.adjustLeaves(Side.Bid, -4, -400);
         assertEquals(6, position.leavesBuyQty);
+        assertEquals(600, position.leavesBuyNotional);
     }
 
     @Test
-    void removeLeaves_floorsAtZero() {
-        position.addLeaves(Side.Ask, 3);
-        position.removeLeaves(Side.Ask, 10);
+    void adjustLeaves_floorsAtZero() {
+        position.adjustLeaves(Side.Ask, 3, 30);
+        position.adjustLeaves(Side.Ask, -10, -100);
         assertEquals(0, position.leavesSellQty);
+        assertEquals(0, position.leavesSellNotional);
+    }
+
+    @Test
+    void init_clearsLeavesNotional() {
+        position.adjustLeaves(Side.Bid, 1, 10);
+        position.adjustLeaves(Side.Ask, 1, 10);
+        position.init(42);
+        assertEquals(0, position.leavesBuyNotional);
+        assertEquals(0, position.leavesSellNotional);
     }
 
     // --- getEffectiveQuantity ---
@@ -246,8 +261,8 @@ class PositionTest {
     @Test
     void getEffectiveQuantity_withLeaves() {
         position.applyFill(Side.Bid, 10 * UNIT, 100, 0);
-        position.addLeaves(Side.Bid, 3 * UNIT);
-        position.addLeaves(Side.Ask, 2 * UNIT);
+        position.adjustLeaves(Side.Bid, 3 * UNIT, 0);
+        position.adjustLeaves(Side.Ask, 2 * UNIT, 0);
         assertEquals(11 * UNIT, position.getEffectiveQuantity()); // 10 + 3 - 2
     }
 

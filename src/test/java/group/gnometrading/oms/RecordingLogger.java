@@ -8,11 +8,11 @@ import java.util.stream.Collectors;
 import java.util.stream.LongStream;
 
 /** Keeps each line as {@code MESSAGE v1 v2 ...}, for tests that check what was logged. */
-final class RecordingLogger implements Logger {
+public final class RecordingLogger implements Logger {
 
     final List<String> lines = new ArrayList<>();
 
-    List<String> linesFor(final LogMessage msg) {
+    public List<String> linesFor(final LogMessage msg) {
         return lines.stream().filter(line -> line.startsWith(msg.name())).toList();
     }
 

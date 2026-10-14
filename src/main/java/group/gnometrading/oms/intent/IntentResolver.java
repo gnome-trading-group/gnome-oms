@@ -23,6 +23,8 @@ public final class IntentResolver {
 
     /** Passed to {@link #cancelAll} to cancel on every listing. */
     public static final int ALL_LISTINGS = Integer.MIN_VALUE;
+    /** Passed to {@link #cancelAll} to cancel on every exchange; no exchange has id 0. */
+    public static final int ALL_EXCHANGES = 0;
 
     private final LongSupplier oidSupplier;
     private final int strategyId;
@@ -37,6 +39,7 @@ public final class IntentResolver {
     private final LongHashMap<OrderSlot> askSlots = new LongHashMap<>(4);
     private final Consumer<OrderSlot> slotCanceller = this::cancelSlot;
     private int cancelListing;
+    private int cancelExchange;
     private boolean cancelPendingToo;
     private ActionSink cancelHandler;
 
@@ -366,12 +369,14 @@ public final class IntentResolver {
     }
 
     /**
-     * Cancels every resting order on {@code listingId} (or on every listing, for {@link #ALL_LISTINGS}) and
-     * drops whatever the slots had queued, so nothing is placed again once the cancels are acknowledged. An order
-     * not yet acknowledged, or mid-modify, is cancelled as soon as its ack arrives; with {@code cancelAwaitingAck}
-     * one never acknowledged is also cancelled now, for when that ack never comes.
+     * Cancels every resting order on {@code exchangeId} (or on every exchange, for {@link #ALL_EXCHANGES}) and
+     * {@code listingId} (or on every listing, for {@link #ALL_LISTINGS}) and drops whatever the slots had queued, so
+     * nothing is placed again once the cancels are acknowledged. An order not yet acknowledged, or mid-modify, is
+     * cancelled as soon as its ack arrives; with {@code cancelAwaitingAck} one never acknowledged is also cancelled
+     * now, for when that ack never comes.
      */
-    public void cancelAll(int listingId, ActionSink handler, boolean cancelAwaitingAck) {
+    public void cancelAll(int exchangeId, int listingId, ActionSink handler, boolean cancelAwaitingAck) {
+        cancelExchange = exchangeId;
         cancelListing = listingId;
         cancelHandler = handler;
         cancelPendingToo = cancelAwaitingAck;
@@ -387,6 +392,9 @@ public final class IntentResolver {
 
     private void cancelSlot(OrderSlot slot) {
         if (cancelListing != ALL_LISTINGS && slot.getListingId() != cancelListing) {
+            return;
+        }
+        if (cancelExchange != ALL_EXCHANGES && slot.getExchangeId() != cancelExchange) {
             return;
         }
         switch (slot.getState()) {

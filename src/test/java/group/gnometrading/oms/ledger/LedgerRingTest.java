@@ -90,6 +90,21 @@ class LedgerRingTest {
     }
 
     @Test
+    void aConfirmedModifyCarriesTheOrdersNewPriceAndSize() {
+        final LedgerRing ring = new LedgerRing(8, 4, MAX_LAG_NS, positions);
+        ring.orderModified(7, 100, 1, 5L, 450_000_000L, 20_000_000, 11L);
+
+        final LedgerEvent modify = drain(ring).get(0);
+        assertEquals(LedgerEventType.ORDER_MODIFIED, modify.type);
+        assertEquals(100, modify.listingId);
+        assertEquals(1, modify.exchangeId);
+        assertEquals(5L, modify.clientOidCounter);
+        assertEquals(450_000_000L, modify.price);
+        assertEquals(20_000_000, modify.size);
+        assertEquals(11L, modify.eventTimeNs);
+    }
+
+    @Test
     void refusalCountsWaitForRoomInsteadOfFailingTheLedger() {
         final LedgerRing ring = new LedgerRing(2, 4, MAX_LAG_NS, positions);
         ring.orderOpened(7, 100, 1, 1L, Side.Bid, 50, 10, 1L);

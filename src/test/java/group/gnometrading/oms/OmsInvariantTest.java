@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import group.gnometrading.oms.position.Position;
 import group.gnometrading.schemas.Side;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
 import org.junit.jupiter.api.Test;
@@ -18,6 +19,8 @@ class OmsInvariantTest {
     private static final int ITERATIONS = 500;
     private static final int EVENTS_PER_ITERATION = 60;
     private static final int STRESS_EVENTS = 5000;
+    private static final long PRICE_SCALE = 10_000_000L;
+    private static final long SIZE_SCALE = 1_000_000L;
 
     // --- I1: position.netQuantity == algebraic sum of all fills ---
 
@@ -108,6 +111,51 @@ class OmsInvariantTest {
         }
     }
 
+    // --- I4: the position's working quantity and notional are the sums over its working orders ---
+
+    @Test
+    void invariant_workingAmountsMatchThePositionsAccumulators() {
+        for (int seed = 0; seed < ITERATIONS; seed++) {
+            OmsTestHarness h = new OmsTestHarness();
+            EventDriver driver = new EventDriver(h, new Random(seed + 2000), PRICE_SCALE, SIZE_SCALE);
+
+            for (int i = 0; i < EVENTS_PER_ITERATION; i++) {
+                driver.nextEvent();
+                assertWorkingMatchesAccumulators(h, "Seed " + seed + " event " + i);
+            }
+            driver.cancelEverything();
+            assertWorkingMatchesAccumulators(h, "Seed " + seed + " after cancelling everything");
+            Position pos = h.getStrategyPosition(OmsTestHarness.STRATEGY_ID, OmsTestHarness.LISTING_ID);
+            assertTrue(
+                    pos == null
+                            || (pos.leavesBuyQty == 0
+                                    && pos.leavesSellQty == 0
+                                    && pos.leavesBuyNotional == 0
+                                    && pos.leavesSellNotional == 0),
+                    "Seed " + seed + ": nothing open, nothing working");
+        }
+    }
+
+    private static void assertWorkingMatchesAccumulators(OmsTestHarness h, String where) {
+        long[] sums = new long[4];
+        h.orderStateManager.forEachOrder(order -> {
+            int offset = order.getSide() == Side.Bid ? 0 : 2;
+            sums[offset] += order.workingQty();
+            sums[offset + 1] += order.workingNotional();
+        });
+        for (Position pos : new Position[] {
+            h.getStrategyPosition(OmsTestHarness.STRATEGY_ID, OmsTestHarness.LISTING_ID),
+            h.getPosition(OmsTestHarness.LISTING_ID)
+        }) {
+            long[] held = pos == null
+                    ? new long[4]
+                    : new long[] {pos.leavesBuyQty, pos.leavesBuyNotional, pos.leavesSellQty, pos.leavesSellNotional};
+            assertTrue(
+                    Arrays.equals(sums, held),
+                    where + ": orders " + Arrays.toString(sums) + " but position " + Arrays.toString(held));
+        }
+    }
+
     /**
      * Drives random valid OMS events: intents (new/modify/cancel) and exec reports
      * (acks/fills/cancels/rejects/cancel-rejects) for outstanding orders.
@@ -117,11 +165,44 @@ class OmsInvariantTest {
         private final OmsTestHarness h;
         private final Random rng;
         private final List<OutstandingOrder> outstanding = new ArrayList<>();
-        private long nextFillTracker = 0;
+        private final long priceScale;
+        private final long sizeScale;
 
         EventDriver(OmsTestHarness h, Random rng) {
+            this(h, rng, 1, 1);
+        }
+
+        /** Scales prices and sizes up, for checks that need notionals the fixed-point scale doesn't round away. */
+        EventDriver(OmsTestHarness h, Random rng, long priceScale, long sizeScale) {
             this.h = h;
             this.rng = rng;
+            this.priceScale = priceScale;
+            this.sizeScale = sizeScale;
+        }
+
+        /**
+         * The venue cancels every order the OMS still has open, and then any replacement the strategy's queued
+         * intents send in their place.
+         */
+        void cancelEverything() {
+            List<Long> open = openOrders();
+            while (!open.isEmpty()) {
+                for (long counter : open) {
+                    h.injectCancel(counter);
+                }
+                open = openOrders();
+            }
+            outstanding.clear();
+        }
+
+        private List<Long> openOrders() {
+            List<Long> open = new ArrayList<>();
+            h.orderStateManager.forEachOrder(order -> {
+                if (!order.getState().isTerminal()) {
+                    open.add(order.getClientOidCounter());
+                }
+            });
+            return open;
         }
 
         EventResult nextEvent() {
@@ -138,9 +219,9 @@ class OmsInvariantTest {
             // Randomly submit bid, ask, cancel, or both
             int choice = rng.nextInt(4);
             h.sink.clear();
-            long priceBid = 100 + rng.nextInt(20);
-            long priceAsk = 120 + rng.nextInt(20);
-            long size = 1 + rng.nextInt(10);
+            long priceBid = (100 + rng.nextInt(20)) * priceScale;
+            long priceAsk = (120 + rng.nextInt(20)) * priceScale;
+            long size = (1 + rng.nextInt(10)) * sizeScale;
 
             switch (choice) {
                 case 0 -> {
@@ -183,7 +264,7 @@ class OmsInvariantTest {
                 case 0 -> { // partial fill
                     long qty = 1 + rng.nextInt((int) Math.max(1, order.remainingQty - 1));
                     order.remainingQty -= qty;
-                    long price = 100 + rng.nextInt(20);
+                    long price = (100 + rng.nextInt(20)) * priceScale;
                     h.injectFill(order.counter, qty, price, order.size - order.remainingQty, order.remainingQty);
                     if (order.remainingQty == 0) {
                         outstanding.remove(idx);
@@ -192,7 +273,7 @@ class OmsInvariantTest {
                 }
                 case 1 -> { // full fill
                     long qty = order.remainingQty;
-                    long price = 100 + rng.nextInt(20);
+                    long price = (100 + rng.nextInt(20)) * priceScale;
                     h.injectFill(order.counter, qty, price, order.size, 0);
                     outstanding.remove(idx);
                     return new EventResult(true, order.side, qty);

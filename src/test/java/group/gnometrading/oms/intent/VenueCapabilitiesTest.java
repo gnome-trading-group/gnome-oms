@@ -26,4 +26,17 @@ class VenueCapabilitiesTest {
     void missingCodeCancelsThenSubmits(String exchangeCode) {
         assertFalse(VenueCapabilities.supportsNativeModify(exchangeCode));
     }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"KALSHI", "POLYMARKET_US", "HYPERLIQUID", "LIGHTER"})
+    void venuesWhereSellingBeyondHoldingsOpensAShort(String exchangeCode) {
+        assertTrue(VenueCapabilities.supportsShortSelling(exchangeCode));
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"POLYMARKET_INTL", "BINANCE", "SOMETHING_NEW", "kalshi", ""})
+    void everythingElseOnlySellsWhatItHolds(String exchangeCode) {
+        assertFalse(VenueCapabilities.supportsShortSelling(exchangeCode));
+    }
 }

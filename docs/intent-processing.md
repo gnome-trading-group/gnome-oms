@@ -209,21 +209,25 @@ modifies before they leave the OMS.
 1. **Exchange constraints**: lot size and minimum notional checks from `ListingSpec`. Fail →
    synthetic `REJECT` injected into the resolver and forwarded to the caller; no position
    change.
-2. **Risk engine**: configured per-strategy policies (max position, max order size, max
-   notional, max PnL loss, etc.). Fail → same synthetic reject path.
+2. **Risk engine**: kills and latches first, then the built-in long-only check (on a Polymarket
+   International listing a sell may not exceed what the strategy holds less what it is already
+   selling), then the configured policies (max position, max order size, max order notional,
+   max committed capital, etc.), grouped global → exchange → strategy → strategy+exchange →
+   strategy+listing → listing. Fail → same synthetic reject path.
 3. **Accept**: `onOrderAccepted` is called — the order is tracked in `OrderStateManager`
-   and `positionTracker.addStrategyLeaves` records the pending quantity on both the firm
-   and strategy positions. Then the order is forwarded to the real action sink.
+   and `positionTracker.adjustStrategyLeaves` records its working quantity and notional on both
+   the firm and strategy positions. Then the order is forwarded to the real action sink.
 
 ### Modifies
 
 1. Same exchange constraint and risk engine checks (risk is re-evaluated against the new
    size).
-2. **Accept**: `positionTracker.removeStrategyLeaves(old leaves)` then
-   `positionTracker.addStrategyLeaves(new leaves)`, where new leaves = the modify's order qty −
-   filled. Risk and exchange constraints are evaluated on those new leaves. Both firm and strategy positions are
-   updated immediately, before the modify reaches the exchange. `TrackedOrder.modify` also
-   updates the order's stored price and size.
+2. **Accept**: `TrackedOrder.modify` updates the order's stored price and size, and
+   `positionTracker.adjustStrategyLeaves` moves the position's working quantity and notional by
+   how much the order's `workingQty()` and `workingNotional()` changed. Until the venue answers,
+   either version of the order could fill, so the larger size and the worse price count. Risk and
+   exchange constraints are evaluated on the new leaves = the modify's order qty − filled. Both
+   firm and strategy positions are updated immediately, before the modify reaches the exchange.
 3. **Fail**: a synthetic `CANCEL_REJECT` is injected into the resolver, which reverts the
    slot state and fires any queued intent.
 
@@ -243,10 +247,22 @@ processExecutionReport(report, sink)
   │     CANCEL/REJECT/EXPIRE → removeLeaves(leavesQtyBefore)
   │     NEW / CANCEL_REJECT → no change
   │
+  ├─ recordInLedger(...)                              // opens, acks, confirmed modifies, fills, closes
+  │
+  ├─ trackRejectStreak(...)                           // venue reject: count it, latch if a streak breaches
+  │                                                   // NEW or fill: end the streaks
+  │
   ├─ forwardToResolver(report, tracked, sink)          // advance slot state machine
   │
-  └─ if terminal → releaseOrder(tracked)
+  ├─ if terminal → releaseOrder(tracked)
+  │
+  └─ latched on the reject → cancel its scope; otherwise checkMarketRisk
 ```
+
+A reject counts towards `MAX_CONSECUTIVE_REJECTS` only for `EXCHANGE_REJECTED`,
+`GATEWAY_REJECTED` and `INSUFFICIENT_FUNDS`. The latch happens before the resolver sees the
+reject, so an intent it resubmits from its queue is refused as halted rather than sent. A streak
+of insufficient funds latches the strategy on that exchange only.
 
 ### Position Updates in Detail
 
@@ -267,11 +283,11 @@ so it reflects the quantity that was live just before this report arrived.
 ### `leavesQty` Accounting Through a Modify
 
 When a modify is accepted by `RiskCheckingSink.onModify`, position leaves are updated
-immediately (old leaves removed, new leaves added) and `TrackedOrder.leavesQty` is set to the
-new order qty less what has filled. The exchange later sends a NEW ack for the modified order. That ack does **not**
-produce another position update — the leaves were already reconciled when the modify was
-sent. If the modify is rejected (`CANCEL_REJECT`), `RiskCheckingSink` has not changed the
-position, so nothing needs to be undone.
+immediately to the order's working amounts while the modify is pending: the larger of the two
+sizes, less what has filled, at the worse of the two prices. The exchange later sends a NEW ack
+for the modified order; it settles the order on its new terms, the position moves by the
+difference, and the ledger records an `ORDER_MODIFIED` event. If the modify is rejected
+(`CANCEL_REJECT`), the order reverts to its old terms and the position moves back with it.
 
 ---
 

@@ -1,11 +1,14 @@
 package group.gnometrading.oms.state;
 
+import group.gnometrading.oms.position.Position;
 import group.gnometrading.schemas.ExecType;
 import group.gnometrading.schemas.Order;
+import group.gnometrading.schemas.OrderDecoder;
 import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.schemas.OrderExecutionReportDecoder;
 import group.gnometrading.schemas.OrderType;
 import group.gnometrading.schemas.Side;
+import group.gnometrading.schemas.Statics;
 import group.gnometrading.schemas.TimeInForce;
 
 public final class TrackedOrder {
@@ -135,6 +138,55 @@ public final class TrackedOrder {
         }
         final long workingSize = modifyPending ? Math.max(preModifySize, size) : size;
         return Math.max(0, workingSize - filledQty);
+    }
+
+    /**
+     * What {@link #workingQty} would be once modified to {@code newOrderQty}, the FIX order quantity: until the venue
+     * confirms, either size could fill.
+     */
+    public long workingQtyIfModified(long newOrderQty) {
+        if (!active || state.isTerminal()) {
+            return 0;
+        }
+        return Math.max(0, Math.max(size, newOrderQty) - filledQty);
+    }
+
+    /**
+     * The notional of {@link #workingQty} at the order's price. While a modify is pending the venue could fill at
+     * either price, so the one that commits more counts: the higher for a buy, the lower for a sell, since selling a
+     * contract that pays at most $1 commits $1 less the price. The order doesn't know its listing's kind, so on any
+     * other listing a sell's commitment is understated by the price change until the venue answers.
+     */
+    public long workingNotional() {
+        final long workingPrice = modifyPending ? worsePrice(side, preModifyPrice, price) : price;
+        return notional(side, workingPrice, workingQty());
+    }
+
+    /** What {@link #workingNotional} would be once modified to {@code newPrice} and {@code newOrderQty}. */
+    public long workingNotionalIfModified(long newPrice, long newOrderQty) {
+        return notional(side, worsePrice(side, price, newPrice), workingQtyIfModified(newOrderQty));
+    }
+
+    /**
+     * The notional of {@code qty} on {@code side} at {@code price}. A market order has no price, so a buy is valued
+     * at the most a contract can cost and a sell at nothing, the most either could commit.
+     */
+    public static long notional(Side side, long price, long qty) {
+        if (price == OrderDecoder.priceNullValue()) {
+            return side == Side.Bid ? Position.notional(Statics.PRICE_SCALING_FACTOR, qty) : 0;
+        }
+        return Position.notional(price, qty);
+    }
+
+    private static long worsePrice(Side side, long first, long second) {
+        if (first == OrderDecoder.priceNullValue() || second == OrderDecoder.priceNullValue()) {
+            return OrderDecoder.priceNullValue();
+        }
+        return side == Side.Bid ? Math.max(first, second) : Math.min(first, second);
+    }
+
+    public boolean isModifyPending() {
+        return modifyPending;
     }
 
     public OrderState getState() {

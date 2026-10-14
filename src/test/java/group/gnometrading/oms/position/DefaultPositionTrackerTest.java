@@ -111,43 +111,38 @@ class DefaultPositionTrackerTest {
         assertEquals(5, pos.totalFees);
     }
 
-    // --- addStrategyLeaves / removeStrategyLeaves ---
+    // --- adjustStrategyLeaves ---
 
     @Test
-    void addStrategyLeaves_updatesBothFirmAndStrategy() {
-        tracker.addStrategyLeaves(STRATEGY_1, LISTING_A, Side.Bid, 8);
-
-        // Force a fill to create firm-level position so we can inspect it
-        tracker.applyStrategyFill(STRATEGY_1, LISTING_A, Side.Bid, 1, 100, 0);
-
-        // Strategy leaves were added before fill, firm position was created lazily by addStrategyLeaves
-        // Re-add to check
-        tracker.addStrategyLeaves(STRATEGY_1, LISTING_A, Side.Ask, 3);
+    void adjustStrategyLeaves_updatesBothFirmAndStrategy() {
+        tracker.adjustStrategyLeaves(STRATEGY_1, LISTING_A, Side.Bid, 8, 800);
+        tracker.adjustStrategyLeaves(STRATEGY_1, LISTING_A, Side.Ask, 3, 240);
 
         Position firmPos = tracker.getPosition(LISTING_A);
         assertNotNull(firmPos);
+        assertEquals(8, firmPos.leavesBuyQty);
+        assertEquals(800, firmPos.leavesBuyNotional);
         assertEquals(3, firmPos.leavesSellQty);
+        assertEquals(240, firmPos.leavesSellNotional);
+        Position stratPos = tracker.getStrategyPosition(STRATEGY_1, LISTING_A);
+        assertEquals(800, stratPos.leavesBuyNotional);
+        assertEquals(240, stratPos.leavesSellNotional);
     }
 
     @Test
-    void removeStrategyLeaves_decrements() {
+    void adjustStrategyLeaves_decrements() {
         tracker.applyStrategyFill(STRATEGY_1, LISTING_A, Side.Bid, 1, 100, 0);
-        tracker.addStrategyLeaves(STRATEGY_1, LISTING_A, Side.Bid, 10);
-        tracker.removeStrategyLeaves(STRATEGY_1, LISTING_A, Side.Bid, 4);
+        tracker.adjustStrategyLeaves(STRATEGY_1, LISTING_A, Side.Bid, 10, 1000);
+        tracker.adjustStrategyLeaves(STRATEGY_1, LISTING_A, Side.Bid, -4, -400);
 
         Position stratPos = tracker.getStrategyPosition(STRATEGY_1, LISTING_A);
         assertEquals(6, stratPos.leavesBuyQty);
+        assertEquals(600, stratPos.leavesBuyNotional);
     }
 
     @Test
-    void removeStrategyLeaves_onUnknownPositionDoesNotThrow() {
-        // Should not throw; firm position doesn't exist yet
-        tracker.removeStrategyLeaves(STRATEGY_1, LISTING_A, Side.Bid, 5);
-    }
-
-    @Test
-    void addStrategyLeaves_syncedToSharedBuffer() {
-        tracker.addStrategyLeaves(STRATEGY_1, LISTING_A, Side.Bid, 7);
+    void adjustStrategyLeaves_syncedToSharedBuffer() {
+        tracker.adjustStrategyLeaves(STRATEGY_1, LISTING_A, Side.Bid, 7, 70);
 
         PositionView view = tracker.createPositionView(STRATEGY_1);
         Position pos = view.getPosition(LISTING_A);

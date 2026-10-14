@@ -4,16 +4,21 @@ import group.gnometrading.annotations.VisibleForTesting;
 import group.gnometrading.collections.buffer.MessageConsumer;
 import group.gnometrading.collections.buffer.OneToOneRingBuffer;
 import group.gnometrading.collections.buffer.RingBuffer;
+import group.gnometrading.oms.position.Position;
 import group.gnometrading.oms.position.PositionTracker;
+import group.gnometrading.oms.risk.policy.MaxConsecutiveRejectsPolicy;
 import group.gnometrading.oms.state.OrderStateManager;
+import group.gnometrading.oms.state.TrackedOrder;
 import group.gnometrading.schemas.Order;
 import group.gnometrading.schemas.RejectReason;
+import group.gnometrading.schemas.Side;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.IntConsumer;
 import java.util.function.LongConsumer;
 import org.agrona.collections.IntHashSet;
+import org.agrona.collections.LongHashSet;
 import org.agrona.concurrent.EpochClock;
 
 /**
@@ -32,10 +37,20 @@ public final class RiskEngine {
     // Halt causes, numbered as LogMessage.ORDER_REJECTED_HALTED names them.
     /** Risk data is stale: the registry hasn't been reached recently enough to trust that nothing was killed. */
     public static final int HALT_STALE = 0;
-    /** A kill switch covers the order's strategy, session or listing. */
+    /** A kill switch covers the order's strategy, session, exchange or listing. */
     public static final int HALT_KILLED = 1;
-    /** The strategy latched itself: a loss limit breached, or the ledger stopped keeping up. */
+    /** The strategy latched itself in this scope: a market limit breached, or the ledger stopped keeping up. */
     public static final int HALT_LATCHED = 2;
+    /** A live session lacks a policy every listing must have, so nothing may trade until it is added. */
+    public static final int HALT_UNGUARDED = 3;
+
+    // Why a strategy latched; the first two are numbered as LogMessage.STRATEGY_LATCHED names them.
+    /** A market-risk policy, such as a loss limit, breached. */
+    public static final int CAUSE_MARKET_LIMIT = 0;
+    /** The venue rejected too many orders in a row. */
+    public static final int CAUSE_REJECT_STREAK = 1;
+    /** The ledger can't record what happens next. */
+    public static final int CAUSE_LEDGER = 2;
 
     // The sync thread drains this at least once a second, so it only fills if this many strategies breach in
     // between. A halt that doesn't fit stays latched here, it just isn't recorded for an operator to resume.
@@ -48,7 +63,11 @@ public final class RiskEngine {
 
     private final AtomicReference<RiskEngineSnapshot> snapshot;
     private RiskEngineSnapshot applied;
+    private final ListingDirectory directory;
+    private final RejectStreaks rejectStreaks;
     private final IntHashSet latchedStrategies = new IntHashSet(EXPECTED_LATCHES);
+    private final LongHashSet latchedStrategyExchanges = new LongHashSet(EXPECTED_LATCHES);
+    private final LongHashSet latchedStrategyListings = new LongHashSet(EXPECTED_LATCHES);
     private final RingBuffer<LatchedHalt> latchedHalts =
             new OneToOneRingBuffer<>(LatchedHalt[]::new, LatchedHalt::new, LATCHED_HALT_CAPACITY);
 
@@ -60,15 +79,26 @@ public final class RiskEngine {
     private boolean stale;
     private int violatedPolicyId;
     private int breachedPolicyId;
+    private int breachedCause;
+    private int breachedExchangeId;
+    private int breachedListingId;
+    private int latchExchangeId;
+    private int latchListingId;
     private int haltCause;
     private int passesUntilStaleCheck;
 
-    private final IntConsumer releaseLatch = this::releaseLatch;
+    private final IntConsumer releaseStrategyLatch = latchedStrategies::remove;
+    private final LongConsumer releaseStrategyExchangeLatch = latchedStrategyExchanges::remove;
+    private final LongConsumer releaseStrategyListingLatch = latchedStrategyListings::remove;
     private final IntConsumer reportNewStrategyKill = this::reportNewStrategyKill;
+    private final IntConsumer reportNewExchangeKill = this::reportNewExchangeKill;
     private final IntConsumer reportNewListingKill = this::reportNewListingKill;
-    private final IntConsumer reportStrategyKill = this::reportStrategyKill;
-    private final IntConsumer reportListingKill = this::reportListingKill;
+    private final LongConsumer reportNewStrategyExchangeKill = this::reportNewStrategyExchangeKill;
     private final LongConsumer reportNewStrategyListingKill = this::reportNewStrategyListingKill;
+    private final IntConsumer reportStrategyKill = this::reportStrategyKill;
+    private final IntConsumer reportExchangeKill = this::reportExchangeKill;
+    private final IntConsumer reportListingKill = this::reportListingKill;
+    private final LongConsumer reportStrategyExchangeKill = this::reportStrategyExchangeKill;
     private final LongConsumer reportStrategyListingKill = this::reportStrategyListingKill;
     private RiskEngineSnapshot reportingAgainst;
     private KillHandler reportingTo;
@@ -79,29 +109,35 @@ public final class RiskEngine {
      */
     @VisibleForTesting
     public RiskEngine(final OrderPolicyGroup globalOrderGroup, final MarketPolicyGroup globalMarketGroup) {
-        this(new RiskEngineSnapshot(), null, 0, 0);
+        this(new RiskEngineSnapshot(), null, 0, 0, ListingDirectory.EMPTY, new RejectStreaks());
         final RiskEngineSnapshot initial = snapshot.get();
-        initial.globalOrderGroup.count = globalOrderGroup.count;
-        System.arraycopy(globalOrderGroup.policies, 0, initial.globalOrderGroup.policies, 0, globalOrderGroup.count);
-        initial.globalMarketGroup.count = globalMarketGroup.count;
-        System.arraycopy(globalMarketGroup.policies, 0, initial.globalMarketGroup.policies, 0, globalMarketGroup.count);
+        final OrderPolicyGroup orders = initial.orderGroups.global;
+        orders.count = globalOrderGroup.count;
+        System.arraycopy(globalOrderGroup.policies, 0, orders.policies, 0, globalOrderGroup.count);
+        final MarketPolicyGroup markets = initial.marketGroups.global;
+        markets.count = globalMarketGroup.count;
+        System.arraycopy(globalMarketGroup.policies, 0, markets.policies, 0, globalMarketGroup.count);
     }
 
     /** An engine with no policies that allows everything; for tests and backtests without a sync agent. */
     public RiskEngine() {
-        this(new RiskEngineSnapshot(), null, 0, 0);
+        this(new RiskEngineSnapshot(), null, 0, 0, ListingDirectory.EMPTY, new RejectStreaks());
     }
 
     private RiskEngine(
             final RiskEngineSnapshot initial,
             final EpochClock clock,
             final long staleAfterMs,
-            final int staleCheckPasses) {
+            final int staleCheckPasses,
+            final ListingDirectory directory,
+            final RejectStreaks rejectStreaks) {
         this.snapshot = new AtomicReference<>(initial);
         this.applied = initial;
         this.clock = clock;
         this.staleAfterMs = staleAfterMs;
         this.staleCheckPasses = staleCheckPasses;
+        this.directory = directory;
+        this.rejectStreaks = rejectStreaks;
         // Never refreshed means the policies, kill switches included, are unknown.
         this.stale = clock != null;
     }
@@ -111,12 +147,15 @@ public final class RiskEngine {
      * succeeds, and again whenever none has for {@code staleAfter}: trading on policies nobody can see would ignore
      * a kill switch turned on meanwhile. Resting orders are left alone, since a stale view is not a kill.
      */
-    public static RiskEngine syncedFromRegistry(final EpochClock clock, final Duration staleAfter) {
-        return syncedFromRegistry(clock, staleAfter, STALE_CHECK_PASSES);
+    public static RiskEngine syncedFromRegistry(
+            final EpochClock clock, final Duration staleAfter, final ListingDirectory directory) {
+        return syncedFromRegistry(clock, staleAfter, directory, STALE_CHECK_PASSES);
     }
 
-    static RiskEngine syncedFromRegistry(final EpochClock clock, final Duration staleAfter, final int checkEvery) {
-        return new RiskEngine(new RiskEngineSnapshot(), clock, staleAfter.toMillis(), checkEvery);
+    static RiskEngine syncedFromRegistry(
+            final EpochClock clock, final Duration staleAfter, final ListingDirectory directory, final int checkEvery) {
+        return new RiskEngine(
+                new RiskEngineSnapshot(), clock, staleAfter.toMillis(), checkEvery, directory, new RejectStreaks());
     }
 
     /**
@@ -148,12 +187,16 @@ public final class RiskEngine {
         return new RiskEngine(orderGroup, marketGroup);
     }
 
-    /** A policy and the target it applies to, as the registry describes one: 0 means every strategy or listing. */
-    public record ScopedPolicy(int strategyId, int listingId, Configurable policy) {
+    /**
+     * A policy and the target it applies to, as the registry describes one: 0 means every strategy, listing or
+     * exchange.
+     */
+    public record ScopedPolicy(int strategyId, int listingId, int exchangeId, Configurable policy) {
         public ScopedPolicy {
-            if (strategyId < 0 || listingId < 0) {
+            if (strategyId < 0 || listingId < 0 || exchangeId < 0) {
                 throw new IllegalArgumentException(
-                        "strategyId and listingId must be 0 (all) or positive, got " + strategyId + "/" + listingId);
+                        "strategyId, listingId and exchangeId must be 0 (all) or positive, got " + strategyId + "/"
+                                + listingId + "/" + exchangeId);
             }
         }
     }
@@ -161,14 +204,26 @@ public final class RiskEngine {
     /**
      * An engine whose policies are fixed at construction, each placed in the group its target selects exactly as
      * {@link RiskSyncAgent} places registry policies. For backtests, which run a strategy under the limits it would
-     * have live without a sync agent.
+     * have live without a sync agent. The policies must have been built by a {@link PolicyFactory} given the same
+     * {@code directory} and {@code rejectStreaks}.
      */
-    public static RiskEngine withScopedPolicies(final List<ScopedPolicy> policies) {
+    public static RiskEngine withScopedPolicies(
+            final List<ScopedPolicy> policies, final ListingDirectory directory, final RejectStreaks rejectStreaks) {
         final RiskEngineSnapshot initial = new RiskEngineSnapshot();
         for (final ScopedPolicy scoped : policies) {
-            initial.addPolicy(scoped.strategyId(), scoped.listingId(), scoped.policy(), 0);
+            initial.addPolicy(scoped.strategyId(), scoped.listingId(), scoped.exchangeId(), scoped.policy(), 0);
         }
-        return new RiskEngine(initial, null, 0, 0);
+        return new RiskEngine(initial, null, 0, 0, directory, rejectStreaks);
+    }
+
+    /** The session's listings, as the policies this engine runs see them. */
+    public ListingDirectory directory() {
+        return directory;
+    }
+
+    /** The venue reject streaks {@link MaxConsecutiveRejectsPolicy} judges; the OMS records them. */
+    public RejectStreaks rejectStreaks() {
+        return rejectStreaks;
     }
 
     void publishSnapshot(final RiskEngineSnapshot newSnapshot) {
@@ -194,17 +249,21 @@ public final class RiskEngine {
      * Whether this strategy may do nothing at all on this listing: it is killed or latched, so its orders have been
      * cancelled. Unlike {@link #isBlocked}, stale risk is excluded — the strategy can still pull its own quotes.
      */
-    public boolean isHalted(final int strategyId, final int listingId) {
-        return snapshot.get().blocks(strategyId, listingId) || latchedStrategies.contains(strategyId);
+    public boolean isHalted(final int strategyId, final int listingId, final int exchangeId) {
+        return snapshot.get().blocks(strategyId, listingId, exchangeId) || isLatched(strategyId, exchangeId, listingId);
     }
 
     /** Whether new orders for this strategy on this listing are blocked by a kill, a latch or stale risk. */
-    public boolean isBlocked(final int strategyId, final int listingId) {
-        return blocked(snapshot.get(), strategyId, listingId);
+    public boolean isBlocked(final int strategyId, final int listingId, final int exchangeId) {
+        return stale || isHalted(strategyId, listingId, exchangeId);
     }
 
-    private boolean blocked(final RiskEngineSnapshot current, final int strategyId, final int listingId) {
-        return stale || current.blocks(strategyId, listingId) || latchedStrategies.contains(strategyId);
+    private boolean isLatched(final int strategyId, final int exchangeId, final int listingId) {
+        return latchedStrategies.contains(strategyId)
+                || (!latchedStrategyExchanges.isEmpty()
+                        && latchedStrategyExchanges.contains(RiskEngineSnapshot.pairKey(strategyId, exchangeId)))
+                || (!latchedStrategyListings.isEmpty()
+                        && latchedStrategyListings.contains(RiskEngineSnapshot.pairKey(strategyId, listingId)));
     }
 
     /** Whether a breach on this strategy is already held, by its own kill or a latch, so need not be re-checked. */
@@ -214,37 +273,116 @@ public final class RiskEngine {
 
     /** Whether any market-risk policy is configured, whatever it applies to. */
     public boolean hasMarketPolicies() {
-        final RiskEngineSnapshot s = snapshot.get();
-        return s.globalMarketGroup.count > 0
-                || !s.strategyMarketGroups.isEmpty()
-                || !s.listingMarketGroups.isEmpty()
-                || !s.strategyListingMarketGroups.isEmpty();
+        return snapshot.get().hasMarketPolicies();
     }
 
+    /** Whether the strategy is latched in exactly this scope; 0 is every exchange or listing. */
     @VisibleForTesting
-    public boolean isLatched(final int strategyId) {
+    public boolean isLatchedAt(final int strategyId, final int exchangeId, final int listingId) {
+        if (listingId != 0) {
+            return latchedStrategyListings.contains(RiskEngineSnapshot.pairKey(strategyId, listingId));
+        }
+        if (exchangeId != 0) {
+            return latchedStrategyExchanges.contains(RiskEngineSnapshot.pairKey(strategyId, exchangeId));
+        }
         return latchedStrategies.contains(strategyId);
     }
 
     /**
-     * Halts a strategy after a market-risk breach until an operator resumes it. The halt is handed to the sync
-     * thread to record as a strategy kill switch in the registry; once a snapshot confirms it, the registry holds
-     * the halt and this latch is released.
+     * Halts a strategy in a scope until an operator resumes it: everywhere, on one exchange, or on one listing (0
+     * leaves that id out; at most one of the two is set). The halt is handed to the sync thread to record as a kill
+     * switch on the same scope in the registry; once a snapshot confirms it, the registry holds the halt and this
+     * latch is released. Ends the scope's reject streaks, so a resumed strategy starts from none.
      *
-     * @return whether the strategy was newly halted, so its orders still need cancelling
+     * @return whether the scope was newly halted, so its orders still need cancelling
      */
-    public boolean latch(final int strategyId) {
-        // Only a kill on this strategy already holds the halt in the registry; a global block lifts by itself and
-        // must not release a breach.
-        if (snapshot.get().killedStrategies.contains(strategyId) || !latchedStrategies.add(strategyId)) {
+    public boolean latch(
+            final int strategyId, final int exchangeId, final int listingId, final int cause, final int policyId) {
+        return latch(strategyId, exchangeId, listingId, cause, policyId, 0);
+    }
+
+    private boolean latch(
+            final int strategyId,
+            final int exchangeId,
+            final int listingId,
+            final int cause,
+            final int policyId,
+            final long rejects) {
+        // Only a kill on this very scope already holds the halt in the registry; a wider block may lift by itself
+        // and must not release a breach.
+        if (snapshot.get().killsExactly(strategyId, exchangeId, listingId)) {
             return false;
         }
+        final boolean added;
+        if (listingId != 0) {
+            added = latchedStrategyListings.add(RiskEngineSnapshot.pairKey(strategyId, listingId));
+        } else if (exchangeId != 0) {
+            added = latchedStrategyExchanges.add(RiskEngineSnapshot.pairKey(strategyId, exchangeId));
+        } else {
+            added = latchedStrategies.add(strategyId);
+        }
+        if (!added) {
+            return false;
+        }
+        rejectStreaks.clear(strategyId, exchangeId, listingId);
         final int index = latchedHalts.tryClaim();
         if (index >= 0) {
-            latchedHalts.indexAt(index).strategyId = strategyId;
+            final LatchedHalt halt = latchedHalts.indexAt(index);
+            halt.strategyId = strategyId;
+            halt.exchangeId = exchangeId;
+            halt.listingId = listingId;
+            halt.cause = cause;
+            halt.policyId = policyId;
+            halt.rejects = rejects;
             latchedHalts.commit(index);
         }
         return true;
+    }
+
+    /**
+     * Latches the strategy for the breach {@link #checkMarketPolicies} just found, in the breached policy's scope.
+     * {@code fundsExchangeId} is the exchange of a reject for insufficient funds that tripped a reject streak, or 0:
+     * an empty account on one venue says nothing about the strategy's others, nor is it particular to one listing,
+     * so such a streak latches the strategy on that exchange whatever its policy's scope. {@link #latchExchangeId}
+     * and {@link #latchListingId} then name the scope latched.
+     *
+     * @return whether the scope was newly halted, so its orders still need cancelling
+     */
+    public boolean latchBreach(final int strategyId, final int fundsExchangeId) {
+        final long rejects = breachedCause == CAUSE_REJECT_STREAK ? breachedStreak(strategyId) : 0;
+        if (fundsExchangeId != 0 && breachedCause == CAUSE_REJECT_STREAK) {
+            latchExchangeId = fundsExchangeId;
+            latchListingId = 0;
+        } else {
+            latchExchangeId = breachedExchangeId;
+            latchListingId = breachedListingId;
+        }
+        return latch(strategyId, latchExchangeId, latchListingId, breachedCause, breachedPolicyId, rejects);
+    }
+
+    private long breachedStreak(final int strategyId) {
+        if (breachedListingId != 0) {
+            return rejectStreaks.ofListing(strategyId, breachedListingId);
+        }
+        if (breachedExchangeId != 0) {
+            return rejectStreaks.ofExchange(strategyId, breachedExchangeId);
+        }
+        return rejectStreaks.ofStrategy(strategyId);
+    }
+
+    /** The exchange of the scope {@link #latchBreach} last latched, or 0 if it covered every exchange. */
+    public int latchExchangeId() {
+        return latchExchangeId;
+    }
+
+    /** The listing of the scope {@link #latchBreach} last latched, or 0 if it covered every listing. */
+    public int latchListingId() {
+        return latchListingId;
+    }
+
+    /** Why the last breach {@link #checkMarketPolicies} found happened: {@link #CAUSE_MARKET_LIMIT} or a streak. */
+    public int breachedCause() {
+        return breachedCause;
     }
 
     /** Hands each halt latched since the last call to {@code consumer}. Sync thread only. */
@@ -252,9 +390,15 @@ public final class RiskEngine {
         latchedHalts.read(consumer, LATCHED_HALT_CAPACITY);
     }
 
-    /** A strategy halted after a market-risk breach, awaiting a strategy kill switch in the registry. */
+    /** A strategy halted in a scope, awaiting a kill switch on that scope in the registry. */
     static final class LatchedHalt {
         int strategyId;
+        int exchangeId;
+        int listingId;
+        int cause;
+        int policyId;
+        /** For a reject streak, how long it was. */
+        long rejects;
     }
 
     /**
@@ -275,29 +419,47 @@ public final class RiskEngine {
         final RiskEngineSnapshot previous = applied;
         applied = current;
         appliedSequence = current.sequence;
-        if (!latchedStrategies.isEmpty()) {
-            current.killedStrategies.forEachInt(releaseLatch);
-            current.confirmedHalts.forEachInt(releaseLatch);
-        }
+        releaseHeldLatches(current);
 
-        if (current.globalKill) {
-            if (!previous.globalKill) {
+        if (current.stopsEverything()) {
+            if (!previous.stopsEverything()) {
                 handler.onEverythingKilled();
             }
             return;
         }
-        if (!previous.globalKill) {
+        if (!previous.stopsEverything()) {
             reportingAgainst = previous;
             reportingTo = handler;
             current.killedStrategies.forEachInt(reportNewStrategyKill);
+            current.killedExchanges.forEachInt(reportNewExchangeKill);
             current.killedListings.forEachInt(reportNewListingKill);
+            current.killedStrategyExchanges.forEachLong(reportNewStrategyExchangeKill);
             current.killedStrategyListings.forEachLong(reportNewStrategyListingKill);
+        }
+    }
+
+    /** A latch is over once the registry holds its halt: a kill on its scope, or a confirmation of its record. */
+    private void releaseHeldLatches(final RiskEngineSnapshot current) {
+        if (!latchedStrategies.isEmpty()) {
+            current.killedStrategies.forEachInt(releaseStrategyLatch);
+            current.confirmedStrategyHalts.forEachInt(releaseStrategyLatch);
+        }
+        if (!latchedStrategyExchanges.isEmpty()) {
+            current.killedStrategyExchanges.forEachLong(releaseStrategyExchangeLatch);
+            current.confirmedStrategyExchangeHalts.forEachLong(releaseStrategyExchangeLatch);
+        }
+        if (!latchedStrategyListings.isEmpty()) {
+            current.killedStrategyListings.forEachLong(releaseStrategyListingLatch);
+            current.confirmedStrategyListingHalts.forEachLong(releaseStrategyListingLatch);
         }
     }
 
     /** Whether anything is killed or latched, so its orders may still need cancelling. OMS thread only. */
     public boolean hasKills() {
-        return applied.hasKills() || !latchedStrategies.isEmpty();
+        return applied.hasKills()
+                || !latchedStrategies.isEmpty()
+                || !latchedStrategyExchanges.isEmpty()
+                || !latchedStrategyListings.isEmpty();
     }
 
     /**
@@ -305,24 +467,30 @@ public final class RiskEngine {
      * cancelled again. OMS thread only.
      */
     public void forEachKilledScope(final KillHandler handler) {
-        if (applied.globalKill) {
+        if (applied.stopsEverything()) {
             handler.onEverythingKilled();
             return;
         }
         reportingTo = handler;
         applied.killedStrategies.forEachInt(reportStrategyKill);
         latchedStrategies.forEachInt(reportStrategyKill);
+        applied.killedExchanges.forEachInt(reportExchangeKill);
         applied.killedListings.forEachInt(reportListingKill);
+        applied.killedStrategyExchanges.forEachLong(reportStrategyExchangeKill);
+        latchedStrategyExchanges.forEachLong(reportStrategyExchangeKill);
         applied.killedStrategyListings.forEachLong(reportStrategyListingKill);
-    }
-
-    private void releaseLatch(final int strategyId) {
-        latchedStrategies.remove(strategyId);
+        latchedStrategyListings.forEachLong(reportStrategyListingKill);
     }
 
     private void reportNewStrategyKill(final int strategyId) {
         if (!reportingAgainst.killedStrategies.contains(strategyId)) {
             reportingTo.onStrategyKilled(strategyId);
+        }
+    }
+
+    private void reportNewExchangeKill(final int exchangeId) {
+        if (!reportingAgainst.killedExchanges.contains(exchangeId)) {
+            reportingTo.onExchangeKilled(exchangeId);
         }
     }
 
@@ -332,22 +500,36 @@ public final class RiskEngine {
         }
     }
 
+    private void reportNewStrategyExchangeKill(final long key) {
+        if (!reportingAgainst.killedStrategyExchanges.contains(key)) {
+            reportStrategyExchangeKill(key);
+        }
+    }
+
     private void reportNewStrategyListingKill(final long key) {
         if (!reportingAgainst.killedStrategyListings.contains(key)) {
             reportStrategyListingKill(key);
         }
     }
 
-    private void reportStrategyListingKill(final long key) {
-        reportingTo.onStrategyListingKilled(RiskEngineSnapshot.pairStrategy(key), RiskEngineSnapshot.pairListing(key));
-    }
-
     private void reportStrategyKill(final int strategyId) {
         reportingTo.onStrategyKilled(strategyId);
     }
 
+    private void reportExchangeKill(final int exchangeId) {
+        reportingTo.onExchangeKilled(exchangeId);
+    }
+
     private void reportListingKill(final int listingId) {
         reportingTo.onListingKilled(listingId);
+    }
+
+    private void reportStrategyExchangeKill(final long key) {
+        reportingTo.onStrategyExchangeKilled(RiskEngineSnapshot.pairStrategy(key), RiskEngineSnapshot.pairScope(key));
+    }
+
+    private void reportStrategyListingKill(final long key) {
+        reportingTo.onStrategyListingKilled(RiskEngineSnapshot.pairStrategy(key), RiskEngineSnapshot.pairScope(key));
     }
 
     /** Receives killed scopes. */
@@ -356,7 +538,11 @@ public final class RiskEngine {
 
         void onStrategyKilled(int strategyId);
 
+        void onExchangeKilled(int exchangeId);
+
         void onListingKilled(int listingId);
+
+        void onStrategyExchangeKilled(int strategyId, int exchangeId);
 
         void onStrategyListingKilled(int strategyId, int listingId);
     }
@@ -371,31 +557,80 @@ public final class RiskEngine {
             final PositionTracker positions,
             final OrderStateManager orders,
             final int strategyId,
-            final int listingId) {
+            final int listingId,
+            final int exchangeId) {
         final RiskEngineSnapshot s = snapshot.get();
         if (stale) {
             haltCause = HALT_STALE;
             return RejectReason.HALTED;
         }
-        if (s.blocks(strategyId, listingId)) {
+        if (s.unguarded) {
+            haltCause = HALT_UNGUARDED;
+            return RejectReason.HALTED;
+        }
+        if (s.blocks(strategyId, listingId, exchangeId)) {
             haltCause = HALT_KILLED;
             return RejectReason.HALTED;
         }
-        if (latchedStrategies.contains(strategyId)) {
+        if (isLatched(strategyId, exchangeId, listingId)) {
             haltCause = HALT_LATCHED;
             return RejectReason.HALTED;
         }
-        final boolean passes = checkOrderGroup(s.globalOrderGroup, order, positions, orders, strategyId, listingId)
-                && checkOrderGroup(s.getStrategyOrderGroup(strategyId), order, positions, orders, strategyId, listingId)
+        if (sellsMoreThanHeld(order, positions, orders, strategyId, listingId)) {
+            violatedPolicyId = 0;
+            return RejectReason.RISK_LIMIT_EXCEEDED;
+        }
+        return passesOrderGroups(s.orderGroups, order, positions, orders, strategyId, listingId, exchangeId)
+                ? null
+                : RejectReason.RISK_LIMIT_EXCEEDED;
+    }
+
+    private boolean passesOrderGroups(
+            final ScopedGroups<OrderPolicyGroup> groups,
+            final Order order,
+            final PositionTracker positions,
+            final OrderStateManager orders,
+            final int strategyId,
+            final int listingId,
+            final int exchangeId) {
+        return checkOrderGroup(groups.global, order, positions, orders, strategyId, listingId)
+                && checkOrderGroup(groups.exchange(exchangeId), order, positions, orders, strategyId, listingId)
+                && checkOrderGroup(groups.strategy(strategyId), order, positions, orders, strategyId, listingId)
                 && checkOrderGroup(
-                        s.getStrategyListingOrderGroup(strategyId, listingId),
+                        groups.strategyExchange(strategyId, exchangeId),
                         order,
                         positions,
                         orders,
                         strategyId,
                         listingId)
-                && checkOrderGroup(s.getListingOrderGroup(listingId), order, positions, orders, strategyId, listingId);
-        return passes ? null : RejectReason.RISK_LIMIT_EXCEEDED;
+                && checkOrderGroup(
+                        groups.strategyListing(strategyId, listingId), order, positions, orders, strategyId, listingId)
+                && checkOrderGroup(groups.listing(listingId), order, positions, orders, strategyId, listingId);
+    }
+
+    /**
+     * Where several strategies share one account's holdings, a strategy selling more than it holds would sell
+     * another's, so on such a listing it may sell only what it holds less what it is already selling. Always on,
+     * whatever policies are set.
+     */
+    private boolean sellsMoreThanHeld(
+            final Order order,
+            final PositionTracker positions,
+            final OrderStateManager orders,
+            final int strategyId,
+            final int listingId) {
+        if (order.decoder.side() != Side.Ask || !directory.isLongOnly(listingId)) {
+            return false;
+        }
+        final Position position = positions.getStrategyPosition(strategyId, listingId);
+        final long held = position == null ? 0 : position.netQuantity;
+        long selling = position == null ? 0 : position.leavesSellQty;
+        // A modify is checked as the replacement for its order, whose leaves are already counted.
+        final TrackedOrder replaced = orders.getOrder(order.getClientOidCounter());
+        if (replaced != null) {
+            selling -= replaced.workingQty();
+        }
+        return order.decoder.size() > held - selling;
     }
 
     /** The registry id of the policy behind the last {@link RejectReason#RISK_LIMIT_EXCEEDED}; 0 if it has none. */
@@ -408,30 +643,48 @@ public final class RiskEngine {
         return breachedPolicyId;
     }
 
-    /** Why the last {@link RejectReason#HALTED} was: {@link #HALT_STALE}, {@link #HALT_KILLED} or {@link #HALT_LATCHED}. */
+    /**
+     * Why the last {@link RejectReason#HALTED} was: {@link #HALT_STALE}, {@link #HALT_KILLED}, {@link #HALT_LATCHED}
+     * or {@link #HALT_UNGUARDED}.
+     */
     public int haltCause() {
         return haltCause;
     }
 
     /**
-     * Checks market-risk policies after a fill or a mark move on {@code listingId}. Each policy knows whether it
-     * judges that listing or the strategy's total. Returns true if any policy is violated.
+     * Checks market-risk policies after a fill, a mark move or a venue reject on {@code listingId}. Each policy knows
+     * whether it judges that listing or the strategy's total. Returns true if any policy is violated; then
+     * {@link #latchBreach} halts the strategy in that policy's scope.
      */
     public boolean checkMarketPolicies(
             final int strategyId,
             final int listingId,
+            final int exchangeId,
             final PositionTracker positions,
             final OrderStateManager orders) {
-        final RiskEngineSnapshot s = snapshot.get();
-        return isMarketGroupViolated(s.globalMarketGroup, strategyId, listingId, positions, orders)
-                || isMarketGroupViolated(s.getStrategyMarketGroup(strategyId), strategyId, listingId, positions, orders)
+        final ScopedGroups<MarketPolicyGroup> groups = snapshot.get().marketGroups;
+        return isMarketGroupViolated(groups.global, strategyId, listingId, positions, orders, 0, 0)
                 || isMarketGroupViolated(
-                        s.getStrategyListingMarketGroup(strategyId, listingId),
+                        groups.exchange(exchangeId), strategyId, listingId, positions, orders, exchangeId, 0)
+                || isMarketGroupViolated(groups.strategy(strategyId), strategyId, listingId, positions, orders, 0, 0)
+                || isMarketGroupViolated(
+                        groups.strategyExchange(strategyId, exchangeId),
                         strategyId,
                         listingId,
                         positions,
-                        orders)
-                || isMarketGroupViolated(s.getListingMarketGroup(listingId), strategyId, listingId, positions, orders);
+                        orders,
+                        exchangeId,
+                        0)
+                || isMarketGroupViolated(
+                        groups.strategyListing(strategyId, listingId),
+                        strategyId,
+                        listingId,
+                        positions,
+                        orders,
+                        0,
+                        listingId)
+                || isMarketGroupViolated(
+                        groups.listing(listingId), strategyId, listingId, positions, orders, 0, listingId);
     }
 
     private boolean checkOrderGroup(
@@ -453,18 +706,26 @@ public final class RiskEngine {
         return true;
     }
 
+    /** {@code scopeExchangeId} and {@code scopeListingId} are the scope a breach in this group latches. */
     private boolean isMarketGroupViolated(
             final MarketPolicyGroup group,
             final int strategyId,
             final int listingId,
             final PositionTracker positions,
-            final OrderStateManager orders) {
+            final OrderStateManager orders,
+            final int scopeExchangeId,
+            final int scopeListingId) {
         if (group == null) {
             return false;
         }
         for (int i = 0; i < group.count; i++) {
-            if (group.policies[i].isViolated(strategyId, listingId, positions, orders)) {
+            final MarketRiskPolicy policy = group.policies[i];
+            if (policy.isViolated(strategyId, listingId, positions, orders)) {
                 breachedPolicyId = group.policyIds[i];
+                breachedCause =
+                        policy instanceof MaxConsecutiveRejectsPolicy ? CAUSE_REJECT_STREAK : CAUSE_MARKET_LIMIT;
+                breachedExchangeId = scopeExchangeId;
+                breachedListingId = scopeListingId;
                 return true;
             }
         }

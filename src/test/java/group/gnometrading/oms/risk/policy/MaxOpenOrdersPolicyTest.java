@@ -7,6 +7,8 @@ import static org.mockito.Mockito.when;
 
 import group.gnometrading.oms.position.DefaultPositionTracker;
 import group.gnometrading.oms.position.SharedPositionBuffer;
+import group.gnometrading.oms.risk.ListingDirectory;
+import group.gnometrading.oms.risk.TestListings;
 import group.gnometrading.oms.state.OrderStateManager;
 import group.gnometrading.oms.state.TrackedOrder;
 import group.gnometrading.schemas.Order;
@@ -38,7 +40,7 @@ class MaxOpenOrdersPolicyTest {
 
     @Test
     void aListingLimitCountsOnlyThatListing() {
-        final MaxOpenOrdersPolicy policy = new MaxOpenOrdersPolicy(false, 2);
+        final MaxOpenOrdersPolicy policy = new MaxOpenOrdersPolicy(ListingDirectory.EMPTY, LISTING_ID, 0, 2);
         positions.addOpenOrder(STRATEGY_ID, LISTING_ID);
         positions.addOpenOrder(STRATEGY_ID, OTHER_LISTING_ID);
         positions.addOpenOrder(STRATEGY_ID, OTHER_LISTING_ID);
@@ -49,7 +51,7 @@ class MaxOpenOrdersPolicyTest {
 
     @Test
     void aStrategyLimitCountsEveryListing() {
-        final MaxOpenOrdersPolicy policy = new MaxOpenOrdersPolicy(true, 2);
+        final MaxOpenOrdersPolicy policy = new MaxOpenOrdersPolicy(ListingDirectory.EMPTY, 0, 0, 2);
         positions.addOpenOrder(STRATEGY_ID, LISTING_ID);
         assertFalse(policy.isViolated(STRATEGY_ID, OTHER_LISTING_ID, order, positions, orders));
 
@@ -60,7 +62,7 @@ class MaxOpenOrdersPolicyTest {
 
     @Test
     void aReleasedOrderFreesItsPlace() {
-        final MaxOpenOrdersPolicy policy = new MaxOpenOrdersPolicy(true, 1);
+        final MaxOpenOrdersPolicy policy = new MaxOpenOrdersPolicy(ListingDirectory.EMPTY, 0, 0, 1);
         positions.addOpenOrder(STRATEGY_ID, LISTING_ID);
         assertTrue(policy.isViolated(STRATEGY_ID, LISTING_ID, order, positions, orders));
 
@@ -70,15 +72,29 @@ class MaxOpenOrdersPolicyTest {
 
     @Test
     void aModifyOfAnOpenOrderIsNotANewOne() {
-        final MaxOpenOrdersPolicy policy = new MaxOpenOrdersPolicy(true, 1);
+        final MaxOpenOrdersPolicy policy = new MaxOpenOrdersPolicy(ListingDirectory.EMPTY, 0, 0, 1);
         positions.addOpenOrder(STRATEGY_ID, LISTING_ID);
         when(orders.getOrder(99)).thenReturn(mock(TrackedOrder.class));
         assertFalse(policy.isViolated(STRATEGY_ID, LISTING_ID, order, positions, orders));
     }
 
     @Test
+    void anExchangeLimitCountsOnlyThatExchangesListings() {
+        final ListingDirectory directory =
+                TestListings.directory(TestListings.binary(LISTING_ID, 1), TestListings.binary(OTHER_LISTING_ID, 2));
+        final MaxOpenOrdersPolicy policy = new MaxOpenOrdersPolicy(directory, 0, 1, 2);
+        positions.addOpenOrder(STRATEGY_ID, LISTING_ID);
+        positions.addOpenOrder(STRATEGY_ID, OTHER_LISTING_ID);
+        positions.addOpenOrder(STRATEGY_ID, OTHER_LISTING_ID);
+
+        assertFalse(policy.isViolated(STRATEGY_ID, LISTING_ID, order, positions, orders), "1 open on exchange 1");
+        positions.addOpenOrder(STRATEGY_ID, LISTING_ID);
+        assertTrue(policy.isViolated(STRATEGY_ID, LISTING_ID, order, positions, orders));
+    }
+
+    @Test
     void reconfigureSetsTheLimit() {
-        final MaxOpenOrdersPolicy policy = new MaxOpenOrdersPolicy(true);
+        final MaxOpenOrdersPolicy policy = new MaxOpenOrdersPolicy(ListingDirectory.EMPTY, 0, 0);
         positions.addOpenOrder(STRATEGY_ID, LISTING_ID);
         policy.reconfigure(new ViewString("{\"maxOpenOrders\": 1}"));
         assertTrue(policy.isViolated(STRATEGY_ID, LISTING_ID, order, positions, orders));

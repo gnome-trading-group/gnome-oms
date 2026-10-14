@@ -21,9 +21,12 @@ import group.gnometrading.oms.pnl.PriceSlotRegistry;
 import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.DefaultPositionTracker;
 import group.gnometrading.oms.position.SharedPositionBuffer;
+import group.gnometrading.oms.risk.ListingDirectory;
 import group.gnometrading.oms.risk.MarketRiskPolicy;
 import group.gnometrading.oms.risk.OrderRiskPolicy;
+import group.gnometrading.oms.risk.RejectStreaks;
 import group.gnometrading.oms.risk.RiskEngine;
+import group.gnometrading.oms.risk.policy.MaxConsecutiveRejectsPolicy;
 import group.gnometrading.oms.risk.policy.MaxOrderSizePolicy;
 import group.gnometrading.oms.risk.policy.MaxTotalPnlLossPolicy;
 import group.gnometrading.oms.state.PooledOrderStateManager;
@@ -132,7 +135,8 @@ class OrderManagementSystemTest {
 
     @Test
     void testAHaltIsLoggedWhenItStartsNotForEveryOrderItRefuses() {
-        oms = omsWith(RiskEngine.syncedFromRegistry(() -> 0L, java.time.Duration.ofSeconds(30)));
+        oms = omsWith(
+                RiskEngine.syncedFromRegistry(() -> 0L, java.time.Duration.ofSeconds(30), ListingDirectory.EMPTY));
         submitIntent(100L, 10L);
         submitIntent(101L, 10L);
         submitIntent(102L, 10L);
@@ -145,9 +149,9 @@ class OrderManagementSystemTest {
     @Test
     void testALossLimitLatchIsLoggedOnceWithItsPolicy() {
         // Any loss at all breaches; the fill's fee alone is one.
-        oms = omsWith(RiskEngine.withPolicies(
-                new OrderRiskPolicy[0],
-                new MarketRiskPolicy[] {new MaxTotalPnlLossPolicy(priceBuffer, new PriceSlotRegistry(1), true, 0L)}));
+        oms = omsWith(RiskEngine.withPolicies(new OrderRiskPolicy[0], new MarketRiskPolicy[] {
+            new MaxTotalPnlLossPolicy(priceBuffer, new PriceSlotRegistry(1), ListingDirectory.EMPTY, 0, 0, 0L)
+        }));
         submitIntent(100L, 10L);
         final long counter = delegate.newOrders.get(0).getClientOidCounter();
         for (int i = 1; i <= 2; i++) {
@@ -166,9 +170,36 @@ class OrderManagementSystemTest {
         }
 
         assertEquals(
-                List.of("STRATEGY_LATCHED_LOSS_LIMIT " + STRATEGY_ID + " " + LISTING_ID + " 0"),
-                logger.linesFor(LogMessage.STRATEGY_LATCHED_LOSS_LIMIT),
+                List.of("STRATEGY_LATCHED " + STRATEGY_ID + " 0 0 " + RiskEngine.CAUSE_MARKET_LIMIT + " 0"),
+                logger.linesFor(LogMessage.STRATEGY_LATCHED),
                 "the second breach finds the strategy already latched");
+    }
+
+    @Test
+    void testARejectStreakLatchIsLoggedWithItsScopeCauseAndPolicy() {
+        final RejectStreaks streaks = new RejectStreaks();
+        oms = omsWith(RiskEngine.withScopedPolicies(
+                List.of(new RiskEngine.ScopedPolicy(
+                        0, 0, EXCHANGE_ID, new MaxConsecutiveRejectsPolicy(streaks, 0, EXCHANGE_ID, 1))),
+                ListingDirectory.EMPTY,
+                streaks));
+        submitIntent(100L, 10L);
+        final OrderExecutionReport reject = new OrderExecutionReport();
+        reject.encodeClientOid(delegate.newOrders.get(0).getClientOidCounter(), STRATEGY_ID);
+        reject.encoder
+                .exchangeId(EXCHANGE_ID)
+                .securityId(SECURITY_ID)
+                .execType(ExecType.REJECT)
+                .rejectReason(RejectReason.EXCHANGE_REJECTED);
+        oms.processExecutionReport(reject, delegate);
+
+        assertEquals(
+                List.of("STRATEGY_LATCHED " + STRATEGY_ID + " " + EXCHANGE_ID + " 0 " + RiskEngine.CAUSE_REJECT_STREAK
+                        + " 0"),
+                logger.linesFor(LogMessage.STRATEGY_LATCHED));
+
+        submitIntent(101L, 10L);
+        assertTrue(delegate.newOrders.isEmpty(), "the exchange is halted for the strategy");
     }
 
     private OrderManagementSystem omsWith(final RiskEngine engine) {

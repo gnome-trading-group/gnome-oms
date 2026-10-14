@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import group.gnometrading.oms.pnl.PriceSlotRegistry;
 import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.PositionTracker;
+import group.gnometrading.oms.risk.ListingDirectory;
 import group.gnometrading.oms.risk.MarketRiskPolicy;
 import group.gnometrading.oms.risk.OrderRiskPolicy;
 import group.gnometrading.oms.risk.RiskEngine;
@@ -29,6 +30,9 @@ class KillSwitchScenarioTest {
     private static final int OTHER_STRATEGY = 8;
     private static final int OTHER_SECURITY = 43;
     private static final int OTHER_LISTING = 101;
+    private static final int OTHER_EXCHANGE = 2;
+    private static final int OTHER_EXCHANGE_SECURITY = 44;
+    private static final int OTHER_EXCHANGE_LISTING = 102;
     private static final int[] NONE = {};
     private static final long PX = Statics.SIZE_SCALING_FACTOR;
 
@@ -101,9 +105,9 @@ class KillSwitchScenarioTest {
         h.applyRiskChanges();
 
         assertEquals(List.of(target), h.sink.cancels);
-        assertTrue(engine.isBlocked(OmsTestHarness.STRATEGY_ID, OmsTestHarness.LISTING_ID));
-        assertFalse(engine.isBlocked(OmsTestHarness.STRATEGY_ID, OTHER_LISTING));
-        assertFalse(engine.isBlocked(OTHER_STRATEGY, OmsTestHarness.LISTING_ID));
+        assertTrue(engine.isBlocked(OmsTestHarness.STRATEGY_ID, OmsTestHarness.LISTING_ID, OmsTestHarness.EXCHANGE_ID));
+        assertFalse(engine.isBlocked(OmsTestHarness.STRATEGY_ID, OTHER_LISTING, OmsTestHarness.EXCHANGE_ID));
+        assertFalse(engine.isBlocked(OTHER_STRATEGY, OmsTestHarness.LISTING_ID, OmsTestHarness.EXCHANGE_ID));
 
         // The venue refuses the cancel; the next sweep sends it again, and nothing else.
         injectCancelReject(OmsTestHarness.STRATEGY_ID, target, OmsTestHarness.SECURITY_ID);
@@ -113,6 +117,44 @@ class KillSwitchScenarioTest {
         h.applyRiskChanges();
         assertEquals(List.of(target), h.sink.cancels);
         assertTrue(sameStrategyOtherListing != otherStrategySameListing);
+    }
+
+    @Test
+    void anExchangeKillCancelsEveryStrategysOrdersThereAndNothingElsewhere() {
+        h.stubListing(OTHER_EXCHANGE, OTHER_EXCHANGE_SECURITY, OTHER_EXCHANGE_LISTING, 0, 0);
+        long take = h.submitTakeIntent(5, Side.Bid);
+        long mine = ackedBid(OmsTestHarness.STRATEGY_ID, OmsTestHarness.SECURITY_ID);
+        long theirs = ackedAsk(OTHER_STRATEGY, OTHER_SECURITY);
+        long elsewhere = h.submitBidIntentOn(OTHER_EXCHANGE, OTHER_EXCHANGE_SECURITY, 100L * PX, 10L);
+        h.injectAck(OmsTestHarness.STRATEGY_ID, elsewhere, OTHER_EXCHANGE, OTHER_EXCHANGE_SECURITY, 10L);
+        h.sink.clear();
+
+        RiskSnapshots.publishExchangeKills(engine, OmsTestHarness.EXCHANGE_ID);
+        h.applyRiskChanges();
+
+        assertEquals(3, h.sink.cancels.size());
+        assertTrue(h.sink.cancels.containsAll(List.of(mine, theirs, take)));
+        assertFalse(h.sink.cancels.contains(elsewhere));
+
+        h.sink.clear();
+        h.submitBidIntent(101L * PX, 10L);
+        assertTrue(h.sink.newOrders.isEmpty() && h.sink.modifies.isEmpty(), "nothing new on the killed exchange");
+        h.submitBidIntentOn(OTHER_EXCHANGE, OTHER_EXCHANGE_SECURITY, 101L * PX, 10L);
+        assertEquals(1, h.sink.modifies.size(), "the other exchange trades on");
+    }
+
+    @Test
+    void anUnguardedSessionCancelsEverythingAndRefusesNewOrders() {
+        long bid = ackedBid(OmsTestHarness.STRATEGY_ID, OmsTestHarness.SECURITY_ID);
+        long otherStrategy = ackedAsk(OTHER_STRATEGY, OTHER_SECURITY);
+        h.sink.clear();
+
+        RiskSnapshots.publishUnguarded(engine);
+        h.applyRiskChanges();
+
+        assertEquals(2, h.sink.cancels.size());
+        assertTrue(h.sink.cancels.containsAll(List.of(bid, otherStrategy)));
+        assertTrue(engine.isHalted(OTHER_STRATEGY, OTHER_LISTING, OmsTestHarness.EXCHANGE_ID));
     }
 
     @Test
@@ -177,7 +219,8 @@ class KillSwitchScenarioTest {
     @Test
     void marketBreachCancelsOnceLatchesAndEscalatesThenTheRegistryHoldsIt() {
         engine = RiskEngine.withPolicies(new OrderRiskPolicy[] {}, new MarketRiskPolicy[] {
-            new MaxTotalPnlLossPolicy(new SharedPriceBuffer(1), new PriceSlotRegistry(1), true, 100L)
+            new MaxTotalPnlLossPolicy(
+                    new SharedPriceBuffer(1), new PriceSlotRegistry(1), ListingDirectory.EMPTY, 0, 0, 100L)
         });
         h = new OmsTestHarness(engine);
         h.stubListing(OmsTestHarness.EXCHANGE_ID, OTHER_SECURITY, OTHER_LISTING, 0, 0);
@@ -191,7 +234,7 @@ class KillSwitchScenarioTest {
         h.sink.clear();
         h.injectFill(sell, 10, 180 * PX, 10, 0); // a loss of 200 against a limit of 100
 
-        assertTrue(engine.isLatched(OmsTestHarness.STRATEGY_ID));
+        assertTrue(engine.isLatchedAt(OmsTestHarness.STRATEGY_ID, 0, 0));
         assertEquals(1, h.sink.cancels.size());
         assertEquals(resting, h.sink.cancels.get(0));
         assertEquals(List.of(OmsTestHarness.STRATEGY_ID), RiskSnapshots.drainLatchedHalts(engine));
@@ -199,29 +242,31 @@ class KillSwitchScenarioTest {
         // The registry now records the halt as a strategy kill; the latch hands over to it.
         RiskSnapshots.publishKills(engine, false, new int[] {OmsTestHarness.STRATEGY_ID}, NONE);
         h.applyRiskChanges();
-        assertFalse(engine.isLatched(OmsTestHarness.STRATEGY_ID), "the registry's kill now holds the halt");
-        assertTrue(engine.isBlocked(OmsTestHarness.STRATEGY_ID, OmsTestHarness.LISTING_ID));
+        assertFalse(engine.isLatchedAt(OmsTestHarness.STRATEGY_ID, 0, 0), "the registry's kill now holds the halt");
+        assertTrue(engine.isBlocked(OmsTestHarness.STRATEGY_ID, OmsTestHarness.LISTING_ID, OmsTestHarness.EXCHANGE_ID));
         assertEquals(1, h.sink.cancels.size(), "the resting order's cancel is still pending; nothing new");
 
         // An operator resumes it.
         RiskSnapshots.publishNoKills(engine);
         h.applyRiskChanges();
-        assertFalse(engine.isBlocked(OmsTestHarness.STRATEGY_ID, OmsTestHarness.LISTING_ID));
+        assertFalse(
+                engine.isBlocked(OmsTestHarness.STRATEGY_ID, OmsTestHarness.LISTING_ID, OmsTestHarness.EXCHANGE_ID));
     }
 
     @Test
     void aMarkMovePastTheLimitHaltsTheStrategyWithNoOrderActivity() {
-        final MarkedHarness m = markedHarness(new MaxTotalPnlLossPolicy(m().prices, m().slots, true, 500L));
+        final MarkedHarness m =
+                markedHarness(new MaxTotalPnlLossPolicy(m().prices, m().slots, ListingDirectory.EMPTY, 0, 0, 500L));
         long resting = holdLongAtAHundred(m);
         h.sink.clear();
 
         m.quote(OmsTestHarness.LISTING_ID, 60L * PX, 62L * PX); // mid 61: -390 on 10
         h.checkMarkMoves();
-        assertFalse(engine.isLatched(OmsTestHarness.STRATEGY_ID));
+        assertFalse(engine.isLatchedAt(OmsTestHarness.STRATEGY_ID, 0, 0));
 
         m.quote(OmsTestHarness.LISTING_ID, 48L * PX, 50L * PX); // mid 49: -510
         h.checkMarkMoves();
-        assertTrue(engine.isLatched(OmsTestHarness.STRATEGY_ID));
+        assertTrue(engine.isLatchedAt(OmsTestHarness.STRATEGY_ID, 0, 0));
         assertEquals(List.of(resting), h.sink.cancels);
         assertEquals(List.of(OmsTestHarness.STRATEGY_ID), RiskSnapshots.drainLatchedHalts(engine));
 
@@ -257,7 +302,8 @@ class KillSwitchScenarioTest {
 
     @Test
     void aHedgedStrategyIsJudgedOnItsTotalAcrossListings() {
-        final MarkedHarness m = markedHarness(new MaxTotalPnlLossPolicy(m().prices, m().slots, true, 500L));
+        final MarkedHarness m =
+                markedHarness(new MaxTotalPnlLossPolicy(m().prices, m().slots, ListingDirectory.EMPTY, 0, 0, 500L));
         holdLongAtAHundred(m);
         long sell = h.submitAskIntent(OmsTestHarness.STRATEGY_ID, OTHER_SECURITY, 100L * PX, 10L);
         h.injectAck(OmsTestHarness.STRATEGY_ID, sell, OmsTestHarness.EXCHANGE_ID, OTHER_SECURITY, 10);
@@ -267,11 +313,11 @@ class KillSwitchScenarioTest {
         m.quote(OmsTestHarness.LISTING_ID, 39L * PX, 41L * PX); // long leg -600
         m.quote(OTHER_LISTING, 39L * PX, 41L * PX); // short leg +600
         h.checkMarkMoves();
-        assertFalse(engine.isLatched(OmsTestHarness.STRATEGY_ID), "the legs offset");
+        assertFalse(engine.isLatchedAt(OmsTestHarness.STRATEGY_ID, 0, 0), "the legs offset");
 
         m.quote(OTHER_LISTING, 99L * PX, 101L * PX); // the short leg's gain is gone
         h.checkMarkMoves();
-        assertTrue(engine.isLatched(OmsTestHarness.STRATEGY_ID));
+        assertTrue(engine.isLatchedAt(OmsTestHarness.STRATEGY_ID, 0, 0));
     }
 
     @Test
@@ -284,7 +330,7 @@ class KillSwitchScenarioTest {
 
         m.quote(OmsTestHarness.LISTING_ID, 1L, 2L);
         h.checkMarkMoves();
-        assertFalse(engine.isLatched(OmsTestHarness.STRATEGY_ID));
+        assertFalse(engine.isLatchedAt(OmsTestHarness.STRATEGY_ID, 0, 0));
     }
 
     /** Opens a 10-lot long at 100 on the default listing, marked at 100, plus a resting bid on the other one. */
@@ -295,7 +341,7 @@ class KillSwitchScenarioTest {
         h.injectFill(buy, 10, 100 * PX, 10, 0);
         m.quote(OmsTestHarness.LISTING_ID, 99L * PX, 101L * PX);
         h.checkMarkMoves();
-        assertFalse(engine.isLatched(OmsTestHarness.STRATEGY_ID));
+        assertFalse(engine.isLatchedAt(OmsTestHarness.STRATEGY_ID, 0, 0));
         return resting;
     }
 
@@ -415,7 +461,7 @@ class KillSwitchScenarioTest {
     @Test
     void staleRiskRejectsNewOrdersButLetsTheStrategyPullItsQuote() {
         final long[] nowMs = {1_000};
-        engine = RiskEngine.syncedFromRegistry(() -> nowMs[0], Duration.ofSeconds(30));
+        engine = RiskEngine.syncedFromRegistry(() -> nowMs[0], Duration.ofSeconds(30), ListingDirectory.EMPTY);
         h = new OmsTestHarness(engine);
         RiskSnapshots.recordRefresh(engine, nowMs[0]);
         h.applyRiskChanges();
@@ -434,7 +480,8 @@ class KillSwitchScenarioTest {
     @Test
     void aLatchedStrategyIsSweptAgainUntilItsOrdersAreGone() {
         engine = RiskEngine.withPolicies(new OrderRiskPolicy[] {}, new MarketRiskPolicy[] {
-            new MaxTotalPnlLossPolicy(new SharedPriceBuffer(1), new PriceSlotRegistry(1), true, 100L)
+            new MaxTotalPnlLossPolicy(
+                    new SharedPriceBuffer(1), new PriceSlotRegistry(1), ListingDirectory.EMPTY, 0, 0, 100L)
         });
         h = new OmsTestHarness(engine);
         h.stubListing(OmsTestHarness.EXCHANGE_ID, OTHER_SECURITY, OTHER_LISTING, 0, 0);

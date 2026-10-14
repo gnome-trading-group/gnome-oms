@@ -14,36 +14,36 @@ import group.gnometrading.schemas.Side;
 import group.gnometrading.strings.GnomeString;
 
 /**
- * Rejects an order whose notional exceeds {@code maxNotionalValue}, in price units (1e9 per dollar).
+ * Rejects an order whose notional exceeds {@code maxOrderNotional}, in price units (1e9 per dollar).
  *
  * <p>A market order has no price, so it is valued where it would execute: the best ask for a buy, the best bid
  * for a sell, or the last trade when that side of the book is empty. With no price at all (an empty book and no
  * trade yet, or no price buffer) its notional is unknown and the order is rejected.
  */
-public final class MaxNotionalValuePolicy extends AbstractConfigurablePolicy implements OrderRiskPolicy {
+public final class MaxOrderNotionalPolicy extends AbstractConfigurablePolicy implements OrderRiskPolicy {
 
     private final SharedPriceBuffer priceBuffer;
     private final PriceSlotRegistry priceSlotRegistry;
-    private long maxNotionalValue;
+    private long maxOrderNotional;
 
-    public MaxNotionalValuePolicy() {
+    public MaxOrderNotionalPolicy() {
         this(null, null);
     }
 
-    public MaxNotionalValuePolicy(final SharedPriceBuffer priceBuffer, final PriceSlotRegistry priceSlotRegistry) {
+    public MaxOrderNotionalPolicy(final SharedPriceBuffer priceBuffer, final PriceSlotRegistry priceSlotRegistry) {
         this.priceBuffer = priceBuffer;
         this.priceSlotRegistry = priceSlotRegistry;
     }
 
-    public MaxNotionalValuePolicy(final long maxNotionalValue) {
+    public MaxOrderNotionalPolicy(final long maxOrderNotional) {
         this(null, null);
-        this.maxNotionalValue = maxNotionalValue;
+        this.maxOrderNotional = maxOrderNotional;
     }
 
     @Override
     public void reconfigure(final GnomeString parametersJson) {
-        this.maxNotionalValue =
-                PolicyParameters.parseLong(jsonDecoder, wrapParameters(parametersJson), "maxNotionalValue");
+        this.maxOrderNotional =
+                PolicyParameters.parseLong(jsonDecoder, wrapParameters(parametersJson), "maxOrderNotional");
     }
 
     @Override
@@ -60,7 +60,7 @@ public final class MaxNotionalValuePolicy extends AbstractConfigurablePolicy imp
         if (valuationPrice <= 0) {
             return true;
         }
-        return Position.notional(valuationPrice, order.decoder.size()) > maxNotionalValue;
+        return Position.notional(valuationPrice, order.decoder.size()) > maxOrderNotional;
     }
 
     private long executionPrice(final int listingId, final Side side) {

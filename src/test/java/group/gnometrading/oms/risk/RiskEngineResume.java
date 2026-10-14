@@ -7,7 +7,7 @@ public final class RiskEngineResume {
 
     public static void resume(final RiskEngine engine, final int strategyId) {
         final RiskEngineSnapshot held = new RiskEngineSnapshot();
-        held.confirmedHalts.add(strategyId);
+        held.confirmedStrategyHalts.add(strategyId);
         engine.publishSnapshot(held);
         engine.applyChanges(NO_KILLS);
         engine.publishSnapshot(new RiskEngineSnapshot());
@@ -22,7 +22,13 @@ public final class RiskEngineResume {
         public void onStrategyKilled(final int strategyId) {}
 
         @Override
+        public void onExchangeKilled(final int exchangeId) {}
+
+        @Override
         public void onListingKilled(final int listingId) {}
+
+        @Override
+        public void onStrategyExchangeKilled(final int strategyId, final int exchangeId) {}
 
         @Override
         public void onStrategyListingKilled(final int strategyId, final int listingId) {}

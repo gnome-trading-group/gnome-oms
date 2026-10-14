@@ -12,9 +12,8 @@ public interface PositionTracker {
 
     Position getStrategyPosition(int strategyId, int listingId);
 
-    void addStrategyLeaves(int strategyId, int listingId, Side side, long qty);
-
-    void removeStrategyLeaves(int strategyId, int listingId, Side side, long qty);
+    /** See {@link Position#adjustLeaves}; applied to the strategy's position and the firm's. */
+    void adjustStrategyLeaves(int strategyId, int listingId, Side side, long qtyChange, long notionalChange);
 
     void addOpenOrder(int strategyId, int listingId);
 

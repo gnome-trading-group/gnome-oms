@@ -17,6 +17,9 @@ public final class Position {
     public long totalFees;
     public long leavesBuyQty;
     public long leavesSellQty;
+    // Working orders' notional, each at its own price, so committed capital is judged without visiting the orders.
+    public long leavesBuyNotional;
+    public long leavesSellNotional;
     /** Orders tracked by the OMS and not yet released, including ones awaiting an ack or a cancel. OMS only. */
     public int openOrders;
     /**
@@ -35,6 +38,8 @@ public final class Position {
         this.totalFees = 0;
         this.leavesBuyQty = 0;
         this.leavesSellQty = 0;
+        this.leavesBuyNotional = 0;
+        this.leavesSellNotional = 0;
         this.openOrders = 0;
         this.version = 0;
         this.sharedSlot = -1;
@@ -88,19 +93,14 @@ public final class Position {
                 : ScaledMath.multiplyDivide(totalCost, Statics.SIZE_SCALING_FACTOR, Math.abs(netQuantity));
     }
 
-    public void addLeaves(Side side, long qty) {
+    /** Moves one side's working quantity and notional by what an order's working amounts just changed by. */
+    public void adjustLeaves(Side side, long qtyChange, long notionalChange) {
         if (side == Side.Bid) {
-            leavesBuyQty += qty;
+            leavesBuyQty = Math.max(0, leavesBuyQty + qtyChange);
+            leavesBuyNotional = Math.max(0, leavesBuyNotional + notionalChange);
         } else {
-            leavesSellQty += qty;
-        }
-    }
-
-    public void removeLeaves(Side side, long qty) {
-        if (side == Side.Bid) {
-            leavesBuyQty = Math.max(0, leavesBuyQty - qty);
-        } else {
-            leavesSellQty = Math.max(0, leavesSellQty - qty);
+            leavesSellQty = Math.max(0, leavesSellQty + qtyChange);
+            leavesSellNotional = Math.max(0, leavesSellNotional + notionalChange);
         }
     }
 

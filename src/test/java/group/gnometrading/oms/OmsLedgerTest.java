@@ -13,6 +13,7 @@ import group.gnometrading.oms.pnl.PriceSlotRegistry;
 import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.DefaultPositionTracker;
 import group.gnometrading.oms.position.SharedPositionBuffer;
+import group.gnometrading.oms.risk.ListingDirectory;
 import group.gnometrading.oms.risk.OrderRiskPolicy;
 import group.gnometrading.oms.risk.RiskEngine;
 import group.gnometrading.oms.risk.RiskEngineResume;
@@ -116,6 +117,44 @@ class OmsLedgerTest {
     }
 
     @Test
+    void anAmendTheVenueConfirmsIsRecordedWithTheOrdersNewTerms() {
+        final long counter = placeBid(10 * UNIT);
+        report(counter, ExecType.NEW, "4071-100-1", 0, 0, 0);
+        oms.processIntent(bidIntent(PRICE + 50_000_000L, 12 * UNIT), sink);
+        assertEquals(1, sink.modifies.size(), "the venue amends in place");
+        assertEquals(
+                List.of(LedgerEventType.ORDER_OPENED, LedgerEventType.ORDER_ACKED),
+                drain().stream().map(event -> event.type).toList(),
+                "nothing changes until the venue confirms");
+
+        report(counter, ExecType.NEW, "4071-100-1", 0, 0, 12 * UNIT);
+
+        final List<LedgerEvent> events = drain();
+        assertEquals(
+                List.of(LedgerEventType.ORDER_MODIFIED),
+                events.stream().map(event -> event.type).toList());
+        final LedgerEvent modified = events.get(0);
+        assertEquals(counter, modified.clientOidCounter);
+        assertEquals(OmsTestHarness.LISTING_ID, modified.listingId);
+        assertEquals(OmsTestHarness.EXCHANGE_ID, modified.exchangeId);
+        assertEquals(PRICE + 50_000_000L, modified.price);
+        assertEquals(12 * UNIT, modified.size);
+    }
+
+    @Test
+    void anAmendTheVenueRefusesRecordsNothing() {
+        final long counter = placeBid(10 * UNIT);
+        report(counter, ExecType.NEW, "4071-100-1", 0, 0, 0);
+        oms.processIntent(bidIntent(PRICE + 50_000_000L, 12 * UNIT), sink);
+        drain();
+
+        report(counter, ExecType.CANCEL_REJECT, "4071-100-1", 0, 0, 10 * UNIT);
+        report(counter, ExecType.NEW, "4071-100-1", 0, 0, 10 * UNIT);
+
+        assertTrue(drain().isEmpty());
+    }
+
+    @Test
     void anOrderTheGatewayRefusedClosesWithoutAnAck() {
         final long counter = placeBid(UNIT);
         report(counter, ExecType.REJECT, "", 0, 0, 0);
@@ -170,7 +209,7 @@ class OmsLedgerTest {
                 new NullLogger(),
                 new PooledOrderStateManager(16),
                 positions,
-                RiskEngine.syncedFromRegistry(() -> 0L, java.time.Duration.ofSeconds(30)),
+                RiskEngine.syncedFromRegistry(() -> 0L, java.time.Duration.ofSeconds(30), ListingDirectory.EMPTY),
                 OmsTestHarness.cachedSecurityMaster(
                         OmsTestHarness.EXCHANGE_ID, OmsTestHarness.SECURITY_ID, OmsTestHarness.LISTING_ID),
                 new SharedPriceBuffer(1),
@@ -197,11 +236,15 @@ class OmsLedgerTest {
     }
 
     private static group.gnometrading.schemas.Intent bidIntent(final long size) {
+        return bidIntent(PRICE, size);
+    }
+
+    private static group.gnometrading.schemas.Intent bidIntent(final long price, final long size) {
         return OmsTestHarness.buildIntent(
                 OmsTestHarness.STRATEGY_ID,
                 OmsTestHarness.EXCHANGE_ID,
                 OmsTestHarness.SECURITY_ID,
-                PRICE,
+                price,
                 size,
                 IntentDecoder.askPriceNullValue(),
                 0);

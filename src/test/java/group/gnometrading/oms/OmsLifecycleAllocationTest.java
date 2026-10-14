@@ -12,12 +12,17 @@ import group.gnometrading.oms.pnl.PriceSlotRegistry;
 import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.DefaultPositionTracker;
 import group.gnometrading.oms.position.SharedPositionBuffer;
-import group.gnometrading.oms.risk.MarketRiskPolicy;
-import group.gnometrading.oms.risk.OrderRiskPolicy;
+import group.gnometrading.oms.risk.Configurable;
+import group.gnometrading.oms.risk.ListingDirectory;
+import group.gnometrading.oms.risk.RejectStreaks;
 import group.gnometrading.oms.risk.RiskEngine;
-import group.gnometrading.oms.risk.policy.MaxNotionalValuePolicy;
+import group.gnometrading.oms.risk.TestListings;
+import group.gnometrading.oms.risk.policy.MaxCommittedCapitalPolicy;
+import group.gnometrading.oms.risk.policy.MaxConsecutiveRejectsPolicy;
 import group.gnometrading.oms.risk.policy.MaxOpenOrdersPolicy;
+import group.gnometrading.oms.risk.policy.MaxOrderNotionalPolicy;
 import group.gnometrading.oms.risk.policy.MaxOrderSizePolicy;
+import group.gnometrading.oms.risk.policy.MaxPositionPolicy;
 import group.gnometrading.oms.risk.policy.MaxTotalPnlLossPolicy;
 import group.gnometrading.oms.risk.policy.PriceCollarPolicy;
 import group.gnometrading.oms.state.PooledOrderStateManager;
@@ -29,8 +34,10 @@ import group.gnometrading.schemas.ModifyOrder;
 import group.gnometrading.schemas.Order;
 import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.schemas.OrderStatus;
+import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.schemas.Statics;
 import java.lang.management.ManagementFactory;
+import java.util.List;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
@@ -55,14 +62,26 @@ class OmsLifecycleAllocationTest {
         final SharedPriceBuffer prices = new SharedPriceBuffer(1);
         final PriceSlotRegistry slots = new PriceSlotRegistry(1);
         final int slot = slots.register(OmsTestHarness.LISTING_ID);
-        final RiskEngine engine = RiskEngine.withPolicies(
-                new OrderRiskPolicy[] {
-                    new MaxOrderSizePolicy(Long.MAX_VALUE / 4),
-                    new MaxNotionalValuePolicy(Long.MAX_VALUE / 4),
-                    new PriceCollarPolicy(prices, slots, Long.MAX_VALUE / 4),
-                    new MaxOpenOrdersPolicy(true, 1_000)
-                },
-                new MarketRiskPolicy[] {new MaxTotalPnlLossPolicy(prices, slots, true, Long.MAX_VALUE / 4)});
+        final ListingDirectory directory =
+                TestListings.directory(TestListings.binary(OmsTestHarness.LISTING_ID, OmsTestHarness.EXCHANGE_ID));
+        final RejectStreaks streaks = new RejectStreaks();
+        final long unlimited = Long.MAX_VALUE / 4;
+        final RiskEngine engine = RiskEngine.withScopedPolicies(
+                List.of(
+                        everywhere(new MaxOrderSizePolicy(unlimited)),
+                        everywhere(new MaxOrderNotionalPolicy(unlimited)),
+                        everywhere(new PriceCollarPolicy(prices, slots, unlimited)),
+                        everywhere(new MaxOpenOrdersPolicy(directory, 0, 0, 1_000)),
+                        everywhere(new MaxPositionPolicy(unlimited)),
+                        everywhere(new MaxCommittedCapitalPolicy(directory, 0, 0, unlimited)),
+                        onExchange(new MaxCommittedCapitalPolicy(directory, 0, OmsTestHarness.EXCHANGE_ID, unlimited)),
+                        everywhere(new MaxTotalPnlLossPolicy(prices, slots, directory, 0, 0, unlimited)),
+                        onExchange(new MaxTotalPnlLossPolicy(
+                                prices, slots, directory, 0, OmsTestHarness.EXCHANGE_ID, unlimited)),
+                        everywhere(new MaxConsecutiveRejectsPolicy(streaks, 0, 0, 1_000)),
+                        onExchange(new MaxConsecutiveRejectsPolicy(streaks, 0, OmsTestHarness.EXCHANGE_ID, 1_000))),
+                directory,
+                streaks);
         final DefaultPositionTracker positions = new DefaultPositionTracker(new SharedPositionBuffer(16));
         final LedgerRing ledger = new LedgerRing(1024, LedgerAgent.MAX_EVENTS_PER_BATCH, Long.MAX_VALUE / 4, positions);
         final int[] drained = {0};
@@ -114,6 +133,8 @@ class OmsLifecycleAllocationTest {
             reports.send(sell, ExecType.NEW, 0, 0, 0, 4 * unit);
             reports.send(sell, ExecType.FILL, 4 * unit, price, 4 * unit, 0);
             oms.processIntent(pull, sink);
+            oms.processIntent(bid, sink);
+            reports.reject(sink.lastOrderCounter, RejectReason.EXCHANGE_REJECTED);
             oms.checkMarkMoves(sink);
             oms.checkLedger(sink);
             // Stands in for the ledger agent, so the ring never fills.
@@ -126,6 +147,14 @@ class OmsLifecycleAllocationTest {
         assertTrue(allocated < ALLOWED_BYTES, "intents, exec reports and risk per cycle: " + allocated + " bytes");
         // Two orders opened, acknowledged, filled and closed.
         assertTrue(drained[0] >= 8, "each cycle recorded its orders and fills: " + drained[0]);
+    }
+
+    private static RiskEngine.ScopedPolicy everywhere(final Configurable policy) {
+        return new RiskEngine.ScopedPolicy(0, 0, 0, policy);
+    }
+
+    private static RiskEngine.ScopedPolicy onExchange(final Configurable policy) {
+        return new RiskEngine.ScopedPolicy(0, 0, OmsTestHarness.EXCHANGE_ID, policy);
     }
 
     private static Intent bidIntent(final long price, final long size) {
@@ -168,7 +197,25 @@ class OmsLifecycleAllocationTest {
             this.sink = sink;
         }
 
+        void reject(final long counter, final RejectReason reason) {
+            encode(counter, ExecType.REJECT, 0, 0, 0, 0);
+            report.encoder.rejectReason(reason);
+            oms.processExecutionReport(report, sink);
+        }
+
         void send(
+                final long counter,
+                final ExecType type,
+                final long filled,
+                final long price,
+                final long cumulative,
+                final long leaves) {
+            encode(counter, type, filled, price, cumulative, leaves);
+            report.encoder.rejectReason(RejectReason.NULL_VAL);
+            oms.processExecutionReport(report, sink);
+        }
+
+        private void encode(
                 final long counter,
                 final ExecType type,
                 final long filled,
@@ -186,7 +233,6 @@ class OmsLifecycleAllocationTest {
                     .cumulativeQty(cumulative)
                     .leavesQty(leaves)
                     .fee(0);
-            oms.processExecutionReport(report, sink);
         }
     }
 

@@ -112,6 +112,26 @@ public final class LedgerRing implements LedgerSink {
     }
 
     @Override
+    public void orderModified(
+            final int strategyId,
+            final int listingId,
+            final int exchangeId,
+            final long clientOidCounter,
+            final long price,
+            final long size,
+            final long timeNs) {
+        final LedgerEvent event = claim(strategyId, listingId, clientOidCounter, timeNs);
+        if (event == null) {
+            return;
+        }
+        event.type = LedgerEventType.ORDER_MODIFIED;
+        event.exchangeId = exchangeId;
+        event.price = price;
+        event.size = size;
+        commit();
+    }
+
+    @Override
     public void fillBooked(
             final int strategyId,
             final int listingId,

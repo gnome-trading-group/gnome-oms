@@ -60,7 +60,7 @@ class LivePositionViewTest {
 
     @Test
     void getPosition_includesLeavesUpdates() {
-        tracker.addStrategyLeaves(STRATEGY_ID, LISTING_ID, Side.Bid, 5);
+        tracker.adjustStrategyLeaves(STRATEGY_ID, LISTING_ID, Side.Bid, 5, 0);
 
         Position pos = view.getPosition(LISTING_ID);
 

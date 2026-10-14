@@ -5,6 +5,7 @@ import group.gnometrading.oms.pnl.PriceSlotRegistry;
 import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.Position;
 import group.gnometrading.oms.position.PositionTracker;
+import group.gnometrading.oms.risk.ListingDirectory;
 import group.gnometrading.oms.risk.MarketRiskPolicy;
 import group.gnometrading.oms.risk.util.PolicyParameters;
 import group.gnometrading.oms.state.OrderStateManager;
@@ -13,8 +14,9 @@ import java.util.function.Consumer;
 
 /**
  * Breached when total PnL (realized + unrealized, net of fees) falls below {@code -maxLoss}, in price units (1e9
- * per dollar): one listing's for a listing-scoped limit, or the sum across the strategy's listings otherwise, so a
- * losing leg of a hedged strategy is offset by its winning leg.
+ * per dollar): one listing's for a listing-scoped limit, or the sum across the strategy's listings otherwise — those on
+ * the policy's exchange, for an exchange-scoped limit — so a losing leg of a hedged strategy is offset by its winning
+ * leg.
  *
  * <p>Unrealized PnL is the notional of {@code netQuantity} at {@code markPrice - avgEntryPrice}, where the
  * mark price is the mid of the book, or the last trade when a side is empty, read from {@link SharedPriceBuffer}.
@@ -25,26 +27,31 @@ public final class MaxTotalPnlLossPolicy extends AbstractConfigurablePolicy impl
 
     private final SharedPriceBuffer priceBuffer;
     private final PriceSlotRegistry priceSlotRegistry;
-    private final boolean acrossListings;
+    private final PositionScope scope;
     private long maxLoss;
     private long totalSum;
-    private final Consumer<Position> addTotal = position -> totalSum += totalPnl(position);
+    private final Consumer<Position> addTotal = this::addTotal;
 
+    /** {@code listingId} and {@code exchangeId} are the policy's target; 0 is every listing or exchange. */
     public MaxTotalPnlLossPolicy(
             final SharedPriceBuffer priceBuffer,
             final PriceSlotRegistry priceSlotRegistry,
-            final boolean acrossListings) {
+            final ListingDirectory directory,
+            final int listingId,
+            final int exchangeId) {
         this.priceBuffer = priceBuffer;
         this.priceSlotRegistry = priceSlotRegistry;
-        this.acrossListings = acrossListings;
+        this.scope = new PositionScope(directory, listingId, exchangeId);
     }
 
     public MaxTotalPnlLossPolicy(
             final SharedPriceBuffer priceBuffer,
             final PriceSlotRegistry priceSlotRegistry,
-            final boolean acrossListings,
+            final ListingDirectory directory,
+            final int listingId,
+            final int exchangeId,
             final long maxLoss) {
-        this(priceBuffer, priceSlotRegistry, acrossListings);
+        this(priceBuffer, priceSlotRegistry, directory, listingId, exchangeId);
         this.maxLoss = maxLoss;
     }
 
@@ -59,13 +66,19 @@ public final class MaxTotalPnlLossPolicy extends AbstractConfigurablePolicy impl
             final int listingId,
             final PositionTracker positions,
             final OrderStateManager orders) {
-        if (acrossListings) {
+        if (scope.acrossListings()) {
             totalSum = 0;
             positions.forEachListingPosition(strategyId, addTotal);
             return totalSum < -maxLoss;
         }
         final Position pos = positions.getStrategyPosition(strategyId, listingId);
         return pos != null && totalPnl(pos) < -maxLoss;
+    }
+
+    private void addTotal(final Position position) {
+        if (scope.covers(position.listingId)) {
+            totalSum += totalPnl(position);
+        }
     }
 
     private long totalPnl(final Position pos) {

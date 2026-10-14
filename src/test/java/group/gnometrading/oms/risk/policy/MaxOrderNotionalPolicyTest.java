@@ -19,7 +19,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 @ExtendWith(MockitoExtension.class)
-class MaxNotionalValuePolicyTest {
+class MaxOrderNotionalPolicyTest {
 
     private static final long DOLLAR = Statics.PRICE_SCALING_FACTOR;
     private static final long UNIT = Statics.SIZE_SCALING_FACTOR;
@@ -35,21 +35,21 @@ class MaxNotionalValuePolicyTest {
 
     @Test
     void testNotViolatedWhenNotionalBelowMax() {
-        final MaxNotionalValuePolicy policy = new MaxNotionalValuePolicy(10_000 * DOLLAR);
+        final MaxOrderNotionalPolicy policy = new MaxOrderNotionalPolicy(10_000 * DOLLAR);
         order.encoder.price(100 * DOLLAR).size(50 * UNIT); // $5,000
         assertFalse(policy.isViolated(0, LISTING_ID, order, positions, orders));
     }
 
     @Test
     void testNotViolatedWhenNotionalEqualsMax() {
-        final MaxNotionalValuePolicy policy = new MaxNotionalValuePolicy(10_000 * DOLLAR);
+        final MaxOrderNotionalPolicy policy = new MaxOrderNotionalPolicy(10_000 * DOLLAR);
         order.encoder.price(100 * DOLLAR).size(100 * UNIT); // $10,000
         assertFalse(policy.isViolated(0, LISTING_ID, order, positions, orders));
     }
 
     @Test
     void testViolatedWhenNotionalExceedsMax() {
-        final MaxNotionalValuePolicy policy = new MaxNotionalValuePolicy(10_000 * DOLLAR);
+        final MaxOrderNotionalPolicy policy = new MaxOrderNotionalPolicy(10_000 * DOLLAR);
         order.encoder.price(100 * DOLLAR).size(101 * UNIT); // $10,100
         assertTrue(policy.isViolated(0, LISTING_ID, order, positions, orders));
     }
@@ -57,11 +57,11 @@ class MaxNotionalValuePolicyTest {
     @Test
     void testNotionalPastTheOldOverflowPointIsCheckedExactly() {
         // $50,000: price * size alone would wrap a long, which used to make it look tiny or negative.
-        final MaxNotionalValuePolicy policy = new MaxNotionalValuePolicy(1_000_000 * DOLLAR);
+        final MaxOrderNotionalPolicy policy = new MaxOrderNotionalPolicy(1_000_000 * DOLLAR);
         order.encoder.price(DOLLAR / 2).size(100_000 * UNIT);
         assertFalse(policy.isViolated(0, LISTING_ID, order, positions, orders));
 
-        final MaxNotionalValuePolicy tight = new MaxNotionalValuePolicy(49_999 * DOLLAR);
+        final MaxOrderNotionalPolicy tight = new MaxOrderNotionalPolicy(49_999 * DOLLAR);
         assertTrue(tight.isViolated(0, LISTING_ID, order, positions, orders));
     }
 
@@ -72,8 +72,8 @@ class MaxNotionalValuePolicyTest {
         final int slot = registry.register(LISTING_ID);
         priceBuffer.writeTrade(slot, 10 * DOLLAR);
         priceBuffer.writeQuote(slot, 90 * DOLLAR, 110 * DOLLAR);
-        final MaxNotionalValuePolicy policy = new MaxNotionalValuePolicy(priceBuffer, registry);
-        policy.reconfigure(new ViewString("{\"maxNotionalValue\": " + 10_000 * DOLLAR + "}"));
+        final MaxOrderNotionalPolicy policy = new MaxOrderNotionalPolicy(priceBuffer, registry);
+        policy.reconfigure(new ViewString("{\"maxOrderNotional\": " + 10_000 * DOLLAR + "}"));
 
         order.encoder
                 .orderType(OrderType.MARKET)
@@ -90,8 +90,8 @@ class MaxNotionalValuePolicyTest {
         final SharedPriceBuffer priceBuffer = new SharedPriceBuffer(4);
         final PriceSlotRegistry registry = new PriceSlotRegistry(4);
         priceBuffer.writeTrade(registry.register(LISTING_ID), 100 * DOLLAR);
-        final MaxNotionalValuePolicy policy = new MaxNotionalValuePolicy(priceBuffer, registry);
-        policy.reconfigure(new ViewString("{\"maxNotionalValue\": " + 10_000 * DOLLAR + "}"));
+        final MaxOrderNotionalPolicy policy = new MaxOrderNotionalPolicy(priceBuffer, registry);
+        policy.reconfigure(new ViewString("{\"maxOrderNotional\": " + 10_000 * DOLLAR + "}"));
 
         order.encoder.orderType(OrderType.MARKET).price(OrderDecoder.priceNullValue());
         order.encoder.size(50 * UNIT);
@@ -105,8 +105,8 @@ class MaxNotionalValuePolicyTest {
         final SharedPriceBuffer priceBuffer = new SharedPriceBuffer(4);
         final PriceSlotRegistry registry = new PriceSlotRegistry(4);
         registry.register(LISTING_ID);
-        final MaxNotionalValuePolicy policy = new MaxNotionalValuePolicy(priceBuffer, registry);
-        policy.reconfigure(new ViewString("{\"maxNotionalValue\": " + 10_000 * DOLLAR + "}"));
+        final MaxOrderNotionalPolicy policy = new MaxOrderNotionalPolicy(priceBuffer, registry);
+        policy.reconfigure(new ViewString("{\"maxOrderNotional\": " + 10_000 * DOLLAR + "}"));
 
         order.encoder
                 .orderType(OrderType.MARKET)
@@ -117,7 +117,7 @@ class MaxNotionalValuePolicyTest {
 
     @Test
     void testMarketOrderWithNoPriceBufferIsRejected() {
-        final MaxNotionalValuePolicy policy = new MaxNotionalValuePolicy(10_000 * DOLLAR);
+        final MaxOrderNotionalPolicy policy = new MaxOrderNotionalPolicy(10_000 * DOLLAR);
         order.encoder
                 .orderType(OrderType.MARKET)
                 .price(OrderDecoder.priceNullValue())
@@ -127,20 +127,20 @@ class MaxNotionalValuePolicyTest {
 
     @Test
     void testNegativePriceIsValuedByItsMagnitude() {
-        final MaxNotionalValuePolicy policy = new MaxNotionalValuePolicy(10_000 * DOLLAR);
+        final MaxOrderNotionalPolicy policy = new MaxOrderNotionalPolicy(10_000 * DOLLAR);
         order.encoder.price(-200 * DOLLAR).size(51 * UNIT); // $10,200 of exposure
         assertTrue(policy.isViolated(0, LISTING_ID, order, positions, orders));
     }
 
     @Test
-    void testReconfigureUpdatesMaxNotionalValue() {
-        final MaxNotionalValuePolicy policy = new MaxNotionalValuePolicy();
-        policy.reconfigure(new ViewString("{\"maxNotionalValue\": " + 5_000 * DOLLAR + "}"));
+    void testReconfigureUpdatesMaxOrderNotional() {
+        final MaxOrderNotionalPolicy policy = new MaxOrderNotionalPolicy();
+        policy.reconfigure(new ViewString("{\"maxOrderNotional\": " + 5_000 * DOLLAR + "}"));
 
         order.encoder.price(100 * DOLLAR).size(51 * UNIT); // $5,100
         assertTrue(policy.isViolated(0, LISTING_ID, order, positions, orders));
 
-        policy.reconfigure(new ViewString("{\"maxNotionalValue\": " + 20_000 * DOLLAR + "}"));
+        policy.reconfigure(new ViewString("{\"maxOrderNotional\": " + 20_000 * DOLLAR + "}"));
         assertFalse(policy.isViolated(0, LISTING_ID, order, positions, orders));
     }
 }

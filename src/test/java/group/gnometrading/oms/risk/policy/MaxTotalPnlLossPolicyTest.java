@@ -7,6 +7,8 @@ import group.gnometrading.oms.pnl.PriceSlotRegistry;
 import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.DefaultPositionTracker;
 import group.gnometrading.oms.position.SharedPositionBuffer;
+import group.gnometrading.oms.risk.ListingDirectory;
+import group.gnometrading.oms.risk.TestListings;
 import group.gnometrading.oms.state.OrderStateManager;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.Statics;
@@ -67,7 +69,8 @@ class MaxTotalPnlLossPolicyTest {
     void notViolated_whenListingNotRegisteredInPriceRegistry() {
         positions.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 10 * UNIT, 100, 0);
         final PriceSlotRegistry emptyRegistry = new PriceSlotRegistry(8);
-        final MaxTotalPnlLossPolicy policy = new MaxTotalPnlLossPolicy(priceBuffer, emptyRegistry, false, 100L);
+        final MaxTotalPnlLossPolicy policy =
+                new MaxTotalPnlLossPolicy(priceBuffer, emptyRegistry, ListingDirectory.EMPTY, LISTING_ID, 0, 100L);
         assertFalse(policy.isViolated(STRATEGY_ID, LISTING_ID, positions, orders));
     }
 
@@ -198,6 +201,21 @@ class MaxTotalPnlLossPolicyTest {
     }
 
     @Test
+    void exchangeTotal_countsOnlyThatExchangesListings() {
+        final ListingDirectory directory =
+                TestListings.directory(TestListings.binary(LISTING_ID, 1), TestListings.binary(OTHER_LISTING_ID, 2));
+        positions.applyStrategyFill(STRATEGY_ID, LISTING_ID, Side.Bid, 1, 100, 0);
+        positions.getStrategyPosition(STRATEGY_ID, LISTING_ID).realizedPnl = -300L;
+        positions.applyStrategyFill(STRATEGY_ID, OTHER_LISTING_ID, Side.Bid, 1, 100, 0);
+        positions.getStrategyPosition(STRATEGY_ID, OTHER_LISTING_ID).realizedPnl = -300L;
+
+        final MaxTotalPnlLossPolicy onFirst =
+                new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, directory, 0, 1, 500L);
+        assertFalse(onFirst.isViolated(STRATEGY_ID, LISTING_ID, positions, orders), "only the $300 on exchange 1");
+        assertTrue(total(500L).isViolated(STRATEGY_ID, LISTING_ID, positions, orders), "$600 across both");
+    }
+
+    @Test
     void strategyTotal_aStrategyWithNoPositionsIsNotABreach() {
         assertFalse(total(0L).isViolated(99, LISTING_ID, positions, orders));
     }
@@ -242,7 +260,8 @@ class MaxTotalPnlLossPolicyTest {
         priceBuffer.writeTrade(priceSlot, 50L);
         // unrealizedPnl = 10 * (50 - 100) = -500
 
-        final MaxTotalPnlLossPolicy policy = new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, false);
+        final MaxTotalPnlLossPolicy policy =
+                new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, ListingDirectory.EMPTY, LISTING_ID, 0);
         policy.reconfigure(new ViewString("{\"maxLoss\": 499}"));
         assertTrue(policy.isViolated(STRATEGY_ID, LISTING_ID, positions, orders));
 
@@ -265,11 +284,12 @@ class MaxTotalPnlLossPolicyTest {
 
     /** Judges the (strategy, listing) position it is asked about, as a listing-scoped limit does. */
     private MaxTotalPnlLossPolicy pair(final long maxLoss) {
-        return new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, false, maxLoss);
+        return new MaxTotalPnlLossPolicy(
+                priceBuffer, priceSlotRegistry, ListingDirectory.EMPTY, LISTING_ID, 0, maxLoss);
     }
 
     /** Judges the strategy's total across its listings, as a global or strategy-scoped limit does. */
     private MaxTotalPnlLossPolicy total(final long maxLoss) {
-        return new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, true, maxLoss);
+        return new MaxTotalPnlLossPolicy(priceBuffer, priceSlotRegistry, ListingDirectory.EMPTY, 0, 0, maxLoss);
     }
 }

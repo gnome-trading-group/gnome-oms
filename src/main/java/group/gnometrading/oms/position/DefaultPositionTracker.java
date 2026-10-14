@@ -85,26 +85,12 @@ public final class DefaultPositionTracker implements PositionTracker {
     }
 
     @Override
-    public void addStrategyLeaves(int strategyId, int listingId, Side side, long qty) {
-        getOrCreatePosition(positions, listingId).addLeaves(side, qty);
+    public void adjustStrategyLeaves(int strategyId, int listingId, Side side, long qtyChange, long notionalChange) {
+        getOrCreatePosition(positions, listingId).adjustLeaves(side, qtyChange, notionalChange);
 
         Position stratPosition = getOrCreateStrategyPosition(strategyId, listingId);
-        stratPosition.addLeaves(side, qty);
+        stratPosition.adjustLeaves(side, qtyChange, notionalChange);
         syncToSharedBuffer(stratPosition);
-    }
-
-    @Override
-    public void removeStrategyLeaves(int strategyId, int listingId, Side side, long qty) {
-        Position firmPosition = positions.get(listingId);
-        if (firmPosition != null) {
-            firmPosition.removeLeaves(side, qty);
-        }
-
-        Position stratPosition = getStrategyPosition(strategyId, listingId);
-        if (stratPosition != null) {
-            stratPosition.removeLeaves(side, qty);
-            syncToSharedBuffer(stratPosition);
-        }
     }
 
     @Override
