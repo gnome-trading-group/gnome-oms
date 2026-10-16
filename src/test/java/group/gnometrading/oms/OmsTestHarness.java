@@ -1,6 +1,8 @@
 package group.gnometrading.oms;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -144,16 +146,17 @@ public final class OmsTestHarness {
                 "SYM");
         when(securityMaster.getListing(exchangeId, securityId)).thenReturn(listing);
         when(securityMaster.getListing(listingId)).thenReturn(listing);
-        when(securityMaster.getListingSpec(listingId))
+        when(securityMaster.getListingSpec(eq(listingId), anyLong()))
                 .thenReturn(new ListingSpec(listingId, 1, lotSize, minNotional, 1, 0));
     }
 
     void stubTickSize(int listingId, long tickSize) {
-        when(securityMaster.getListingSpec(listingId)).thenReturn(new ListingSpec(listingId, tickSize, 0, 0, 1, 0));
+        when(securityMaster.getListingSpec(eq(listingId), anyLong()))
+                .thenReturn(new ListingSpec(listingId, tickSize, 0, 0, 1, 0));
     }
 
     void stubListingSpec(int listingId, long lotSize, long minNotional) {
-        when(securityMaster.getListingSpec(listingId))
+        when(securityMaster.getListingSpec(eq(listingId), anyLong()))
                 .thenReturn(new ListingSpec(listingId, 1, lotSize, minNotional, 1, 0));
     }
 

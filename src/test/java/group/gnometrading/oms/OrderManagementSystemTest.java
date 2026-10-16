@@ -2,6 +2,8 @@ package group.gnometrading.oms;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -111,7 +113,8 @@ class OrderManagementSystemTest {
 
     @Test
     void testAListingRuleRejectionNamesTheOrderAndTheRule() {
-        when(securityMaster.getListingSpec(LISTING_ID)).thenReturn(new ListingSpec(LISTING_ID, 10, 0, 0, 1, 0));
+        when(securityMaster.getListingSpec(eq(LISTING_ID), anyLong()))
+                .thenReturn(new ListingSpec(LISTING_ID, 10, 0, 0, 1, 0));
         submitIntent(105L, 10L);
         assertEquals(
                 List.of("ORDER_REJECTED_EXCHANGE_CONSTRAINTS 1 100 66 105 10 2"),
@@ -570,7 +573,7 @@ class OrderManagementSystemTest {
     }
 
     private void stubSpec(long lotSize, long minNotional, long minSize) {
-        when(securityMaster.getListingSpec(LISTING_ID))
+        when(securityMaster.getListingSpec(eq(LISTING_ID), anyLong()))
                 .thenReturn(new ListingSpec(LISTING_ID, 1, lotSize, minNotional, 1, minSize));
     }
 

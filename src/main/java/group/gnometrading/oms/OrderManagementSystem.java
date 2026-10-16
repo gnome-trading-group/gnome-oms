@@ -752,7 +752,7 @@ public final class OrderManagementSystem {
             }
             final int exchangeId = order.decoder.exchangeId();
             final long slippage = riskEngine.marketSlippage(strategyId, listingId, exchangeId);
-            final ListingSpec spec = securityMaster.getListingSpec(listingId);
+            final ListingSpec spec = securityMaster.getListingSpec(listingId, clock.nanoTime());
             final long price = MarketOrderPricing.worstPrice(
                     side,
                     touch,
@@ -904,7 +904,7 @@ public final class OrderManagementSystem {
          * not checked on that field.
          */
         private int brokenListingRule(int listingId, long price, long size) {
-            ListingSpec spec = securityMaster.getListingSpec(listingId);
+            ListingSpec spec = securityMaster.getListingSpec(listingId, clock.nanoTime());
             if (spec == null) {
                 return NO_RULE;
             }
