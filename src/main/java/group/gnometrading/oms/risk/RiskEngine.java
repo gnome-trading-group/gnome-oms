@@ -14,8 +14,10 @@ import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.schemas.Side;
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.LockSupport;
 import java.util.function.IntConsumer;
 import java.util.function.LongConsumer;
 import org.agrona.collections.IntHashSet;
@@ -61,6 +63,7 @@ public final class RiskEngine {
     // A spinning OMS loop still checks far more often than once a millisecond while reading the clock rarely.
     private static final int STALE_CHECK_PASSES = 1024;
     private static final long NEVER = Long.MIN_VALUE;
+    private static final long FIRST_REFRESH_POLL_NANOS = TimeUnit.MILLISECONDS.toNanos(10);
 
     private final AtomicReference<RiskEngineSnapshot> snapshot;
     private RiskEngineSnapshot applied;
@@ -466,6 +469,26 @@ public final class RiskEngine {
     public boolean isStale(final long nowMs) {
         final long refreshedAt = lastRefreshMs;
         return clock != null && (refreshedAt == NEVER || nowMs - refreshedAt > staleAfterMs);
+    }
+
+    /**
+     * Blocks until the first refresh succeeds, for at most the stale threshold, and says whether it did. A session
+     * waits here before starting its strategy, whose first orders would otherwise be refused as stale while the first
+     * registry call is still in flight. Waiting longer is pointless: past the threshold the engine would be stale
+     * anyway. An engine without a registry is never stale, so it never waits.
+     */
+    public boolean awaitFirstRefresh() {
+        if (clock == null) {
+            return true;
+        }
+        final long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(staleAfterMs);
+        while (lastRefreshMs == NEVER) {
+            if (System.nanoTime() - deadline >= 0) {
+                return false;
+            }
+            LockSupport.parkNanos(FIRST_REFRESH_POLL_NANOS);
+        }
+        return true;
     }
 
     /** Whether the latest policies leave a required one missing, so every order is refused. Any thread. */

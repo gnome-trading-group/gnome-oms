@@ -22,6 +22,8 @@ import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.schemas.Side;
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.LockSupport;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -113,6 +115,34 @@ class RiskEngineTest {
         assertFalse(engine.isStale(now[0] + 30_000));
         assertTrue(engine.isStale(now[0] + 30_001));
         assertFalse(new RiskEngine().isStale(now[0]), "an engine without a registry is never stale");
+    }
+
+    @Test
+    void testAwaitingTheFirstRefreshReturnsOnceTheSyncThreadRecordsIt() throws InterruptedException {
+        final RiskEngine engine =
+                RiskEngine.syncedFromRegistry(() -> 1_000, Duration.ofSeconds(30), ListingDirectory.EMPTY, 1);
+        final Thread sync = new Thread(() -> {
+            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(50));
+            engine.recordRefresh(1_000);
+        });
+        sync.start();
+        final long start = System.nanoTime();
+        assertTrue(engine.awaitFirstRefresh());
+        assertTrue(System.nanoTime() - start < TimeUnit.SECONDS.toNanos(10), "didn't wait out the stale threshold");
+        sync.join();
+    }
+
+    @Test
+    void testAwaitingTheFirstRefreshGivesUpAtTheStaleThreshold() {
+        final RiskEngine engine =
+                RiskEngine.syncedFromRegistry(() -> 1_000, Duration.ofMillis(50), ListingDirectory.EMPTY, 1);
+        assertFalse(engine.awaitFirstRefresh());
+        assertTrue(engine.isStale(1_000), "still refuses orders until a refresh lands");
+    }
+
+    @Test
+    void testAnEngineWithoutARegistryNeverWaitsForARefresh() {
+        assertTrue(new RiskEngine().awaitFirstRefresh());
     }
 
     @Test
