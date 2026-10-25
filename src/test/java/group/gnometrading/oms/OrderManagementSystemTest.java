@@ -101,7 +101,7 @@ class OrderManagementSystemTest {
 
         Listing listing = new Listing(
                 LISTING_ID,
-                new Exchange(EXCHANGE_ID, "KALSHI", "Test", "US", null),
+                new Exchange(EXCHANGE_ID, "KALSHI", "Test", "US"),
                 new Security(SECURITY_ID, "SYM", null, null, null, null, null, null, false, false, 0L, 0L, true, 0),
                 "SYM",
                 "SYM");

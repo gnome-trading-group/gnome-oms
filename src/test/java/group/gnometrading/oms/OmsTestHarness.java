@@ -140,7 +140,7 @@ public final class OmsTestHarness {
             int exchangeId, int securityId, int listingId, long lotSize, long minNotional, String exchangeCode) {
         Listing listing = new Listing(
                 listingId,
-                new Exchange(exchangeId, exchangeCode, "Test", "US", null),
+                new Exchange(exchangeId, exchangeCode, "Test", "US"),
                 new Security(securityId, "SYM", null, null, null, null, null, null, false, false, 0L, 0L, true, 0),
                 "SYM",
                 "SYM");

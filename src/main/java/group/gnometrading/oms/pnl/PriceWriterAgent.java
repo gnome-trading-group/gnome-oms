@@ -1,15 +1,15 @@
 package group.gnometrading.oms.pnl;
 
-import group.gnometrading.SecurityMaster;
 import group.gnometrading.collections.IntToIntHashMap;
 import group.gnometrading.concurrent.GnomeAgent;
-import group.gnometrading.schemas.Action;
-import group.gnometrading.schemas.MboDecoder;
+import group.gnometrading.md.StreamDirectory;
 import group.gnometrading.schemas.MboSchema;
-import group.gnometrading.schemas.Mbp10Decoder;
 import group.gnometrading.schemas.Mbp10Schema;
-import group.gnometrading.schemas.Mbp1Decoder;
 import group.gnometrading.schemas.Mbp1Schema;
+import group.gnometrading.schemas.book.Action;
+import group.gnometrading.schemas.book.MboDecoder;
+import group.gnometrading.schemas.book.Mbp10Decoder;
+import group.gnometrading.schemas.book.Mbp1Decoder;
 import group.gnometrading.sequencer.SequencedEventHandler;
 import group.gnometrading.sequencer.SequencedPoller;
 import group.gnometrading.sequencer.SequencedRingBuffer;
@@ -21,13 +21,15 @@ import org.agrona.concurrent.UnsafeBuffer;
  * <p>MBP1 and MBP10 messages carry the top of book on every action, so each one writes the best bid and ask;
  * a trade also writes the last trade price. MBO messages carry no book, so only their trades are written.
  *
+ * <p>Records name only their stream; the session's {@link StreamDirectory} gives the listing whose price slot it is.
+ *
  * <p>Run via {@link group.gnometrading.concurrent.GnomeAgentRunner} on its own thread.
  */
 public final class PriceWriterAgent implements GnomeAgent, SequencedEventHandler {
 
     private final SharedPriceBuffer priceBuffer;
     private final PriceSlotRegistry priceSlotRegistry;
-    private final SecurityMaster securityMaster;
+    private final StreamDirectory streams;
     private final SequencedPoller marketDataPoller;
 
     private final MboSchema mbo = new MboSchema();
@@ -37,11 +39,11 @@ public final class PriceWriterAgent implements GnomeAgent, SequencedEventHandler
     public PriceWriterAgent(
             final SharedPriceBuffer priceBuffer,
             final PriceSlotRegistry priceSlotRegistry,
-            final SecurityMaster securityMaster,
+            final StreamDirectory streams,
             final SequencedRingBuffer<?> marketDataBuffer) {
         this.priceBuffer = priceBuffer;
         this.priceSlotRegistry = priceSlotRegistry;
-        this.securityMaster = securityMaster;
+        this.streams = streams;
         this.marketDataPoller = marketDataBuffer.createPoller(this);
     }
 
@@ -61,19 +63,19 @@ public final class PriceWriterAgent implements GnomeAgent, SequencedEventHandler
         if (templateId == MboDecoder.TEMPLATE_ID) {
             mbo.wrap(buf);
             if (mbo.decoder.action() == Action.Trade) {
-                final int slot = slotFor(mbo.decoder.exchangeId(), (int) mbo.decoder.securityId());
+                final int slot = slotFor(mbo.streamId());
                 writeTrade(slot, mbo.decoder.price());
             }
         } else if (templateId == Mbp1Decoder.TEMPLATE_ID) {
             mbp1.wrap(buf);
-            final int slot = slotFor(mbp1.decoder.exchangeId(), (int) mbp1.decoder.securityId());
+            final int slot = slotFor(mbp1.streamId());
             writeQuote(slot, mbp1.decoder.bidPrice0(), mbp1.decoder.askPrice0());
             if (mbp1.decoder.action() == Action.Trade) {
                 writeTrade(slot, mbp1.decoder.price());
             }
         } else if (templateId == Mbp10Decoder.TEMPLATE_ID) {
             mbp10.wrap(buf);
-            final int slot = slotFor(mbp10.decoder.exchangeId(), (int) mbp10.decoder.securityId());
+            final int slot = slotFor(mbp10.streamId());
             writeQuote(slot, mbp10.decoder.bidPrice0(), mbp10.decoder.askPrice0());
             if (mbp10.decoder.action() == Action.Trade) {
                 writeTrade(slot, mbp10.decoder.price());
@@ -81,9 +83,8 @@ public final class PriceWriterAgent implements GnomeAgent, SequencedEventHandler
         }
     }
 
-    private int slotFor(final int exchangeId, final int securityId) {
-        return priceSlotRegistry.getSlot(
-                securityMaster.getListing(exchangeId, securityId).listingId());
+    private int slotFor(final int streamId) {
+        return priceSlotRegistry.getSlot(streams.listingId(streamId));
     }
 
     private void writeTrade(final int slot, final long price) {

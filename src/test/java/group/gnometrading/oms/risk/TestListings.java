@@ -35,7 +35,7 @@ public final class TestListings {
             final ContractType contractType) {
         return new Listing(
                 listingId,
-                new Exchange(exchangeId, exchangeCode, exchangeCode, "us-east-1", null),
+                new Exchange(exchangeId, exchangeCode, exchangeCode, "us-east-1"),
                 new Security(
                         listingId, "SYM", type, contractType, null, null, null, null, false, false, 0L, 0L, true, 0),
                 "SYM",

@@ -100,27 +100,24 @@ public final class OmsAgent implements GnomeAgent, SequencedEventHandler, Action
     @Override
     public void onNewOrder(final Order order) {
         order.encoder.timestampSend(nanoClock.nanoTime());
-        orderOutboundBuffer.publishRaw(order.buffer, order.messageHeaderDecoder.templateId(), order.totalMessageSize());
+        orderOutboundBuffer.publishRaw(order.buffer, order.templateId(), order.totalMessageSize());
     }
 
     @Override
     public void onCancel(final CancelOrder cancel) {
         cancel.encoder.timestampSend(nanoClock.nanoTime());
-        orderOutboundBuffer.publishRaw(
-                cancel.buffer, cancel.messageHeaderDecoder.templateId(), cancel.totalMessageSize());
+        orderOutboundBuffer.publishRaw(cancel.buffer, cancel.templateId(), cancel.totalMessageSize());
     }
 
     @Override
     public void onModify(final ModifyOrder modify) {
         modify.encoder.timestampSend(nanoClock.nanoTime());
-        orderOutboundBuffer.publishRaw(
-                modify.buffer, modify.messageHeaderDecoder.templateId(), modify.totalMessageSize());
+        orderOutboundBuffer.publishRaw(modify.buffer, modify.templateId(), modify.totalMessageSize());
     }
 
     @Override
     public void onExecReport(final OrderExecutionReport report) {
-        strategyExecReportBuffer.publishRaw(
-                report.buffer, report.messageHeaderDecoder.templateId(), report.totalMessageSize());
+        strategyExecReportBuffer.publishRaw(report.buffer, report.templateId(), report.totalMessageSize());
     }
 
     @Override

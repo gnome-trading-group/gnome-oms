@@ -2,23 +2,24 @@ package group.gnometrading.oms.pnl;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.when;
 
-import group.gnometrading.SecurityMaster;
-import group.gnometrading.schemas.Action;
-import group.gnometrading.schemas.MboDecoder;
+import group.gnometrading.md.Stream;
+import group.gnometrading.md.StreamDirectory;
 import group.gnometrading.schemas.MboSchema;
-import group.gnometrading.schemas.Mbp10Decoder;
-import group.gnometrading.schemas.Mbp10Encoder;
 import group.gnometrading.schemas.Mbp10Schema;
-import group.gnometrading.schemas.Mbp1Decoder;
 import group.gnometrading.schemas.Mbp1Schema;
-import group.gnometrading.schemas.Side;
+import group.gnometrading.schemas.book.Action;
+import group.gnometrading.schemas.book.MboDecoder;
+import group.gnometrading.schemas.book.Mbp10Decoder;
+import group.gnometrading.schemas.book.Mbp10Encoder;
+import group.gnometrading.schemas.book.Mbp1Decoder;
+import group.gnometrading.schemas.book.Side;
 import group.gnometrading.sequencer.SequencedPoller;
 import group.gnometrading.sequencer.SequencedRingBuffer;
+import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
+import group.gnometrading.sm.Security;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -29,12 +30,10 @@ import org.mockito.junit.jupiter.MockitoExtension;
 @ExtendWith(MockitoExtension.class)
 class PriceWriterAgentTest {
 
-    private static final int EXCHANGE_ID = 1;
-    private static final int SECURITY_ID = 42;
+    private static final int STREAM_ID = 7;
     private static final int LISTING_ID = 100;
 
-    @Mock
-    private SecurityMaster securityMaster;
+    private StreamDirectory streams;
 
     @Mock
     private SequencedRingBuffer<?> ringBuffer;
@@ -54,12 +53,17 @@ class PriceWriterAgentTest {
         slot = priceSlotRegistry.register(LISTING_ID);
 
         when(ringBuffer.createPoller(any())).thenReturn(poller);
-        // getListing is stubbed as lenient — MBO messages only look it up for trades
-        lenient()
-                .when(securityMaster.getListing(anyInt(), anyInt()))
-                .thenReturn(new Listing(LISTING_ID, null, null, null, null));
+        streams = new StreamDirectory();
+        streams.add(
+                new Stream(STREAM_ID, 1, "KALSHI", "LISTING", LISTING_ID, null, "book", "us-east-1", 0, 0L, 0L, true),
+                new Listing(
+                        LISTING_ID,
+                        new Exchange(1, "KALSHI", "Kalshi", "us-east-1"),
+                        new Security(42, "X", null, null, null, null, null, null, false, false, 0L, 0L, false, 0),
+                        "MKT:yes",
+                        "MKT"));
 
-        agent = new PriceWriterAgent(priceBuffer, priceSlotRegistry, securityMaster, ringBuffer);
+        agent = new PriceWriterAgent(priceBuffer, priceSlotRegistry, streams, ringBuffer);
     }
 
     // Helper: build an external UnsafeBuffer from a schema (simulates what the ring buffer delivers)
@@ -86,11 +90,7 @@ class PriceWriterAgentTest {
     @Test
     void mbo_tradeAction_writesPrice() throws Exception {
         final MboSchema schema = new MboSchema();
-        schema.encoder
-                .exchangeId(EXCHANGE_ID)
-                .securityId(SECURITY_ID)
-                .price(12345L)
-                .action(Action.Trade);
+        schema.encoder.streamId(STREAM_ID).price(12345L).action(Action.Trade);
 
         agent.onSequencedEvent(0, MboDecoder.TEMPLATE_ID, externalBufferFrom(schema), schema.totalMessageSize());
 
@@ -102,19 +102,11 @@ class PriceWriterAgentTest {
         // Encode into an external buffer and write a distinct price to the agent's internal schema
         // buffer to confirm the agent wraps (reads from external) rather than the internal copy.
         final MboSchema external = new MboSchema();
-        external.encoder
-                .exchangeId(EXCHANGE_ID)
-                .securityId(SECURITY_ID)
-                .price(99999L)
-                .action(Action.Trade);
+        external.encoder.streamId(STREAM_ID).price(99999L).action(Action.Trade);
 
         final MboSchema internal = new MboSchema();
         // Deliberately put a different price in internal schema's buffer (decoy)
-        internal.encoder
-                .exchangeId(EXCHANGE_ID)
-                .securityId(SECURITY_ID)
-                .price(1L)
-                .action(Action.Trade);
+        internal.encoder.streamId(STREAM_ID).price(1L).action(Action.Trade);
 
         // Pass the external buffer; if agent wraps correctly it reads 99999, not 1
         agent.onSequencedEvent(0, MboDecoder.TEMPLATE_ID, externalBufferFrom(external), external.totalMessageSize());
@@ -125,11 +117,7 @@ class PriceWriterAgentTest {
     @Test
     void mbo_nonTradeAction_doesNotWritePrice() throws Exception {
         final MboSchema schema = new MboSchema();
-        schema.encoder
-                .exchangeId(EXCHANGE_ID)
-                .securityId(SECURITY_ID)
-                .price(9999L)
-                .action(Action.Add);
+        schema.encoder.streamId(STREAM_ID).price(9999L).action(Action.Add);
 
         agent.onSequencedEvent(0, MboDecoder.TEMPLATE_ID, externalBufferFrom(schema), schema.totalMessageSize());
 
@@ -139,11 +127,7 @@ class PriceWriterAgentTest {
     @Test
     void mbo_cancelAction_doesNotWritePrice() throws Exception {
         final MboSchema schema = new MboSchema();
-        schema.encoder
-                .exchangeId(EXCHANGE_ID)
-                .securityId(SECURITY_ID)
-                .price(500L)
-                .action(Action.Cancel);
+        schema.encoder.streamId(STREAM_ID).price(500L).action(Action.Cancel);
 
         agent.onSequencedEvent(0, MboDecoder.TEMPLATE_ID, externalBufferFrom(schema), schema.totalMessageSize());
 
@@ -156,8 +140,7 @@ class PriceWriterAgentTest {
     void mbp1_tradeAction_writesPrice() throws Exception {
         final Mbp1Schema schema = new Mbp1Schema();
         schema.encoder
-                .exchangeId(EXCHANGE_ID)
-                .securityId(SECURITY_ID)
+                .streamId(STREAM_ID)
                 .price(5000L)
                 .action(Action.Trade)
                 .side(Side.Ask)
@@ -172,8 +155,7 @@ class PriceWriterAgentTest {
     void mbp1_tradeAction_readsFromIncomingBuffer() throws Exception {
         final Mbp1Schema schema = new Mbp1Schema();
         schema.encoder
-                .exchangeId(EXCHANGE_ID)
-                .securityId(SECURITY_ID)
+                .streamId(STREAM_ID)
                 .price(7777L)
                 .action(Action.Trade)
                 .side(Side.Bid)
@@ -188,8 +170,7 @@ class PriceWriterAgentTest {
     void mbp1_nonTradeAction_writesQuoteButNotTrade() throws Exception {
         final Mbp1Schema schema = new Mbp1Schema();
         schema.encoder
-                .exchangeId(EXCHANGE_ID)
-                .securityId(SECURITY_ID)
+                .streamId(STREAM_ID)
                 .price(5000L)
                 .action(Action.Modify)
                 .side(Side.Bid)
@@ -199,8 +180,8 @@ class PriceWriterAgentTest {
 
         agent.onSequencedEvent(0, Mbp1Decoder.TEMPLATE_ID, externalBufferFrom(schema), schema.totalMessageSize());
 
-        assertEquals(4200L, priceBuffer.executionPrice(slot, Side.Bid));
-        assertEquals(4000L, priceBuffer.executionPrice(slot, Side.Ask));
+        assertEquals(4200L, priceBuffer.executionPrice(slot, group.gnometrading.schemas.Side.Bid));
+        assertEquals(4000L, priceBuffer.executionPrice(slot, group.gnometrading.schemas.Side.Ask));
         assertEquals(4100L, priceBuffer.markPrice(slot));
     }
 
@@ -210,8 +191,7 @@ class PriceWriterAgentTest {
     void mbp10_tradeAction_writesPrice() throws Exception {
         final Mbp10Schema schema = new Mbp10Schema();
         schema.encoder
-                .exchangeId(EXCHANGE_ID)
-                .securityId(SECURITY_ID)
+                .streamId(STREAM_ID)
                 .price(7500L)
                 .action(Action.Trade)
                 .side(Side.Ask)
@@ -226,8 +206,7 @@ class PriceWriterAgentTest {
     void mbp10_tradeAction_readsFromIncomingBuffer() throws Exception {
         final Mbp10Schema schema = new Mbp10Schema();
         schema.encoder
-                .exchangeId(EXCHANGE_ID)
-                .securityId(SECURITY_ID)
+                .streamId(STREAM_ID)
                 .price(8888L)
                 .action(Action.Trade)
                 .side(Side.Bid)
@@ -242,8 +221,7 @@ class PriceWriterAgentTest {
     void mbp10_nonTradeAction_writesQuoteButNotTrade() throws Exception {
         final Mbp10Schema schema = new Mbp10Schema();
         schema.encoder
-                .exchangeId(EXCHANGE_ID)
-                .securityId(SECURITY_ID)
+                .streamId(STREAM_ID)
                 .price(7500L)
                 .action(Action.Cancel)
                 .side(Side.Bid)
@@ -253,16 +231,15 @@ class PriceWriterAgentTest {
 
         agent.onSequencedEvent(0, Mbp10Decoder.TEMPLATE_ID, externalBufferFrom(schema), schema.totalMessageSize());
 
-        assertEquals(7400L, priceBuffer.executionPrice(slot, Side.Bid));
-        assertEquals(7000L, priceBuffer.executionPrice(slot, Side.Ask));
+        assertEquals(7400L, priceBuffer.executionPrice(slot, group.gnometrading.schemas.Side.Bid));
+        assertEquals(7000L, priceBuffer.executionPrice(slot, group.gnometrading.schemas.Side.Ask));
     }
 
     @Test
     void mbp10_nonTradeAction_withoutQuoteLeavesNoPrice() throws Exception {
         final Mbp10Schema schema = new Mbp10Schema();
         schema.encoder
-                .exchangeId(EXCHANGE_ID)
-                .securityId(SECURITY_ID)
+                .streamId(STREAM_ID)
                 .price(7500L)
                 .action(Action.Cancel)
                 .side(Side.Bid)
@@ -277,8 +254,7 @@ class PriceWriterAgentTest {
     void mbp10_emptySide_isStoredAsUnknown() throws Exception {
         final Mbp10Schema schema = new Mbp10Schema();
         schema.encoder
-                .exchangeId(EXCHANGE_ID)
-                .securityId(SECURITY_ID)
+                .streamId(STREAM_ID)
                 .action(Action.Add)
                 .side(Side.Bid)
                 .sequence(1L)
@@ -287,16 +263,15 @@ class PriceWriterAgentTest {
 
         agent.onSequencedEvent(0, Mbp10Decoder.TEMPLATE_ID, externalBufferFrom(schema), schema.totalMessageSize());
 
-        assertEquals(0L, priceBuffer.executionPrice(slot, Side.Bid));
-        assertEquals(7000L, priceBuffer.executionPrice(slot, Side.Ask));
+        assertEquals(0L, priceBuffer.executionPrice(slot, group.gnometrading.schemas.Side.Bid));
+        assertEquals(7000L, priceBuffer.executionPrice(slot, group.gnometrading.schemas.Side.Ask));
     }
 
     @Test
     void mbp10_tradeAction_writesQuoteAndTrade() throws Exception {
         final Mbp10Schema schema = new Mbp10Schema();
         schema.encoder
-                .exchangeId(EXCHANGE_ID)
-                .securityId(SECURITY_ID)
+                .streamId(STREAM_ID)
                 .price(7300L)
                 .action(Action.Trade)
                 .side(Side.Ask)
@@ -306,8 +281,8 @@ class PriceWriterAgentTest {
 
         agent.onSequencedEvent(0, Mbp10Decoder.TEMPLATE_ID, externalBufferFrom(schema), schema.totalMessageSize());
 
-        assertEquals(7300L, priceBuffer.executionPrice(slot, Side.Bid));
-        assertEquals(7000L, priceBuffer.executionPrice(slot, Side.Ask));
+        assertEquals(7300L, priceBuffer.executionPrice(slot, group.gnometrading.schemas.Side.Bid));
+        assertEquals(7000L, priceBuffer.executionPrice(slot, group.gnometrading.schemas.Side.Ask));
     }
 
     // --- successive events update the price ---
@@ -315,19 +290,11 @@ class PriceWriterAgentTest {
     @Test
     void successiveTrades_overwritePrice() throws Exception {
         final MboSchema first = new MboSchema();
-        first.encoder
-                .exchangeId(EXCHANGE_ID)
-                .securityId(SECURITY_ID)
-                .price(100L)
-                .action(Action.Trade);
+        first.encoder.streamId(STREAM_ID).price(100L).action(Action.Trade);
         agent.onSequencedEvent(0, MboDecoder.TEMPLATE_ID, externalBufferFrom(first), first.totalMessageSize());
 
         final MboSchema second = new MboSchema();
-        second.encoder
-                .exchangeId(EXCHANGE_ID)
-                .securityId(SECURITY_ID)
-                .price(200L)
-                .action(Action.Trade);
+        second.encoder.streamId(STREAM_ID).price(200L).action(Action.Trade);
         agent.onSequencedEvent(1, MboDecoder.TEMPLATE_ID, externalBufferFrom(second), second.totalMessageSize());
 
         assertEquals(200L, priceBuffer.markPrice(slot));
@@ -339,14 +306,10 @@ class PriceWriterAgentTest {
     void unregisteredListing_doesNotThrow() throws Exception {
         final PriceSlotRegistry emptyRegistry = new PriceSlotRegistry(8);
         final PriceWriterAgent agentWithEmptyRegistry =
-                new PriceWriterAgent(priceBuffer, emptyRegistry, securityMaster, ringBuffer);
+                new PriceWriterAgent(priceBuffer, emptyRegistry, streams, ringBuffer);
 
         final MboSchema schema = new MboSchema();
-        schema.encoder
-                .exchangeId(EXCHANGE_ID)
-                .securityId(SECURITY_ID)
-                .price(12345L)
-                .action(Action.Trade);
+        schema.encoder.streamId(STREAM_ID).price(12345L).action(Action.Trade);
 
         agentWithEmptyRegistry.onSequencedEvent(
                 0, MboDecoder.TEMPLATE_ID, externalBufferFrom(schema), schema.totalMessageSize());
