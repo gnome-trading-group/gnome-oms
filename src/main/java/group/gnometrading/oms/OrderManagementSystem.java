@@ -37,6 +37,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.function.IntConsumer;
 import org.agrona.collections.Int2IntHashMap;
+import org.agrona.collections.Long2LongHashMap;
 import org.agrona.concurrent.EpochNanoClock;
 
 public final class OrderManagementSystem {
@@ -67,6 +68,8 @@ public final class OrderManagementSystem {
     private final IntHashMap<IntentResolver> resolvers;
     // The halt cause last logged per strategy, so a halt is logged when it starts rather than for every order.
     private final Int2IntHashMap loggedHaltCauses = new Int2IntHashMap(NOT_HALTED);
+    // Per listing, the bad-data spell (its start) whose refusals were logged: one line per spell, not per order.
+    private final Long2LongHashMap loggedBadSince = new Long2LongHashMap(64, 0.65f, 0);
     private final LedgerSink ledger;
     private final IntConsumer ledgerFailureLatch = this::latchForLedger;
     private int passesUntilLedgerCheck;
@@ -672,6 +675,10 @@ public final class OrderManagementSystem {
         public void onNewOrder(final Order order) {
             final int strategyId = order.getClientOidStrategyId();
             final int listingId = resolveListingId(order.decoder.exchangeId(), order.decoder.securityId());
+            if (marketDataBad(order, strategyId, listingId)) {
+                emitNewOrderRejection(order, listingId, RejectReason.MARKET_DATA_BAD);
+                return;
+            }
             final int rule =
                     order.decoder.orderType() == OrderType.MARKET && !priceMarketOrder(order, strategyId, listingId)
                             ? RULE_NO_MARKET_PRICE
@@ -733,6 +740,27 @@ public final class OrderManagementSystem {
                     order.decoder.price(),
                     order.decoder.size(),
                     bookFull ? 0 : riskEngine.violatedPolicyId());
+        }
+
+        /**
+         * True when the listing's book is flagged bad data: nothing new may be priced off it until a good book
+         * arrives. Resting orders and cancels are left alone. Logs once per bad spell, not per order refused.
+         */
+        private boolean marketDataBad(final Order order, final int strategyId, final int listingId) {
+            final int slot = priceSlotRegistry.getSlot(listingId);
+            if (slot == IntToIntHashMap.MISSING) {
+                return false;
+            }
+            final long badSince = priceBuffer.badSince(slot);
+            if (badSince == 0) {
+                return false;
+            }
+            if (loggedBadSince.get(listingId) != badSince) {
+                loggedBadSince.put(listingId, badSince);
+                logger.log(
+                        LogMessage.ORDER_REJECTED_MARKET_DATA_BAD, order.getClientOidCounter(), strategyId, listingId);
+            }
+            return true;
         }
 
         /**
@@ -835,6 +863,10 @@ public final class OrderManagementSystem {
                     .orderType(original.getOrderType())
                     .timeInForce(original.getTimeInForce());
             final int listingId = resolveListingId(modify.decoder.exchangeId(), modify.decoder.securityId());
+            if (marketDataBad(riskCheckOrder, original.getStrategyId(), listingId)) {
+                emitModifyRejection(modify, original, listingId, RejectReason.MARKET_DATA_BAD);
+                return;
+            }
             final int rule = brokenListingRule(listingId, modify.decoder.price(), newLeaves);
             if (rule != NO_RULE) {
                 logConstraintRejection(riskCheckOrder, listingId, rule);

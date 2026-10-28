@@ -590,7 +590,7 @@ public final class OmsTestHarness {
             } else if (path.startsWith("/api/exchanges")) {
                 body = "[{\"exchange_id\": " + exchangeId
                         + ", \"exchange_code\": \"KALSHI\", \"exchange_name\": \"K\","
-                        + " \"region\": \"us-east-1\", \"schema_type\": \"mbp-10\"}]";
+                        + " \"region\": \"us-east-1\"}]";
             } else if (path.startsWith("/api/securities")) {
                 body = "[{\"security_id\": " + securityId + ", \"type\": 0, \"symbol\": \"S\"}]";
             } else {

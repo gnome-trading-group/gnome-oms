@@ -135,6 +135,10 @@ class OmsLifecycleAllocationTest {
             oms.processIntent(pull, sink);
             oms.processIntent(bid, sink);
             reports.reject(sink.lastOrderCounter, RejectReason.EXCHANGE_REJECTED);
+            // A new bad-data spell each cycle: the bid is refused and the refusal logged, then a good book clears it.
+            prices.markBad(slot, tick[0]);
+            oms.processIntent(bid, sink);
+            prices.markGood(slot);
             oms.checkMarkMoves(sink);
             oms.checkLedger(sink);
             // Stands in for the ledger agent, so the ring never fills.

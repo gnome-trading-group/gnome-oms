@@ -21,6 +21,9 @@ import org.agrona.concurrent.UnsafeBuffer;
  * <p>MBP1 and MBP10 messages carry the top of book on every action, so each one writes the best bid and ask;
  * a trade also writes the last trade price. MBO messages carry no book, so only their trades are written.
  *
+ * <p>A record flagged bad data (a gap, a resync, a lost feed) writes no prices and flags the listing's slot bad; the
+ * next good book record clears it. Marks so hold the last good book while it is bad.
+ *
  * <p>Records name only their stream; the session's {@link StreamDirectory} gives the listing whose price slot it is.
  *
  * <p>Run via {@link group.gnometrading.concurrent.GnomeAgentRunner} on its own thread.
@@ -62,29 +65,55 @@ public final class PriceWriterAgent implements GnomeAgent, SequencedEventHandler
             throws Exception {
         if (templateId == MboDecoder.TEMPLATE_ID) {
             mbo.wrap(buf);
-            if (mbo.decoder.action() == Action.Trade) {
-                final int slot = slotFor(mbo.streamId());
+            final int slot = slotFor(mbo.streamId());
+            // An MBO record carries no whole book, so only a bad one changes trust; a good one can't clear it.
+            if (mbo.isBadData()) {
+                markBad(slot, mbo.getEventTimestamp());
+            } else if (mbo.decoder.action() == Action.Trade) {
                 writeTrade(slot, mbo.decoder.price());
             }
         } else if (templateId == Mbp1Decoder.TEMPLATE_ID) {
             mbp1.wrap(buf);
             final int slot = slotFor(mbp1.streamId());
-            writeQuote(slot, mbp1.decoder.bidPrice0(), mbp1.decoder.askPrice0());
-            if (mbp1.decoder.action() == Action.Trade) {
-                writeTrade(slot, mbp1.decoder.price());
+            if (trusted(slot, mbp1.isBadData(), mbp1.getEventTimestamp())) {
+                writeQuote(slot, mbp1.decoder.bidPrice0(), mbp1.decoder.askPrice0());
+                if (mbp1.decoder.action() == Action.Trade) {
+                    writeTrade(slot, mbp1.decoder.price());
+                }
             }
         } else if (templateId == Mbp10Decoder.TEMPLATE_ID) {
             mbp10.wrap(buf);
             final int slot = slotFor(mbp10.streamId());
-            writeQuote(slot, mbp10.decoder.bidPrice0(), mbp10.decoder.askPrice0());
-            if (mbp10.decoder.action() == Action.Trade) {
-                writeTrade(slot, mbp10.decoder.price());
+            if (trusted(slot, mbp10.isBadData(), mbp10.getEventTimestamp())) {
+                writeQuote(slot, mbp10.decoder.bidPrice0(), mbp10.decoder.askPrice0());
+                if (mbp10.decoder.action() == Action.Trade) {
+                    writeTrade(slot, mbp10.decoder.price());
+                }
             }
         }
     }
 
     private int slotFor(final int streamId) {
         return priceSlotRegistry.getSlot(streams.listingId(streamId));
+    }
+
+    /** Flags or clears the slot from a book record; true when its prices may be written. */
+    private boolean trusted(final int slot, final boolean badData, final long eventTimestamp) {
+        if (slot == IntToIntHashMap.MISSING) {
+            return false;
+        }
+        if (badData) {
+            priceBuffer.markBad(slot, eventTimestamp);
+            return false;
+        }
+        priceBuffer.markGood(slot);
+        return true;
+    }
+
+    private void markBad(final int slot, final long eventTimestamp) {
+        if (slot != IntToIntHashMap.MISSING) {
+            priceBuffer.markBad(slot, eventTimestamp);
+        }
     }
 
     private void writeTrade(final int slot, final long price) {

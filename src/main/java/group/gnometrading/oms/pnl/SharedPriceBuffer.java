@@ -22,8 +22,12 @@ import org.agrona.concurrent.UnsafeBuffer;
  *   [8]  lastTrade  (long)
  *   [16] bid        (long) — best bid
  *   [24] ask        (long) — best ask
- *   [32] padding    (32 bytes)
+ *   [32] badSince   (long) — when the book was flagged bad data; 0 while it is trusted
+ *   [40] padding    (24 bytes)
  * </pre>
+ *
+ * <p>While a listing's book is flagged bad data its prices are not written, so marks hold the last good book; the
+ * OMS refuses new orders on it until a good book clears the flag.
  *
  * <p>A buffer-wide price epoch advances after every write that changes a price, so a reader can tell in one load
  * whether any mark has moved, then compare {@link #slotVersion} per slot to find which.
@@ -35,6 +39,7 @@ public final class SharedPriceBuffer {
     private static final int LAST_TRADE_OFFSET = 8;
     private static final int BID_OFFSET = 16;
     private static final int ASK_OFFSET = 24;
+    private static final int BAD_SINCE_OFFSET = 32;
 
     private final UnsafeBuffer buffer;
     private final int maxSlots;
@@ -92,6 +97,30 @@ public final class SharedPriceBuffer {
         buffer.putLong(base + ASK_OFFSET, ask);
         buffer.putLongVolatile(base + VERSION_OFFSET, version + 2);
         buffer.putLongRelease(epochOffset, ++epoch);
+    }
+
+    /**
+     * Flags the slot's book as bad data from {@code sinceNanos}, unless it already is. Must only be called from the
+     * writer thread.
+     */
+    public void markBad(int slot, long sinceNanos) {
+        int offset = slot * SLOT_SIZE + BAD_SINCE_OFFSET;
+        if (buffer.getLong(offset) == 0) {
+            buffer.putLongVolatile(offset, Math.max(1, sinceNanos));
+        }
+    }
+
+    /** Clears the slot's bad-data flag: a good book arrived. Must only be called from the writer thread. */
+    public void markGood(int slot) {
+        int offset = slot * SLOT_SIZE + BAD_SINCE_OFFSET;
+        if (buffer.getLong(offset) != 0) {
+            buffer.putLongVolatile(offset, 0);
+        }
+    }
+
+    /** When the slot's book was flagged bad data, or 0 while it is trusted (or has had no data yet). */
+    public long badSince(int slot) {
+        return buffer.getLongVolatile(slot * SLOT_SIZE + BAD_SINCE_OFFSET);
     }
 
     /** Advances after every write that changes any slot's prices. */

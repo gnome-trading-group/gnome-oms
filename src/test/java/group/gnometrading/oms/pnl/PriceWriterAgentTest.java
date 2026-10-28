@@ -187,6 +187,55 @@ class PriceWriterAgentTest {
 
     // --- MBP10 ---
 
+    private void mbp10Book(final long bid, final long ask, final Action action, final boolean badData)
+            throws Exception {
+        final Mbp10Schema schema = new Mbp10Schema();
+        schema.encoder
+                .streamId(STREAM_ID)
+                .timestampEvent(5_000L)
+                .price(ask)
+                .action(action)
+                .side(Side.Ask)
+                .sequence(1L)
+                .bidPrice0(bid)
+                .askPrice0(ask);
+        schema.encoder.flags().clear().badData(badData);
+        agent.onSequencedEvent(0, Mbp10Decoder.TEMPLATE_ID, externalBufferFrom(schema), schema.totalMessageSize());
+    }
+
+    @Test
+    void mbp10_badData_flagsTheSlotAndHoldsTheLastGoodPrices() throws Exception {
+        mbp10Book(7000L, 7400L, Action.Modify, false);
+        assertEquals(0, priceBuffer.badSince(slot));
+
+        mbp10Book(1000L, 9000L, Action.Modify, true);
+        mbp10Book(1000L, 9000L, Action.Trade, true);
+
+        assertEquals(5_000L, priceBuffer.badSince(slot));
+        assertEquals(7200L, priceBuffer.markPrice(slot), "a bad book moves no mark, nor does a bad trade");
+    }
+
+    @Test
+    void mbp10_goodBook_clearsTheFlagAndWritesPrices() throws Exception {
+        mbp10Book(7000L, 7400L, Action.Modify, true);
+        mbp10Book(7100L, 7300L, Action.Modify, false);
+
+        assertEquals(0, priceBuffer.badSince(slot));
+        assertEquals(7200L, priceBuffer.markPrice(slot));
+    }
+
+    @Test
+    void mbo_badTrade_flagsTheSlotWithoutAPrice() throws Exception {
+        final MboSchema schema = new MboSchema();
+        schema.encoder.streamId(STREAM_ID).timestampEvent(9_000L).price(4242L).action(Action.Trade);
+        schema.encoder.flags().clear().badData(true);
+
+        agent.onSequencedEvent(0, MboDecoder.TEMPLATE_ID, externalBufferFrom(schema), schema.totalMessageSize());
+
+        assertEquals(9_000L, priceBuffer.badSince(slot));
+        assertEquals(0, priceBuffer.markPrice(slot));
+    }
+
     @Test
     void mbp10_tradeAction_writesPrice() throws Exception {
         final Mbp10Schema schema = new Mbp10Schema();
