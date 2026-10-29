@@ -35,10 +35,11 @@ import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.ListingSpec;
 import group.gnometrading.sm.Security;
-import java.util.Arrays;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLongArray;
+import java.util.stream.IntStream;
 import org.agrona.concurrent.BackoffIdleStrategy;
 import org.agrona.concurrent.IdleStrategy;
 import org.agrona.concurrent.NoOpIdleStrategy;
@@ -48,7 +49,7 @@ import org.junit.jupiter.api.Test;
 
 /**
  * A market take's latency from the strategy sending it to the order leaving the OMS, while market data flows, with
- * the price writer on a thread of its own (as sessions ran it until 2026-10-29) and polled by the OMS (as they run it
+ * the price writer on a thread of its own (as sessions used to run it) and polled by the OMS (as they run it
  * now). Threads as in a session: feed, strategy, OMS, venue. Asks rise with every book, so a take priced below the ask
  * the strategy saw was priced off an older book ("stale"). Prints numbers rather than asserting; timings vary by
  * machine, so compare the modes within one run.
@@ -144,10 +145,15 @@ class PricedTakeLatencyBenchmarkTest {
 
         final long[] sentAt = new long[MAX_INTENTS];
         final long[] askSeen = new long[MAX_INTENTS];
-        final long[] latency = new long[MAX_INTENTS];
+        // Read by this thread after joins that may time out, so the threads' results must be safely published.
+        // -1 is unmeasured: warm-up, or refused before it reached the venue.
+        final AtomicLongArray latency = new AtomicLongArray(MAX_INTENTS);
+        for (int i = 0; i < MAX_INTENTS; i++) {
+            latency.set(i, -1);
+        }
         final AtomicInteger sent = new AtomicInteger();
         final AtomicInteger received = new AtomicInteger();
-        final int[] stale = new int[1];
+        final AtomicInteger stale = new AtomicInteger();
         final AtomicBoolean running = new AtomicBoolean(true);
         final long warmEnds = System.nanoTime() + WARMUP_NANOS;
 
@@ -183,12 +189,12 @@ class PricedTakeLatencyBenchmarkTest {
             sent.incrementAndGet();
         });
         final OrderExecutionReport report = new OrderExecutionReport();
-        final int[] refused = new int[1];
+        final AtomicInteger refused = new AtomicInteger();
         final SequencedPoller strategyFills = strategyReports.createPoller((seq, templateId, buffer, length) -> {
             report.buffer.putBytes(0, buffer, 0, length);
             report.wrap(report.buffer);
             if (report.decoder.execType() == ExecType.REJECT) {
-                refused[0]++;
+                refused.incrementAndGet();
                 received.incrementAndGet();
             }
         });
@@ -203,12 +209,10 @@ class PricedTakeLatencyBenchmarkTest {
             order.wrap(order.buffer);
             final int k = (int) (order.decoder.size() / TAKE_SIZE) - 1;
             if (sentAt[k] >= warmEnds) {
-                latency[k] = now - sentAt[k];
+                latency.set(k, now - sentAt[k]);
                 if (order.decoder.price() < askSeen[k]) {
-                    stale[0]++;
+                    stale.incrementAndGet();
                 }
-            } else {
-                latency[k] = -1;
             }
             final OrderExecutionReport fill = venueReports.claim();
             fill.encodeClientOid(order.getClientOidCounter(), order.getClientOidStrategyId());
@@ -270,23 +274,25 @@ class PricedTakeLatencyBenchmarkTest {
             }
         }
 
-        final int count = received.get();
-        final long[] measured =
-                Arrays.stream(latency, 0, count).filter(l -> l >= 0).sorted().toArray();
+        final long[] measured = IntStream.range(0, sent.get())
+                .mapToLong(latency::get)
+                .filter(l -> l >= 0)
+                .sorted()
+                .toArray();
         if (measured.length == 0) {
             return "no takes measured";
         }
         return String.format(
                 "n=%5d refused %d p50 %7.1f p90 %7.1f p99 %7.1f p99.9 %8.1f max %8.1f  stale %d (%.2f%%)",
                 measured.length,
-                refused[0],
+                refused.get(),
                 us(measured, 0.50),
                 us(measured, 0.90),
                 us(measured, 0.99),
                 us(measured, 0.999),
                 measured[measured.length - 1] / 1_000.0,
-                stale[0],
-                100.0 * stale[0] / measured.length);
+                stale.get(),
+                100.0 * stale.get() / measured.length);
     }
 
     private static double us(final long[] sorted, final double quantile) {

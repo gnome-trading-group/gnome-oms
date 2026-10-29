@@ -14,6 +14,11 @@ kill switches and halts, and writes a fills/orders ledger to the registry.
   separate surefire execution, one fresh JVM per class, because Mockito's inline mock maker makes even real
   `SecurityMaster` instances allocate once anything in the JVM mocks it.
 - `OmsLatencyBenchmarkTest` prints per-pass and intent latency numbers instead of asserting; compare before/after runs.
+- Benchmarks are `@Tag("benchmark")` and excluded from `mvn test`/`mvn verify` (about a minute each, print instead of
+  assert). Run one by clearing the default exclusion, e.g.
+  `mvn test -Dtest=group.gnometrading.oms.PricedTakeLatencyBenchmarkTest -Dtest.excludedGroups=allocation`.
+  `PricedTakeLatencyBenchmarkTest` times a market take from strategy send to order out, with the price writer on its
+  own thread versus polled by the OMS, and counts takes priced off an older book than the strategy saw.
 - Dependencies come from GitHub Packages (`maven.pkg.github.com/gnome-trading-group/*`); CI uses `-s settings.xml`
   with `GITHUB_ACTOR`/`GITHUB_TOKEN`; locally, put a GitHub token with `read:packages` in `~/.m2/settings.xml`.
 
@@ -34,10 +39,13 @@ All code is under `src/main/java/group/gnometrading/oms/`; tests mirror it under
 - `position/` - `DefaultPositionTracker`, `SharedPositionBuffer` (off-heap, seqlock, 64-byte slots) and
   `LivePositionView` for strategy threads.
 - `pnl/` - `PriceWriter` writes top of book / last trade from market data into `SharedPriceBuffer` for marks. In a
-  session it runs on the OMS thread (`OmsAgent` takes it and polls it at the start of every pass), so takes are
-  priced, and bad data checked, off every book the strategy saw before its intent; on its own thread it lagged by its
-  idle sleep (paper session 2026-10-29: takes priced off the previous ask). Backtests also poll it before the
-  strategy sees each record.
+  session it runs on the OMS thread: `OmsAgent` takes it and polls it at the start of every pass and again before
+  each intent, so takes are priced, and bad data checked, off every book the strategy saw before its
+  intent; on its own thread it lagged by its idle sleep, and takes went out priced off the previous ask. Backtests
+  also poll it before the strategy sees each record.
+  The price writer is a consumer of the strategy's market data ring, so a blocked OMS thread (e.g. waiting on a full
+  order outbound ring) stops the strategy's market data too once that ring fills. The `AGENT_STALLED` heartbeat
+  alert on the OMS agent is what catches it.
 - `ledger/` - `LedgerRing` (OMS thread publishes) and `LedgerAgent` (own thread, posts `/api/ledger/batch`).
 - `state/` - `PooledOrderStateManager`, `TrackedOrder`: pooled order book of working orders.
 - Tests: `OmsTestHarness` + scenario tests (`OmsScenarioTest`, `KillSwitchScenarioTest`, `ScopedPoliciesScenarioTest`,

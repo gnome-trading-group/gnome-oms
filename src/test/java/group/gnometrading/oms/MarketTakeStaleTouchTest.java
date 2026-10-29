@@ -15,15 +15,21 @@ import group.gnometrading.oms.pnl.PriceSlotRegistry;
 import group.gnometrading.oms.pnl.PriceWriter;
 import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.DefaultPositionTracker;
+import group.gnometrading.oms.position.Position;
 import group.gnometrading.oms.position.SharedPositionBuffer;
 import group.gnometrading.oms.risk.RiskEngine;
+import group.gnometrading.oms.state.OrderState;
 import group.gnometrading.oms.state.PooledOrderStateManager;
+import group.gnometrading.schemas.ExecType;
 import group.gnometrading.schemas.Intent;
+import group.gnometrading.schemas.Liquidity;
 import group.gnometrading.schemas.Mbp10Schema;
 import group.gnometrading.schemas.Order;
 import group.gnometrading.schemas.OrderDecoder;
 import group.gnometrading.schemas.OrderExecutionReport;
+import group.gnometrading.schemas.OrderStatus;
 import group.gnometrading.schemas.OrderType;
+import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.Statics;
 import group.gnometrading.schemas.TimeInForce;
@@ -40,15 +46,10 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 
 /**
- * Reproduces paper session f1cb2ef8 (2026-10-29), order 41: a market take priced at a touch the strategy had already
- * seen move. The strategy reacted to a new book (journal seq 369, ask 80065) and sent a market buy (seq 371); the OMS
- * priced the IOC at the previous ask, 80063, because {@link PriceWriter} runs on its own background thread
- * (1ms sleeping idle) and had not yet written seq 369 into the {@link SharedPriceBuffer}. With no slippage the IOC
- * never reaches the real ask and the venue (here the paper exchange) refuses it. Orders 96, 365 and 620 are the same
- * race (4 of 53 takes sent right after a book that moved their touch).
- *
- * <p>The OMS now drains the price writer on its own thread before every intent poll, so a take is priced off all
- * market data sequenced before the intent, which is what the strategy decided on.
+ * A market take must be priced off the book the strategy reacted to. The strategy reads a new book and sends a market
+ * buy before anything has written that book into the {@link SharedPriceBuffer}; priced off the previous ask, the IOC
+ * never reaches the real one and the venue refuses it. The OMS polls the price writer before every intent, so the take
+ * goes out at the new ask. Prices are from a recorded Hyperliquid BTC book.
  */
 class MarketTakeStaleTouchTest {
 
@@ -70,8 +71,55 @@ class MarketTakeStaleTouchTest {
             new SequencedRingBuffer<>(OrderExecutionReport::new, sequence, 64);
     private final List<Long> sentPrices = new ArrayList<>();
 
+    private final List<Long> sentCounters = new ArrayList<>();
+    private Runnable onFill = () -> {};
+    private PriceWriter priceWriter;
+    private OmsAgent omsAgent;
+    private SequencedPoller outboundPoller;
+
     @Test
     void marketTakeIsPricedOffTheBookTheStrategySawBeforeItsIntent() throws Exception {
+        buildOms();
+
+        // The book the price writer last wrote.
+        publishBook(80_062 * DOLLAR, 80_063 * DOLLAR);
+        priceWriter.poll();
+
+        // The book moves, and the strategy sees it and sends a market buy before anything has
+        // written that book into the price buffer.
+        publishBook(80_064 * DOLLAR, 80_065 * DOLLAR);
+        publishMarketBuy();
+        omsAgent.doWork();
+        outboundPoller.poll();
+
+        assertEquals(1, sentPrices.size());
+        assertEquals(80_065 * DOLLAR, sentPrices.get(0), "priced at a touch older than the book the strategy saw");
+    }
+
+    @Test
+    void marketTakeIsPricedOffABookPublishedWhileTheOmsHandledAnExecReport() throws Exception {
+        buildOms();
+        publishBook(80_062 * DOLLAR, 80_063 * DOLLAR);
+        publishMarketBuy();
+        omsAgent.doWork();
+        outboundPoller.poll();
+        assertEquals(80_063 * DOLLAR, sentPrices.get(0));
+
+        // The strategy runs on its own thread: while the OMS is booking the first take's fill, after the top of its
+        // pass, the book moves and the strategy sends another take off it.
+        onFill = () -> {
+            publishBook(80_064 * DOLLAR, 80_065 * DOLLAR);
+            publishMarketBuy();
+        };
+        publishFill(sentCounters.get(0), 80_063 * DOLLAR);
+        omsAgent.doWork();
+        outboundPoller.poll();
+
+        assertEquals(2, sentPrices.size(), "the second take went out in the same pass");
+        assertEquals(80_065 * DOLLAR, sentPrices.get(1), "priced at a touch older than the book the strategy saw");
+    }
+
+    private void buildOms() {
         SharedPriceBuffer priceBuffer = new SharedPriceBuffer(1);
         PriceSlotRegistry priceSlots = new PriceSlotRegistry(1);
         priceSlots.register(LISTING_ID);
@@ -111,34 +159,38 @@ class MarketTakeStaleTouchTest {
                 securityMaster,
                 priceBuffer,
                 priceSlots,
-                LedgerSink.NONE,
+                new FillHook(),
                 () -> 0L);
-        PriceWriter priceWriter = new PriceWriter(priceBuffer, priceSlots, streams, marketData);
-        OmsAgent omsAgent =
-                new OmsAgent(oms, intents, execReports, outbound, strategyExecReports, priceWriter, () -> 0L);
-        SequencedPoller outboundPoller = outbound.createPoller((seq, templateId, buffer, length) -> {
+        priceWriter = new PriceWriter(priceBuffer, priceSlots, streams, marketData);
+        omsAgent = new OmsAgent(oms, intents, execReports, outbound, strategyExecReports, priceWriter, () -> 0L);
+        outboundPoller = outbound.createPoller((seq, templateId, buffer, length) -> {
             if (templateId == OrderDecoder.TEMPLATE_ID) {
                 Order order = new Order();
                 order.buffer.putBytes(0, buffer, 0, length);
                 order.wrap(order.buffer);
                 assertEquals(TimeInForce.IMMEDIATE_OR_CANCELED, order.decoder.timeInForce());
                 sentPrices.add(order.decoder.price());
+                sentCounters.add(order.getClientOidCounter());
             }
         });
+    }
 
-        // Journal seq 334: the book the price writer last wrote.
-        publishBook(80_062 * DOLLAR, 80_063 * DOLLAR);
-        priceWriter.poll();
-
-        // Journal seq 369 then 371: the book moves, the strategy sees it and sends a market buy before anything has
-        // written that book into the price buffer.
-        publishBook(80_064 * DOLLAR, 80_065 * DOLLAR);
-        publishMarketBuy();
-        omsAgent.doWork();
-        outboundPoller.poll();
-
-        assertEquals(1, sentPrices.size());
-        assertEquals(80_065 * DOLLAR, sentPrices.get(0), "priced at a touch older than the book the strategy saw");
+    private void publishFill(long clientOidCounter, long price) {
+        OrderExecutionReport fill = execReports.claim();
+        fill.encodeClientOid(clientOidCounter, STRATEGY_ID);
+        fill.encoder
+                .exchangeId(EXCHANGE_ID)
+                .securityId(SECURITY_ID)
+                .execType(ExecType.FILL)
+                .orderStatus(OrderStatus.NULL_VAL)
+                .filledQty(TAKE_SIZE)
+                .fillPrice(price)
+                .cumulativeQty(TAKE_SIZE)
+                .leavesQty(0)
+                .rejectReason(RejectReason.NULL_VAL)
+                .fee(0);
+        fill.encoder.flags().clear();
+        execReports.publish();
     }
 
     private void publishBook(long bid, long ask) {
@@ -160,5 +212,68 @@ class MarketTakeStaleTouchTest {
         slot.buffer.putBytes(0, intent.buffer, 0, intent.totalMessageSize());
         slot.wrap(slot.buffer);
         intents.publish();
+    }
+
+    /** Runs {@link #onFill} when the OMS books a fill, standing in for a strategy thread publishing mid-pass. */
+    private final class FillHook implements LedgerSink {
+        @Override
+        public void orderOpened(
+                int strategyId,
+                int listingId,
+                int exchangeId,
+                long clientOidCounter,
+                Side side,
+                long price,
+                long size,
+                long timeNs) {}
+
+        @Override
+        public void orderAcked(
+                int strategyId, int listingId, int exchangeId, long clientOidCounter, OrderExecutionReport report) {}
+
+        @Override
+        public void orderModified(
+                int strategyId,
+                int listingId,
+                int exchangeId,
+                long clientOidCounter,
+                long price,
+                long size,
+                long timeNs) {}
+
+        @Override
+        public void fillBooked(
+                int strategyId,
+                int listingId,
+                long clientOidCounter,
+                long cumQtyAfter,
+                Side side,
+                long qty,
+                long price,
+                long fee,
+                long eventTimeNs,
+                Liquidity liquidity,
+                Position after) {
+            onFill.run();
+        }
+
+        @Override
+        public void orderClosed(
+                int strategyId,
+                int listingId,
+                int exchangeId,
+                long clientOidCounter,
+                long filledQty,
+                OrderState state,
+                RejectReason rejectReason,
+                long timeNs) {}
+
+        @Override
+        public void orderRefused(int listingId, RejectReason reason) {}
+
+        @Override
+        public boolean isFailing(long nowNs) {
+            return false;
+        }
     }
 }

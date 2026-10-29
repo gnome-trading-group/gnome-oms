@@ -50,10 +50,11 @@ public final class OmsAgent implements GnomeAgent, SequencedEventHandler, Action
     private final OrderExecutionReport execReport = new OrderExecutionReport();
 
     /**
-     * {@code priceWriter} is polled on this agent's thread at the start of every pass, so marks stay current, and again
-     * before each intent. The strategy reads market data before it sends the intent that reacts to it, so every book an
-     * intent was based on is in the price buffer before the OMS prices a market take or checks for bad data. On a thread of its own the writer lagged by up to its idle
-     * sleep, and takes went out priced off the previous book (paper session 2026-10-29).
+     * {@code priceWriter} is polled on this agent's thread at the start of every pass, so marks stay current while no
+     * intents arrive, and again before each intent. The strategy reads market data before it sends the intent that
+     * reacts to it, so every book an intent was based on is in the price buffer before the OMS prices a market take or
+     * checks for bad data. On a thread of its own the writer lagged by up to its idle sleep, and takes went out priced
+     * off the previous book.
      */
     public OmsAgent(
             final OrderManagementSystem oms,
@@ -98,8 +99,9 @@ public final class OmsAgent implements GnomeAgent, SequencedEventHandler, Action
     public void onSequencedEvent(final long globalSeq, final int templateId, final UnsafeBuffer buf, final int len)
             throws Exception {
         if (templateId == IntentDecoder.TEMPLATE_ID) {
-            // Again here, not only at the top of the pass: the strategy may have read a newer book and sent this intent
-            // since then. It read that book before publishing the intent, so the book is visible now.
+            // Only here is the intent known to be visible, and with it every book the strategy read before sending it.
+            // A poll between the two pollers leaves a gap: a book and intent published after it, but before the intent
+            // poller reads what is available, reach the intent without the book.
             priceWriter.poll();
             intent.wrap(buf);
             oms.processIntent(intent, this);
