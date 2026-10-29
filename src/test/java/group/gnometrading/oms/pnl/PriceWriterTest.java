@@ -28,7 +28,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 @ExtendWith(MockitoExtension.class)
-class PriceWriterAgentTest {
+class PriceWriterTest {
 
     private static final int STREAM_ID = 7;
     private static final int LISTING_ID = 100;
@@ -43,7 +43,7 @@ class PriceWriterAgentTest {
 
     private SharedPriceBuffer priceBuffer;
     private PriceSlotRegistry priceSlotRegistry;
-    private PriceWriterAgent agent;
+    private PriceWriter agent;
     private int slot;
 
     @BeforeEach
@@ -63,7 +63,7 @@ class PriceWriterAgentTest {
                         "MKT:yes",
                         "MKT"));
 
-        agent = new PriceWriterAgent(priceBuffer, priceSlotRegistry, streams, ringBuffer);
+        agent = new PriceWriter(priceBuffer, priceSlotRegistry, streams, ringBuffer);
     }
 
     // Helper: build an external UnsafeBuffer from a schema (simulates what the ring buffer delivers)
@@ -354,8 +354,7 @@ class PriceWriterAgentTest {
     @Test
     void unregisteredListing_doesNotThrow() throws Exception {
         final PriceSlotRegistry emptyRegistry = new PriceSlotRegistry(8);
-        final PriceWriterAgent agentWithEmptyRegistry =
-                new PriceWriterAgent(priceBuffer, emptyRegistry, streams, ringBuffer);
+        final PriceWriter agentWithEmptyRegistry = new PriceWriter(priceBuffer, emptyRegistry, streams, ringBuffer);
 
         final MboSchema schema = new MboSchema();
         schema.encoder.streamId(STREAM_ID).price(12345L).action(Action.Trade);

@@ -33,7 +33,11 @@ All code is under `src/main/java/group/gnometrading/oms/`; tests mirror it under
   `RiskPolicyType`), `CommittedCapital`, `MarketOrderPricing`.
 - `position/` - `DefaultPositionTracker`, `SharedPositionBuffer` (off-heap, seqlock, 64-byte slots) and
   `LivePositionView` for strategy threads.
-- `pnl/` - `PriceWriterAgent` writes top of book / last trade from market data into `SharedPriceBuffer` for marks.
+- `pnl/` - `PriceWriter` writes top of book / last trade from market data into `SharedPriceBuffer` for marks. In a
+  session it runs on the OMS thread (`OmsAgent` takes it and polls it at the start of every pass), so takes are
+  priced, and bad data checked, off every book the strategy saw before its intent; on its own thread it lagged by its
+  idle sleep (paper session 2026-10-29: takes priced off the previous ask). Backtests also poll it before the
+  strategy sees each record.
 - `ledger/` - `LedgerRing` (OMS thread publishes) and `LedgerAgent` (own thread, posts `/api/ledger/batch`).
 - `state/` - `PooledOrderStateManager`, `TrackedOrder`: pooled order book of working orders.
 - Tests: `OmsTestHarness` + scenario tests (`OmsScenarioTest`, `KillSwitchScenarioTest`, `ScopedPoliciesScenarioTest`,
@@ -64,7 +68,7 @@ All code is under `src/main/java/group/gnometrading/oms/`; tests mirror it under
 ## Operations
 
 - No stacks or infrastructure of its own. It runs inside a strategy session's orchestrator JVM
-  (`TradingOrchestrator` in gnome-orchestrator wires `OmsAgent`, `RiskSyncAgent`, `LedgerAgent`, `PriceWriterAgent`).
+  (`TradingOrchestrator` in gnome-orchestrator wires `OmsAgent`, `RiskSyncAgent`, `LedgerAgent`, `PriceWriter`).
 - Logs go to the session's orchestrator log, shipped to CloudWatch log group `/gnome/orchestrator/<region>`,
   stream `ec2/<instance-id>`. Key `LogMessage`s (defined in gnome-logging):
   - `ORDER_REJECTED_RISK_CHECK` - an order broke a limit; carries the registry policy id (0 = no registry policy,
@@ -77,7 +81,7 @@ All code is under `src/main/java/group/gnometrading/oms/`; tests mirror it under
   - `RISK_UNGUARDED` - live session missing a required policy on a listing; nothing trades until it is added.
   - `ORDER_REJECTED_MARKET_DATA_BAD` - the listing's book is flagged bad data (gateway gap, resync, lost feed; in
     backtests a collection gap), so new orders and modifies on it are refused with `MARKET_DATA_BAD` until a good
-    book arrives. Logged once per bad spell. Resting orders and cancels are untouched; `PriceWriterAgent` writes no
+    book arrives. Logged once per bad spell. Resting orders and cancels are untouched; `PriceWriter` writes no
     prices from bad records, so marks hold the last good book (`SharedPriceBuffer.badSince`).
   - `LEDGER_FAILING_HALTED`, `LEDGER_FENCED`, `LEDGER_WRITE_FAILED` - see ledger below.
   - "Risk policy refresh failed, keeping the last policies" (`UNKNOWN_ERROR`) - registry unreachable; if it lasts

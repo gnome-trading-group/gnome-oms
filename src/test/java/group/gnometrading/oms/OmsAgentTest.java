@@ -6,8 +6,10 @@ import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.when;
 
 import group.gnometrading.logging.NullLogger;
+import group.gnometrading.md.StreamDirectory;
 import group.gnometrading.oms.ledger.LedgerSink;
 import group.gnometrading.oms.pnl.PriceSlotRegistry;
+import group.gnometrading.oms.pnl.PriceWriter;
 import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.oms.position.DefaultPositionTracker;
 import group.gnometrading.oms.position.SharedPositionBuffer;
@@ -18,6 +20,7 @@ import group.gnometrading.schemas.CancelOrderDecoder;
 import group.gnometrading.schemas.ExecType;
 import group.gnometrading.schemas.Intent;
 import group.gnometrading.schemas.IntentDecoder;
+import group.gnometrading.schemas.Mbp10Schema;
 import group.gnometrading.schemas.Order;
 import group.gnometrading.schemas.OrderDecoder;
 import group.gnometrading.schemas.OrderExecutionReport;
@@ -82,19 +85,29 @@ class OmsAgentTest {
         PooledOrderStateManager orderStateManager = new PooledOrderStateManager(64);
         DefaultPositionTracker positionTracker = new DefaultPositionTracker(new SharedPositionBuffer(16));
         riskEngine = new RiskEngine();
+        SharedPriceBuffer priceBuffer = new SharedPriceBuffer(1);
+        PriceSlotRegistry priceSlots = new PriceSlotRegistry(1);
+        SequencedRingBuffer<Mbp10Schema> marketDataBuffer =
+                new SequencedRingBuffer<>(Mbp10Schema::new, new GlobalSequence());
         oms = new OrderManagementSystem(
                 new NullLogger(),
                 orderStateManager,
                 positionTracker,
                 riskEngine,
                 securityMaster,
-                new SharedPriceBuffer(1),
-                new PriceSlotRegistry(1),
+                priceBuffer,
+                priceSlots,
                 LedgerSink.NONE,
                 () -> 0L);
 
         omsAgent = new OmsAgent(
-                oms, intentBuffer, execReportBuffer, orderOutboundBuffer, strategyExecReportBuffer, () -> 0L);
+                oms,
+                intentBuffer,
+                execReportBuffer,
+                orderOutboundBuffer,
+                strategyExecReportBuffer,
+                new PriceWriter(priceBuffer, priceSlots, new StreamDirectory(), marketDataBuffer),
+                () -> 0L);
 
         Listing listing = new Listing(
                 LISTING_ID,

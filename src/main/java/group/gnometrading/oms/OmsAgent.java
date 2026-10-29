@@ -3,6 +3,7 @@ package group.gnometrading.oms;
 import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.concurrent.ThreadProfile;
 import group.gnometrading.oms.action.ActionSink;
+import group.gnometrading.oms.pnl.PriceWriter;
 import group.gnometrading.schemas.CancelOrder;
 import group.gnometrading.schemas.Intent;
 import group.gnometrading.schemas.IntentDecoder;
@@ -42,18 +43,27 @@ public final class OmsAgent implements GnomeAgent, SequencedEventHandler, Action
     private final SequencedRingBuffer<?> orderOutboundBuffer;
     private final SequencedRingBuffer<OrderExecutionReport> strategyExecReportBuffer;
     private final EpochNanoClock nanoClock;
+    private final PriceWriter priceWriter;
 
     // Pre-allocated flyweights for decoding inbound events
     private final Intent intent = new Intent();
     private final OrderExecutionReport execReport = new OrderExecutionReport();
 
+    /**
+     * {@code priceWriter} is polled on this agent's thread at the start of every pass, so marks stay current, and again
+     * before each intent. The strategy reads market data before it sends the intent that reacts to it, so every book an
+     * intent was based on is in the price buffer before the OMS prices a market take or checks for bad data. On a thread of its own the writer lagged by up to its idle
+     * sleep, and takes went out priced off the previous book (paper session 2026-10-29).
+     */
     public OmsAgent(
             final OrderManagementSystem oms,
             final SequencedRingBuffer<Intent> intentBuffer,
             final SequencedRingBuffer<OrderExecutionReport> execReportBuffer,
             final SequencedRingBuffer<?> orderOutboundBuffer,
             final SequencedRingBuffer<OrderExecutionReport> strategyExecReportBuffer,
+            final PriceWriter priceWriter,
             final EpochNanoClock nanoClock) {
+        this.priceWriter = priceWriter;
         this.oms = oms;
         this.orderOutboundBuffer = orderOutboundBuffer;
         this.strategyExecReportBuffer = strategyExecReportBuffer;
@@ -70,7 +80,7 @@ public final class OmsAgent implements GnomeAgent, SequencedEventHandler, Action
     @Override
     public int doWork() throws Exception {
         oms.applyRiskChanges(this);
-        int work = 0;
+        int work = priceWriter.poll();
         work += execReportPoller.poll();
         work += intentPoller.poll();
         // After order handling, so loss checks on a moved mark never delay an intent arriving with the tick.
@@ -88,6 +98,9 @@ public final class OmsAgent implements GnomeAgent, SequencedEventHandler, Action
     public void onSequencedEvent(final long globalSeq, final int templateId, final UnsafeBuffer buf, final int len)
             throws Exception {
         if (templateId == IntentDecoder.TEMPLATE_ID) {
+            // Again here, not only at the top of the pass: the strategy may have read a newer book and sent this intent
+            // since then. It read that book before publishing the intent, so the book is visible now.
+            priceWriter.poll();
             intent.wrap(buf);
             oms.processIntent(intent, this);
         } else if (templateId == OrderExecutionReportDecoder.TEMPLATE_ID) {

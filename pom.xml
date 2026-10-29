@@ -12,6 +12,8 @@
     <version>1.13.1-SNAPSHOT</version>
 
     <properties>
+        <!-- Benchmarks print timings and take about a minute; run one with -Dtest.excludedGroups=allocation. -->
+        <test.excludedGroups>allocation,benchmark</test.excludedGroups>
         <checkstyle.config>checkstyle/checkstyle-strict.xml</checkstyle.config>
     </properties>
 
@@ -88,7 +90,7 @@
                     <execution>
                         <id>default-test</id>
                         <configuration>
-                            <excludedGroups>allocation</excludedGroups>
+                            <excludedGroups>${test.excludedGroups}</excludedGroups>
                         </configuration>
                     </execution>
                     <!-- Mockito's inline mock maker rewrites a mocked final class for the whole JVM, so once any test

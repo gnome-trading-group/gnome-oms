@@ -8,7 +8,7 @@ import org.agrona.concurrent.UnsafeBuffer;
  * Shared off-heap buffer for zero-GC cross-thread price reads.
  *
  * <p>Each slot is exactly 64 bytes (one cache line) to eliminate false sharing.
- * The {@link PriceWriterAgent} writes the top of book and the last trade via a seqlock; readers spin
+ * The {@link PriceWriter} writes the top of book and the last trade via a seqlock; readers spin
  * until a consistent snapshot is obtained. A price of 0 means unknown: no trade yet, or that side of the
  * book is empty.
  *

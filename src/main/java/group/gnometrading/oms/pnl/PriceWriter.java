@@ -1,7 +1,6 @@
 package group.gnometrading.oms.pnl;
 
 import group.gnometrading.collections.IntToIntHashMap;
-import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.md.StreamDirectory;
 import group.gnometrading.schemas.MboSchema;
 import group.gnometrading.schemas.Mbp10Schema;
@@ -26,9 +25,11 @@ import org.agrona.concurrent.UnsafeBuffer;
  *
  * <p>Records name only their stream; the session's {@link StreamDirectory} gives the listing whose price slot it is.
  *
- * <p>Run via {@link group.gnometrading.concurrent.GnomeAgentRunner} on its own thread.
+ * <p>Not an agent of its own: in a session {@link group.gnometrading.oms.OmsAgent} polls it on the OMS thread before
+ * every pass, so an intent is always priced off every book the strategy saw before sending it; a backtest polls it
+ * before the strategy sees each record.
  */
-public final class PriceWriterAgent implements GnomeAgent, SequencedEventHandler {
+public final class PriceWriter implements SequencedEventHandler {
 
     private final SharedPriceBuffer priceBuffer;
     private final PriceSlotRegistry priceSlotRegistry;
@@ -39,7 +40,7 @@ public final class PriceWriterAgent implements GnomeAgent, SequencedEventHandler
     private final Mbp1Schema mbp1 = new Mbp1Schema();
     private final Mbp10Schema mbp10 = new Mbp10Schema();
 
-    public PriceWriterAgent(
+    public PriceWriter(
             final SharedPriceBuffer priceBuffer,
             final PriceSlotRegistry priceSlotRegistry,
             final StreamDirectory streams,
@@ -50,13 +51,8 @@ public final class PriceWriterAgent implements GnomeAgent, SequencedEventHandler
         this.marketDataPoller = marketDataBuffer.createPoller(this);
     }
 
-    @Override
-    public void onStart() {
-        // disambiguate: GnomeAgent.onStart() and Disruptor EventHandlerBase.onStart()
-    }
-
-    @Override
-    public int doWork() throws Exception {
+    /** Writes every record published since the last poll; returns how many. */
+    public int poll() throws Exception {
         return marketDataPoller.poll();
     }
 
