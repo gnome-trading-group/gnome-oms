@@ -105,6 +105,39 @@ class SharedPriceBufferTest {
     }
 
     @Test
+    void markPrice_takesTheQuotedSideWhenTheLastTradeIsBeyondIt() {
+        int slot = buffer.register();
+        buffer.writeTrade(slot, 50L);
+        buffer.writeQuote(slot, 0L, 45L);
+        assertEquals(45L, buffer.markPrice(slot));
+
+        buffer.writeQuote(slot, 60L, 0L);
+        assertEquals(60L, buffer.markPrice(slot));
+    }
+
+    @Test
+    void markPrice_valuesALoserLeftWithOnlyAnAsk() {
+        // A binary market's loser after its result: no bids, an ask at 1c, and no trade on record.
+        int slot = buffer.register();
+        buffer.writeQuote(slot, 0L, 10_000_000L);
+        assertEquals(10_000_000L, buffer.markPrice(slot));
+    }
+
+    @Test
+    void markPrice_holdsThroughABookThatEmptiesWhileExecutionPricesSeeItEmpty() {
+        int slot = buffer.register();
+        buffer.writeQuote(slot, 40L, 44L);
+        buffer.writeQuote(slot, 0L, 0L);
+
+        assertEquals(42L, buffer.markPrice(slot));
+        assertEquals(0L, buffer.executionPrice(slot, Side.Bid));
+        assertEquals(0L, buffer.executionPrice(slot, Side.Ask));
+
+        buffer.writeQuote(slot, 0L, 2L);
+        assertEquals(2L, buffer.markPrice(slot));
+    }
+
+    @Test
     void writeQuote_replacesPreviousQuote() {
         int slot = buffer.register();
         buffer.writeQuote(slot, 40L, 44L);

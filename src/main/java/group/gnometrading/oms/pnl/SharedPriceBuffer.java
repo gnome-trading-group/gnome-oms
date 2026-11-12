@@ -23,8 +23,15 @@ import org.agrona.concurrent.UnsafeBuffer;
  *   [16] bid        (long) — best bid
  *   [24] ask        (long) — best ask
  *   [32] badSince   (long) — when the book was flagged bad data; 0 while it is trusted
- *   [40] padding    (24 bytes)
+ *   [40] lastMark   (long) — the last mark priced from the fields above; 0 until one is
+ *   [48] padding    (16 bytes)
  * </pre>
+ *
+ * <p>The mark is the mid of a two-sided book; with one side quoted, the last trade when it is no better than that
+ * side (at or under the ask, at or over the bid), else the quoted price; with neither, the last trade. A book that
+ * empties for a moment (every maker pulling at a result) leaves the last mark in force, while bid, ask and last trade
+ * stay exactly as the book is, so execution prices still see the empty book. gnome-registry's {@code markPrice} and
+ * its as-of mark reads follow the same rules.
  *
  * <p>While a listing's book is flagged bad data its prices are not written, so marks hold the last good book; the
  * OMS refuses new orders on it until a good book clears the flag.
@@ -40,6 +47,7 @@ public final class SharedPriceBuffer {
     private static final int BID_OFFSET = 16;
     private static final int ASK_OFFSET = 24;
     private static final int BAD_SINCE_OFFSET = 32;
+    private static final int LAST_MARK_OFFSET = 40;
 
     private final UnsafeBuffer buffer;
     private final int maxSlots;
@@ -77,6 +85,7 @@ public final class SharedPriceBuffer {
         long version = buffer.getLong(base + VERSION_OFFSET);
         buffer.putLongVolatile(base + VERSION_OFFSET, version + 1);
         buffer.putLong(base + LAST_TRADE_OFFSET, price);
+        updateMark(base);
         buffer.putLongVolatile(base + VERSION_OFFSET, version + 2);
         buffer.putLongRelease(epochOffset, ++epoch);
     }
@@ -95,6 +104,7 @@ public final class SharedPriceBuffer {
         buffer.putLongVolatile(base + VERSION_OFFSET, version + 1);
         buffer.putLong(base + BID_OFFSET, bid);
         buffer.putLong(base + ASK_OFFSET, ask);
+        updateMark(base);
         buffer.putLongVolatile(base + VERSION_OFFSET, version + 2);
         buffer.putLongRelease(epochOffset, ++epoch);
     }
@@ -177,8 +187,8 @@ public final class SharedPriceBuffer {
     }
 
     /**
-     * The mid of the best bid and ask, or the last trade when either side is empty. Returns 0 when none is known.
-     * Zero allocation.
+     * The slot's mark (see the class comment), held through a book that empties for a moment. Returns 0 when no price
+     * has been known. Zero allocation.
      */
     public long markPrice(int slot) {
         int base = slot * SLOT_SIZE;
@@ -187,12 +197,35 @@ public final class SharedPriceBuffer {
             if ((v1 & 1) != 0) {
                 continue;
             }
-            long bid = buffer.getLong(base + BID_OFFSET);
-            long ask = buffer.getLong(base + ASK_OFFSET);
-            long lastTrade = buffer.getLong(base + LAST_TRADE_OFFSET);
+            long mark = buffer.getLong(base + LAST_MARK_OFFSET);
             if (buffer.getLongVolatile(base + VERSION_OFFSET) == v1) {
-                return bid > 0 && ask > 0 ? bid + (ask - bid) / 2 : lastTrade;
+                return mark;
             }
         }
+    }
+
+    /** The mark the slot's current bid, ask and last trade give, kept when they give one. Writer thread only. */
+    private void updateMark(int base) {
+        long mark = mark(
+                buffer.getLong(base + BID_OFFSET),
+                buffer.getLong(base + ASK_OFFSET),
+                buffer.getLong(base + LAST_TRADE_OFFSET));
+        if (mark > 0) {
+            buffer.putLong(base + LAST_MARK_OFFSET, mark);
+        }
+    }
+
+    /** The mark of a book and last trade, 0 for none; 0 marks an empty side or no trade. */
+    static long mark(long bid, long ask, long lastTrade) {
+        if (bid > 0 && ask > 0) {
+            return bid + (ask - bid) / 2;
+        }
+        if (ask > 0) {
+            return lastTrade > 0 && lastTrade <= ask ? lastTrade : ask;
+        }
+        if (bid > 0) {
+            return lastTrade >= bid ? lastTrade : bid;
+        }
+        return lastTrade;
     }
 }

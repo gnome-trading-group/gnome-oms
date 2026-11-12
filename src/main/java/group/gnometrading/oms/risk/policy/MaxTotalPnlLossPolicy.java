@@ -19,7 +19,8 @@ import java.util.function.Consumer;
  * leg.
  *
  * <p>Unrealized PnL is the notional of {@code netQuantity} at {@code markPrice - avgEntryPrice}, where the
- * mark price is the mid of the book, or the last trade when a side is empty, read from {@link SharedPriceBuffer}.
+ * mark price is {@link SharedPriceBuffer#markPrice}: the mid of the book, a one-sided book's quoted side or the last
+ * trade, held through a book that empties for a moment.
  * A listing with no mark yet is valued at its average entry: its unrealized PnL counts as zero, while its realized
  * PnL and fees still count.
  */
