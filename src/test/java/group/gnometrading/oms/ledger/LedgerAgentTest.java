@@ -99,6 +99,12 @@ class LedgerAgentTest {
         assertEquals("FILLED", close.get("state").asText());
         assertTrue(close.get("rejectReason").isNull());
         assertFalse(ring.isFailing(MAX_LAG_NS * 2), "every event confirmed");
+        assertEquals(4, ring.publishedEvents());
+        assertEquals(4, ring.acknowledgedEvents());
+        assertEquals(1, agent.activity().get(0), "one batch");
+        assertEquals("events", agent.activity().name(1));
+        assertEquals(4, agent.activity().get(1));
+        assertEquals(0, agent.activity().get(2), "no failures");
     }
 
     @Test

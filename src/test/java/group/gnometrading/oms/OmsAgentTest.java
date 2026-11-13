@@ -11,6 +11,7 @@ import group.gnometrading.latency.MinuteHistograms;
 import group.gnometrading.latency.MinuteSummary;
 import group.gnometrading.logging.NullLogger;
 import group.gnometrading.md.StreamDirectory;
+import group.gnometrading.metrics.MetricCounters;
 import group.gnometrading.oms.ledger.LedgerSink;
 import group.gnometrading.oms.pnl.PriceSlotRegistry;
 import group.gnometrading.oms.pnl.PriceWriter;
@@ -33,6 +34,7 @@ import group.gnometrading.schemas.OrderDecoder;
 import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.schemas.OrderExecutionReportDecoder;
 import group.gnometrading.schemas.OrderStatus;
+import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.TriggerKind;
 import group.gnometrading.sequencer.GlobalSequence;
@@ -251,6 +253,45 @@ class OmsAgentTest {
             }
         }
         assertEquals(1, measured);
+    }
+
+    @Test
+    void whatTheOmsDoesIsCounted() throws Exception {
+        publishIntent(100L, 10L);
+        omsAgent.doWork();
+        outboundPoller.poll();
+        publishExecReport(decodeFirstOutboundOrder().getClientOidCounter(), ExecType.NEW);
+        omsAgent.doWork();
+        RiskSnapshots.publishKills(riskEngine, true, new int[] {}, new int[] {});
+        omsAgent.doWork();
+
+        final MetricCounters activity = omsAgent.activity();
+        assertEquals(1, activity.get(counterNamed(activity, "intents")));
+        assertEquals(1, activity.get(counterNamed(activity, "newOrders")));
+        assertEquals(1, activity.get(counterNamed(activity, "cancels")), "the kill's cancel");
+        assertEquals(1, activity.get(counterNamed(activity, "reports")));
+        assertEquals(1, activity.get(counterNamed(activity, "report.NEW")));
+    }
+
+    @Test
+    void aReportTheOmsMakesItselfIsCountedAsARefusalByReason() {
+        final OrderExecutionReport refusal = new OrderExecutionReport();
+        refusal.encoder.execType(ExecType.REJECT).rejectReason(RejectReason.RISK_LIMIT_EXCEEDED);
+
+        omsAgent.onExecReport(refusal);
+
+        final MetricCounters activity = omsAgent.activity();
+        assertEquals(1, activity.get(counterNamed(activity, "refused.RISK_LIMIT_EXCEEDED")));
+        assertEquals(0, activity.get(counterNamed(activity, "reports")), "a refusal is the OMS's, not the venue's");
+    }
+
+    private static int counterNamed(final MetricCounters counters, final String name) {
+        for (int c = 0; c < counters.count(); c++) {
+            if (counters.name(c).equals(name)) {
+                return c;
+            }
+        }
+        throw new AssertionError("no counter " + name);
     }
 
     @Test

@@ -5,6 +5,7 @@ import group.gnometrading.codecs.json.JsonEncoder;
 import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.logging.LogMessage;
 import group.gnometrading.logging.Logger;
+import group.gnometrading.metrics.MetricCounters;
 import group.gnometrading.oms.pnl.PriceSlotRegistry;
 import group.gnometrading.oms.pnl.SharedPriceBuffer;
 import group.gnometrading.schemas.Side;
@@ -28,6 +29,14 @@ import org.agrona.concurrent.EpochClock;
  * decides when the ledger has fallen too far behind to keep trading.
  */
 public final class LedgerAgent implements GnomeAgent {
+
+    private static final long NANOS_PER_MS = 1_000_000;
+
+    private final MetricCounters activity = new MetricCounters(4);
+    private final int batches = activity.counter("batches");
+    private final int events = activity.counter("events");
+    private final int failures = activity.counter("failures");
+    private final int postMsPeak = activity.peak("postMsPeak");
 
     /** Keeps a batch's body well inside the HTTP client's 32 KB write buffer. */
     public static final int MAX_EVENTS_PER_BATCH = 40;
@@ -164,6 +173,11 @@ public final class LedgerAgent implements GnomeAgent {
         return lastAcceptedMs;
     }
 
+    /** What the agent posted, on its thread for another to read: batches and events stored, failures, slowest post. */
+    public MetricCounters activity() {
+        return activity;
+    }
+
     /** Failed attempts since the last stored batch. */
     public int consecutiveFailures() {
         return consecutiveFailures;
@@ -211,8 +225,12 @@ public final class LedgerAgent implements GnomeAgent {
 
     /** @return whether the batch is settled: stored, or refused for good */
     private boolean send(final long now) {
+        final long startedNs = System.nanoTime();
         final int status = registry.tryPost(PATH, body.array(), body.position());
+        activity.max(postMsPeak, (System.nanoTime() - startedNs) / NANOS_PER_MS);
         if (status == HTTP_OK) {
+            activity.increment(batches);
+            activity.add(events, batchCount);
             lastAcceptedMs = now;
             consecutiveFailures = 0;
             ring.acknowledge(batchCount);
@@ -241,6 +259,7 @@ public final class LedgerAgent implements GnomeAgent {
             return true;
         }
         logger.log(LogMessage.LEDGER_WRITE_FAILED, status);
+        activity.increment(failures);
         consecutiveFailures = consecutiveFailures + 1;
         nextAttemptMs = now + backoffMs;
         backoffMs = Math.min(backoffMs * 2, MAX_BACKOFF_MS);

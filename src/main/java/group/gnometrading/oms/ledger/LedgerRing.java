@@ -231,6 +231,16 @@ public final class LedgerRing implements LedgerSink {
         return fenced;
     }
 
+    /** Events the OMS has published, for another thread's reading: possibly a little behind, never torn. */
+    public long publishedEvents() {
+        return published;
+    }
+
+    /** Events the registry has stored. */
+    public long acknowledgedEvents() {
+        return acknowledged;
+    }
+
     private LedgerEvent claim(
             final int strategyId, final int listingId, final long clientOidCounter, final long timeNs) {
         final int index = ring.tryClaim();

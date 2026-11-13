@@ -29,6 +29,10 @@ All code is under `src/main/java/group/gnometrading/oms/`; tests mirror it under
 - `OmsAgent` - the hot-path `GnomeAgent` (`ThreadProfile.HOT_PATH`). Polls the intent and exec-report
   `SequencedRingBuffer`s, publishes Order/Cancel/Modify to the order outbound buffer, and forwards exec reports
   (plus synthetic risk rejects) to the strategy only after positions are updated. `onClose` cancels everything.
+  It counts what it does in `activity()` (gnome-core `MetricCounters`, single-writer, read by the session's
+  samples): intents, orders/cancels/modifies sent, the venue's reports by `ExecType` and filled quantity, venue rejects
+  (`reject.<reason>`) and the OMS's own refusals (`refused.<reason>`). `LedgerAgent.activity()` counts batches, events
+  stored, failures and the slowest post; `LedgerRing.publishedEvents()`/`acknowledgedEvents()` give the ledger's lag.
 - `OrderCause` - why the OMS sends what it sends, stamped by `OmsAgent` on every order, modify and cancel (core v3):
   the intent's global sequence and the trigger the strategy put on it, the execution report it reacts to
   (`EXEC_REPORT`), or `RISK` for anything outside an intent or report (kill/halt sweeps, market-risk latches,
