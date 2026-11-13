@@ -2,6 +2,7 @@ package group.gnometrading.oms.intent;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import group.gnometrading.oms.OrderCause;
 import group.gnometrading.oms.action.ActionSink;
 import group.gnometrading.schemas.CancelOrder;
 import group.gnometrading.schemas.ExecType;
@@ -22,6 +23,8 @@ import org.junit.jupiter.api.Test;
 
 class IntentResolverTest {
 
+    private final OrderCause cause = new OrderCause();
+
     private static final int EXCHANGE_ID = 1;
     private static final int SECURITY_ID = 42;
     private static final int LISTING_ID = 100;
@@ -35,7 +38,7 @@ class IntentResolverTest {
     @BeforeEach
     void setUp() {
         oidCounter = new AtomicLong(0);
-        resolver = new IntentResolver(oidCounter::incrementAndGet, STRATEGY_ID, listingId -> true, clock::get);
+        resolver = new IntentResolver(oidCounter::incrementAndGet, STRATEGY_ID, listingId -> true, clock::get, cause);
         sink = new CapturingSink();
     }
 
@@ -990,7 +993,8 @@ class IntentResolverTest {
                     lookups.incrementAndGet();
                     return true;
                 },
-                clock::get);
+                clock::get,
+                cause);
 
         resolve(100L, 10L, 101L, 5L);
         resolve(100L, 10L, 101L, 5L);
@@ -1226,7 +1230,7 @@ class IntentResolverTest {
     }
 
     private void useCancelReplaceVenue() {
-        resolver = new IntentResolver(oidCounter::incrementAndGet, STRATEGY_ID, listingId -> false, clock::get);
+        resolver = new IntentResolver(oidCounter::incrementAndGet, STRATEGY_ID, listingId -> false, clock::get, cause);
     }
 
     private long goLiveReturningOid(long bidPrice, long bidSize) {

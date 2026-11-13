@@ -29,6 +29,9 @@ import org.agrona.concurrent.UnsafeBuffer;
  * risk-rejection reports) is forwarded to the strategy via the strategy exec report buffer.
  * This ensures the strategy only sees exec reports after the OMS has updated position state.
  *
+ * <p>Every order, modify and cancel carries its {@link OrderCause}: the intent and trigger it serves, the execution
+ * report it reacts to, or the OMS's own risk handling (anything outside an intent or report).
+ *
  * <p>Risk policy sync is handled by a dedicated {@link group.gnometrading.oms.risk.RiskSyncAgent}
  * running on its own thread — this agent's hot path performs no I/O or sync work.
  *
@@ -44,6 +47,7 @@ public final class OmsAgent implements GnomeAgent, SequencedEventHandler, Action
     private final SequencedRingBuffer<OrderExecutionReport> strategyExecReportBuffer;
     private final EpochNanoClock nanoClock;
     private final PriceWriter priceWriter;
+    private final OrderCause cause;
 
     // Pre-allocated flyweights for decoding inbound events
     private final Intent intent = new Intent();
@@ -69,6 +73,7 @@ public final class OmsAgent implements GnomeAgent, SequencedEventHandler, Action
         this.orderOutboundBuffer = orderOutboundBuffer;
         this.strategyExecReportBuffer = strategyExecReportBuffer;
         this.nanoClock = nanoClock;
+        this.cause = oms.orderCause();
         this.intentPoller = intentBuffer.createPoller(this);
         this.execReportPoller = execReportBuffer.createPoller(this);
     }
@@ -104,10 +109,20 @@ public final class OmsAgent implements GnomeAgent, SequencedEventHandler, Action
             // poller reads what is available, reach the intent without the book.
             priceWriter.poll();
             intent.wrap(buf);
-            oms.processIntent(intent, this);
+            cause.ofIntent(globalSeq, intent.decoder);
+            try {
+                oms.processIntent(intent, this);
+            } finally {
+                cause.ofRisk();
+            }
         } else if (templateId == OrderExecutionReportDecoder.TEMPLATE_ID) {
             execReport.wrap(buf);
-            oms.processExecutionReport(execReport, this);
+            cause.ofExecutionReport(globalSeq, execReportPoller.timestampNanos(), execReport.decoder.timestampRecv());
+            try {
+                oms.processExecutionReport(execReport, this);
+            } finally {
+                cause.ofRisk();
+            }
             onExecReport(execReport);
         }
     }
@@ -115,18 +130,21 @@ public final class OmsAgent implements GnomeAgent, SequencedEventHandler, Action
     @Override
     public void onNewOrder(final Order order) {
         order.encoder.timestampSend(nanoClock.nanoTime());
+        cause.stamp(order.encoder);
         orderOutboundBuffer.publishRaw(order.buffer, order.templateId(), order.totalMessageSize());
     }
 
     @Override
     public void onCancel(final CancelOrder cancel) {
         cancel.encoder.timestampSend(nanoClock.nanoTime());
+        cause.stamp(cancel.encoder);
         orderOutboundBuffer.publishRaw(cancel.buffer, cancel.templateId(), cancel.totalMessageSize());
     }
 
     @Override
     public void onModify(final ModifyOrder modify) {
         modify.encoder.timestampSend(nanoClock.nanoTime());
+        cause.stamp(modify.encoder);
         orderOutboundBuffer.publishRaw(modify.buffer, modify.templateId(), modify.totalMessageSize());
     }
 

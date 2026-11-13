@@ -102,6 +102,10 @@ The queued intent fires as soon as the slot transitions back to LIVE:
 
 If nothing is queued when the slot becomes LIVE, no action is taken.
 
+A queued intent keeps the `OrderCause` it arrived with (its intent sequence and trigger), and whatever it fires is
+sent under that cause rather than the report that freed the slot: the order is still the strategy's reaction to the
+event it was handling then, only delayed, so tick-to-trade measured from that event includes the wait.
+
 ---
 
 ## 3. Processing a Make Intent (`resolveSide`)

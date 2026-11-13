@@ -88,6 +88,7 @@ public final class OrderManagementSystem {
     private long oidCounter;
     // Stamps the reports the OMS writes itself; simulated time in a backtest.
     private final EpochNanoClock clock;
+    private final OrderCause orderCause = new OrderCause();
 
     public OrderManagementSystem(
             Logger logger,
@@ -415,6 +416,11 @@ public final class OrderManagementSystem {
         return riskEngine;
     }
 
+    /** What the OMS is acting on; {@link OmsAgent} sets it around each event and stamps it on what is sent. */
+    public OrderCause orderCause() {
+        return orderCause;
+    }
+
     public IntentResolver getIntentResolver() {
         return getOrCreateResolver(0);
     }
@@ -427,7 +433,7 @@ public final class OrderManagementSystem {
         IntentResolver resolver = resolvers.get(strategyId);
         if (resolver == null) {
             resolver = new IntentResolver(
-                    this::nextOid, strategyId, this::listingSupportsNativeModify, this.clock::nanoTime);
+                    this::nextOid, strategyId, this::listingSupportsNativeModify, this.clock::nanoTime, orderCause);
             resolvers.put(strategyId, resolver);
         }
         return resolver;

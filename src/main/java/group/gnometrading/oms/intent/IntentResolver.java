@@ -1,6 +1,7 @@
 package group.gnometrading.oms.intent;
 
 import group.gnometrading.collections.LongHashMap;
+import group.gnometrading.oms.OrderCause;
 import group.gnometrading.oms.action.ActionSink;
 import group.gnometrading.schemas.CancelOrder;
 import group.gnometrading.schemas.ExecType;
@@ -30,6 +31,10 @@ public final class IntentResolver {
     private final int strategyId;
     private final IntPredicate nativeModifyByListing;
     private final LongSupplier nanoClock;
+    // The cause stamped on what this resolver sends, shared with the OMS; held aside while a queued intent is sent
+    // under its own.
+    private final OrderCause cause;
+    private final OrderCause heldCause = new OrderCause();
     private final Order pendingOrder = new Order();
     private final CancelOrder pendingCancel = new CancelOrder();
     private final ModifyOrder pendingModify = new ModifyOrder();
@@ -47,10 +52,16 @@ public final class IntentResolver {
      * @param nativeModifyByListing whether a listing's venue can change a working order in place; asked
      *     once per listing, when its slots are created
      * @param nanoClock times the cooldown after a rate-limit refusal
+     * @param cause what the OMS is acting on, which every action sent carries; a queued intent keeps a copy
      */
     public IntentResolver(
-            LongSupplier oidSupplier, int strategyId, IntPredicate nativeModifyByListing, LongSupplier nanoClock) {
+            LongSupplier oidSupplier,
+            int strategyId,
+            IntPredicate nativeModifyByListing,
+            LongSupplier nanoClock,
+            OrderCause cause) {
         this.oidSupplier = oidSupplier;
+        this.cause = cause;
         this.nanoClock = nanoClock;
         this.strategyId = strategyId;
         this.nativeModifyByListing = nativeModifyByListing;
@@ -130,6 +141,7 @@ public final class IntentResolver {
                     long qPrice = slot.getQueuedPrice();
                     long qSize = slot.getQueuedSize();
                     short qFlags = slot.getQueuedFlags();
+                    takeQueuedCause(slot);
                     if (qSize == 0) {
                         slot.clearQueuedIntent();
                         emitCancel(exchangeId, securityId, slot, handler);
@@ -140,6 +152,7 @@ public final class IntentResolver {
                     } else {
                         slot.clearQueuedIntent();
                     }
+                    restoreCause();
                 }
             }
             case FILL -> {
@@ -158,8 +171,10 @@ public final class IntentResolver {
                     long price = slot.getQueuedPrice();
                     long size = slot.getQueuedSize();
                     short qFlags = slot.getQueuedFlags();
+                    takeQueuedCause(slot);
                     slot.clearQueuedIntent();
                     submitNew(exchangeId, securityId, side, price, size, qFlags, slot, handler);
+                    restoreCause();
                 } else {
                     slot.clearQueuedIntent();
                 }
@@ -208,9 +223,9 @@ public final class IntentResolver {
             }
             case PENDING_NEW, PENDING_MODIFY, PENDING_CANCEL -> {
                 if (wantsOrder) {
-                    slot.queueIntent(snappedPrice, desiredSize, flags);
+                    slot.queueIntent(snappedPrice, desiredSize, flags, cause);
                 } else {
-                    slot.queueIntent(0, 0, (short) 0);
+                    slot.queueIntent(0, 0, (short) 0, cause);
                 }
             }
             case LIVE -> {
@@ -229,6 +244,7 @@ public final class IntentResolver {
         long qPrice = slot.getQueuedPrice();
         long qSize = slot.getQueuedSize();
         short qFlags = slot.getQueuedFlags();
+        takeQueuedCause(slot);
         slot.clearQueuedIntent();
         if (qSize == 0) {
             emitCancel(exchangeId, securityId, slot, handler);
@@ -236,6 +252,20 @@ public final class IntentResolver {
         } else if (qPrice != slot.getActivePrice() || qSize != slot.getRestingQty()) {
             changeLiveOrder(exchangeId, securityId, slot, qPrice, qSize, qFlags, handler);
         }
+        restoreCause();
+    }
+
+    /**
+     * Sends what a queued intent wants under that intent's own cause, not the report that freed the slot: the order is
+     * still the strategy's reaction to whatever it was handling then, only delayed. {@link #restoreCause} after.
+     */
+    private void takeQueuedCause(OrderSlot slot) {
+        heldCause.copyFrom(cause);
+        cause.copyFrom(slot.getQueuedCause());
+    }
+
+    private void restoreCause() {
+        cause.copyFrom(heldCause);
     }
 
     /**
@@ -261,7 +291,7 @@ public final class IntentResolver {
         } else {
             // The CANCEL branch of onExecutionReport submits the queued target as a new order. Sized as
             // resting quantity, it is right whatever filled before the cancel landed.
-            slot.queueIntent(price, restingQty, flags);
+            slot.queueIntent(price, restingQty, flags, cause);
             slot.onCancelSubmitted();
             emitCancel(exchangeId, securityId, slot, handler);
         }
@@ -404,14 +434,14 @@ public final class IntentResolver {
                 slot.onCancelSubmitted();
             }
             case PENDING_NEW -> {
-                slot.queueIntent(0, 0, (short) 0);
+                slot.queueIntent(0, 0, (short) 0, cause);
                 if (cancelPendingToo) {
                     emitCancel(slot.getExchangeId(), slot.getSecurityId(), slot, cancelHandler);
                 }
             }
                 // Already acknowledged, so it is cancelled when the modify is answered. A cancel sent now would be
                 // indistinguishable from the modify if the venue refused it.
-            case PENDING_MODIFY -> slot.queueIntent(0, 0, (short) 0);
+            case PENDING_MODIFY -> slot.queueIntent(0, 0, (short) 0, cause);
             case PENDING_CANCEL -> slot.clearQueuedIntent();
             case EMPTY -> {
                 // nothing working

@@ -1,5 +1,7 @@
 package group.gnometrading.oms.intent;
 
+import group.gnometrading.oms.OrderCause;
+
 /**
  * Tracks the lifecycle state of a single order slot (one per side per instrument per strategy).
  * Ensures only one order is live or pending at a time on each side.
@@ -53,6 +55,8 @@ public final class OrderSlot {
     private long queuedSize;
     private short queuedFlags;
     private boolean hasQueuedIntent;
+    // Why the queued intent was wanted, stamped on what is finally sent for it.
+    private final OrderCause queuedCause = new OrderCause();
 
     private long cooldownStepNanos;
     private long cooldownUntilNanos;
@@ -207,7 +211,8 @@ public final class OrderSlot {
         return this.cooldownStepNanos != 0 && this.cooldownUntilNanos - nowNanos > 0;
     }
 
-    public void queueIntent(long price, long size, short flags) {
+    public void queueIntent(long price, long size, short flags, OrderCause cause) {
+        this.queuedCause.copyFrom(cause);
         this.queuedPrice = price;
         this.queuedSize = size;
         this.queuedFlags = flags;
@@ -219,6 +224,10 @@ public final class OrderSlot {
         this.queuedPrice = 0;
         this.queuedSize = 0;
         this.queuedFlags = 0;
+    }
+
+    public OrderCause getQueuedCause() {
+        return queuedCause;
     }
 
     public boolean hasQueuedIntent() {

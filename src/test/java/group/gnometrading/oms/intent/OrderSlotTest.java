@@ -2,6 +2,7 @@ package group.gnometrading.oms.intent;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import group.gnometrading.oms.OrderCause;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -111,7 +112,7 @@ class OrderSlotTest {
 
     @Test
     void queueIntentStoresValues() {
-        slot.queueIntent(99L, 5L, (short) 0);
+        slot.queueIntent(99L, 5L, (short) 0, new OrderCause());
 
         assertTrue(slot.hasQueuedIntent());
         assertEquals(99L, slot.getQueuedPrice());
@@ -120,7 +121,7 @@ class OrderSlotTest {
 
     @Test
     void clearQueuedIntentResetsValues() {
-        slot.queueIntent(99L, 5L, (short) 0);
+        slot.queueIntent(99L, 5L, (short) 0, new OrderCause());
         slot.clearQueuedIntent();
 
         assertFalse(slot.hasQueuedIntent());
@@ -130,8 +131,8 @@ class OrderSlotTest {
 
     @Test
     void queueIntentOverwritesPreviousIntent() {
-        slot.queueIntent(99L, 5L, (short) 0);
-        slot.queueIntent(101L, 8L, (short) 0);
+        slot.queueIntent(99L, 5L, (short) 0, new OrderCause());
+        slot.queueIntent(101L, 8L, (short) 0, new OrderCause());
 
         assertEquals(101L, slot.getQueuedPrice());
         assertEquals(8L, slot.getQueuedSize());
@@ -157,14 +158,14 @@ class OrderSlotTest {
 
     @Test
     void queuedFlagsStoredAndRetrieved() {
-        slot.queueIntent(99L, 5L, (short) 1);
+        slot.queueIntent(99L, 5L, (short) 1, new OrderCause());
 
         assertEquals((short) 1, slot.getQueuedFlags());
     }
 
     @Test
     void queuedFlagsClearedOnClearQueuedIntent() {
-        slot.queueIntent(99L, 5L, (short) 1);
+        slot.queueIntent(99L, 5L, (short) 1, new OrderCause());
         slot.clearQueuedIntent();
 
         assertEquals((short) 0, slot.getQueuedFlags());

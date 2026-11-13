@@ -29,6 +29,11 @@ All code is under `src/main/java/group/gnometrading/oms/`; tests mirror it under
 - `OmsAgent` - the hot-path `GnomeAgent` (`ThreadProfile.HOT_PATH`). Polls the intent and exec-report
   `SequencedRingBuffer`s, publishes Order/Cancel/Modify to the order outbound buffer, and forwards exec reports
   (plus synthetic risk rejects) to the strategy only after positions are updated. `onClose` cancels everything.
+- `OrderCause` - why the OMS sends what it sends, stamped by `OmsAgent` on every order, modify and cancel (core v3):
+  the intent's global sequence and the trigger the strategy put on it, the execution report it reacts to
+  (`EXEC_REPORT`), or `RISK` for anything outside an intent or report (kill/halt sweeps, market-risk latches,
+  shutdown). One per OMS, shared with each `IntentResolver`; a queued intent keeps a copy in its `OrderSlot` and is
+  sent under it, not under the report that freed the slot.
 - `OrderManagementSystem` - core logic: intent processing, exec reports, risk gating, kill sweeps, ledger health.
 - `intent/` - `IntentResolver` (one per strategy) and `OrderSlot` (one order per side per listing, one in-flight
   action at a time). Read `docs/intent-processing.md` before changing this; it documents the slot state machine

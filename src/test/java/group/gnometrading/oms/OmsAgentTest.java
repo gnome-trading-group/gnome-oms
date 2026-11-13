@@ -16,17 +16,21 @@ import group.gnometrading.oms.position.SharedPositionBuffer;
 import group.gnometrading.oms.risk.RiskEngine;
 import group.gnometrading.oms.risk.RiskSnapshots;
 import group.gnometrading.oms.state.PooledOrderStateManager;
+import group.gnometrading.schemas.CancelOrder;
 import group.gnometrading.schemas.CancelOrderDecoder;
 import group.gnometrading.schemas.ExecType;
 import group.gnometrading.schemas.Intent;
 import group.gnometrading.schemas.IntentDecoder;
 import group.gnometrading.schemas.Mbp10Schema;
+import group.gnometrading.schemas.ModifyOrder;
+import group.gnometrading.schemas.ModifyOrderDecoder;
 import group.gnometrading.schemas.Order;
 import group.gnometrading.schemas.OrderDecoder;
 import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.schemas.OrderExecutionReportDecoder;
 import group.gnometrading.schemas.OrderStatus;
 import group.gnometrading.schemas.Side;
+import group.gnometrading.schemas.TriggerKind;
 import group.gnometrading.sequencer.GlobalSequence;
 import group.gnometrading.sequencer.SequencedPoller;
 import group.gnometrading.sequencer.SequencedRingBuffer;
@@ -71,9 +75,11 @@ class OmsAgentTest {
     private RiskEngine riskEngine;
     private final List<DrainedExecReport> strategyExecReports = new ArrayList<>();
 
+    private GlobalSequence globalSequence;
+
     @BeforeEach
     void setUp() {
-        GlobalSequence globalSequence = new GlobalSequence();
+        globalSequence = new GlobalSequence();
         intentBuffer = new SequencedRingBuffer<>(Intent::new, globalSequence);
         execReportBuffer = new SequencedRingBuffer<>(OrderExecutionReport::new, globalSequence);
         orderOutboundBuffer = new SequencedRingBuffer<>(Intent::new, globalSequence, 64);
@@ -154,6 +160,73 @@ class OmsAgentTest {
 
         assertEquals(1, outboundMessages.size());
         assertEquals(CancelOrderDecoder.TEMPLATE_ID, outboundMessages.get(0).templateId);
+    }
+
+    // --- order causes ---
+
+    @Test
+    void anOrderCarriesTheIntentItServesAndThatIntentsTrigger() throws Exception {
+        final long intentSequence = publishIntent(100L, 10L, 55L, TriggerKind.MARKET_DATA, 1_000L, 900L);
+
+        omsAgent.doWork();
+        outboundPoller.poll();
+
+        final OrderDecoder order = decodeFirstOutboundOrder().decoder;
+        assertEquals(intentSequence, order.intentSequence());
+        assertEquals(55L, order.triggerSequence());
+        assertEquals(TriggerKind.MARKET_DATA, order.triggerKind());
+        assertEquals(1_000L, order.triggerTimestamp());
+        assertEquals(900L, order.triggerOriginTimestamp());
+    }
+
+    @Test
+    void anIntentQueuedBehindAnOrderInFlightIsSentUnderItsOwnCause() throws Exception {
+        publishIntent(100L, 10L, 55L, TriggerKind.MARKET_DATA, 1_000L, 900L);
+        omsAgent.doWork();
+        outboundPoller.poll();
+        final long counter = decodeFirstOutboundOrder().getClientOidCounter();
+        outboundMessages.clear();
+        // The first order isn't acknowledged yet, so this one waits in the slot.
+        final long queuedSequence = publishIntent(101L, 10L, 66L, TriggerKind.EXEC_REPORT, 2_000L, 1_900L);
+        omsAgent.doWork();
+        outboundPoller.poll();
+        assertTrue(outboundMessages.isEmpty());
+
+        publishExecReport(counter, ExecType.NEW);
+        omsAgent.doWork();
+        outboundPoller.poll();
+
+        assertEquals(1, outboundMessages.size());
+        final ModifyOrder modify = new ModifyOrder();
+        modify.buffer.putBytes(0, outboundMessages.get(0).buffer, 0, outboundMessages.get(0).length);
+        modify.wrap(modify.buffer);
+        assertEquals(ModifyOrderDecoder.TEMPLATE_ID, outboundMessages.get(0).templateId);
+        assertEquals(queuedSequence, modify.decoder.intentSequence());
+        assertEquals(66L, modify.decoder.triggerSequence());
+        assertEquals(TriggerKind.EXEC_REPORT, modify.decoder.triggerKind());
+        assertEquals(2_000L, modify.decoder.triggerTimestamp());
+        assertEquals(1_900L, modify.decoder.triggerOriginTimestamp());
+    }
+
+    @Test
+    void aCancelTheOmsSendsOnItsOwnIsRisk() throws Exception {
+        publishIntent(100L, 10L, 55L, TriggerKind.MARKET_DATA, 1_000L, 900L);
+        omsAgent.doWork();
+        outboundPoller.poll();
+        publishExecReport(decodeFirstOutboundOrder().getClientOidCounter(), ExecType.NEW);
+        omsAgent.doWork();
+        outboundMessages.clear();
+
+        RiskSnapshots.publishKills(riskEngine, true, new int[] {}, new int[] {});
+        omsAgent.doWork();
+        outboundPoller.poll();
+
+        final CancelOrder cancel = new CancelOrder();
+        cancel.buffer.putBytes(0, outboundMessages.get(0).buffer, 0, outboundMessages.get(0).length);
+        cancel.wrap(cancel.buffer);
+        assertEquals(TriggerKind.RISK, cancel.decoder.triggerKind());
+        assertEquals(CancelOrderDecoder.intentSequenceNullValue(), cancel.decoder.intentSequence());
+        assertEquals(CancelOrderDecoder.triggerSequenceNullValue(), cancel.decoder.triggerSequence());
     }
 
     @Test
@@ -267,7 +340,18 @@ class OmsAgentTest {
     // --- helpers ---
 
     private void publishIntent(long bidPrice, long bidSize) {
+        publishIntent(bidPrice, bidSize, 0L, TriggerKind.NONE, 0L, 0L);
+    }
+
+    /** @return the intent's global sequence */
+    private long publishIntent(
+            long bidPrice, long bidSize, long triggerSequence, TriggerKind kind, long triggerAt, long originAt) {
         Intent intent = new Intent();
+        intent.encoder
+                .triggerSequence(triggerSequence)
+                .triggerKind(kind)
+                .triggerTimestamp(triggerAt)
+                .triggerOriginTimestamp(originAt);
         intent.encoder
                 .strategyId(STRATEGY_ID)
                 .exchangeId(EXCHANGE_ID)
@@ -282,6 +366,7 @@ class OmsAgentTest {
         slot.buffer.putBytes(0, intent.buffer, 0, intent.totalMessageSize());
         slot.wrap(slot.buffer);
         intentBuffer.publish();
+        return globalSequence.current();
     }
 
     private void publishExecReport(long clientOidCounter, ExecType execType) {
