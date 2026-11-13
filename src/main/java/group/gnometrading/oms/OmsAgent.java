@@ -2,6 +2,7 @@ package group.gnometrading.oms;
 
 import group.gnometrading.concurrent.GnomeAgent;
 import group.gnometrading.concurrent.ThreadProfile;
+import group.gnometrading.latency.LatencyGrid;
 import group.gnometrading.oms.action.ActionSink;
 import group.gnometrading.oms.pnl.PriceWriter;
 import group.gnometrading.schemas.CancelOrder;
@@ -32,6 +33,11 @@ import org.agrona.concurrent.UnsafeBuffer;
  * <p>Every order, modify and cancel carries its {@link OrderCause}: the intent and trigger it serves, the execution
  * report it reacts to, or the OMS's own risk handling (anything outside an intent or report).
  *
+ * <p>Given a {@link LatencyGrid} ({@link #measureProcessing}), it records {@code oms.process} for each: from the
+ * arrival on its ring of the intent or report the OMS was handling to the order's publish, by exchange, action
+ * ({@link #LATENCY_ACTIONS}) and trigger kind. Orders of the OMS's own (risk sweeps, shutdown) have no arrival and
+ * aren't recorded.
+ *
  * <p>Risk policy sync is handled by a dedicated {@link group.gnometrading.oms.risk.RiskSyncAgent}
  * running on its own thread — this agent's hot path performs no I/O or sync work.
  *
@@ -39,6 +45,15 @@ import org.agrona.concurrent.UnsafeBuffer;
  * In backtest, call {@link #doWork()} manually at simulation step boundaries.
  */
 public final class OmsAgent implements GnomeAgent, SequencedEventHandler, ActionSink {
+
+    /**
+     * The action labels {@code oms.process} is recorded under, by index.
+     */
+    public static final String[] LATENCY_ACTIONS = {"NEW", "CANCEL", "MODIFY"};
+
+    private static final int NEW = 0;
+    private static final int CANCEL = 1;
+    private static final int MODIFY = 2;
 
     private final OrderManagementSystem oms;
     private final SequencedPoller intentPoller;
@@ -48,6 +63,9 @@ public final class OmsAgent implements GnomeAgent, SequencedEventHandler, Action
     private final EpochNanoClock nanoClock;
     private final PriceWriter priceWriter;
     private final OrderCause cause;
+    private LatencyGrid processing;
+    // When the intent or report being handled reached its ring; 0 outside one.
+    private long handlingSince;
 
     // Pre-allocated flyweights for decoding inbound events
     private final Intent intent = new Intent();
@@ -78,6 +96,11 @@ public final class OmsAgent implements GnomeAgent, SequencedEventHandler, Action
         this.execReportPoller = execReportBuffer.createPoller(this);
     }
 
+    /** Records {@code oms.process} into {@code grid}, which only this agent's thread may write; before it starts. */
+    public void measureProcessing(final LatencyGrid grid) {
+        this.processing = grid;
+    }
+
     @Override
     public void onStart() {
         // disambiguate: GnomeAgent.onStart() and Disruptor EventHandlerBase.onStart()
@@ -92,6 +115,9 @@ public final class OmsAgent implements GnomeAgent, SequencedEventHandler, Action
         // After order handling, so loss checks on a moved mark never delay an intent arriving with the tick.
         oms.checkMarkMoves(this);
         oms.checkLedger(this);
+        if (processing != null) {
+            processing.histograms().roll(nanoClock.nanoTime());
+        }
         return work;
     }
 
@@ -110,18 +136,22 @@ public final class OmsAgent implements GnomeAgent, SequencedEventHandler, Action
             priceWriter.poll();
             intent.wrap(buf);
             cause.ofIntent(globalSeq, intent.decoder);
+            handlingSince = intentPoller.timestampNanos();
             try {
                 oms.processIntent(intent, this);
             } finally {
                 cause.ofRisk();
+                handlingSince = 0;
             }
         } else if (templateId == OrderExecutionReportDecoder.TEMPLATE_ID) {
             execReport.wrap(buf);
-            cause.ofExecutionReport(globalSeq, execReportPoller.timestampNanos(), execReport.decoder.timestampRecv());
+            handlingSince = execReportPoller.timestampNanos();
+            cause.ofExecutionReport(globalSeq, handlingSince, execReport.decoder.timestampRecv());
             try {
                 oms.processExecutionReport(execReport, this);
             } finally {
                 cause.ofRisk();
+                handlingSince = 0;
             }
             onExecReport(execReport);
         }
@@ -129,23 +159,35 @@ public final class OmsAgent implements GnomeAgent, SequencedEventHandler, Action
 
     @Override
     public void onNewOrder(final Order order) {
-        order.encoder.timestampSend(nanoClock.nanoTime());
+        final long now = nanoClock.nanoTime();
+        order.encoder.timestampSend(now);
         cause.stamp(order.encoder);
         orderOutboundBuffer.publishRaw(order.buffer, order.templateId(), order.totalMessageSize());
+        recordProcessing(order.decoder.exchangeId(), NEW, now);
     }
 
     @Override
     public void onCancel(final CancelOrder cancel) {
-        cancel.encoder.timestampSend(nanoClock.nanoTime());
+        final long now = nanoClock.nanoTime();
+        cancel.encoder.timestampSend(now);
         cause.stamp(cancel.encoder);
         orderOutboundBuffer.publishRaw(cancel.buffer, cancel.templateId(), cancel.totalMessageSize());
+        recordProcessing(cancel.decoder.exchangeId(), CANCEL, now);
     }
 
     @Override
     public void onModify(final ModifyOrder modify) {
-        modify.encoder.timestampSend(nanoClock.nanoTime());
+        final long now = nanoClock.nanoTime();
+        modify.encoder.timestampSend(now);
         cause.stamp(modify.encoder);
         orderOutboundBuffer.publishRaw(modify.buffer, modify.templateId(), modify.totalMessageSize());
+        recordProcessing(modify.decoder.exchangeId(), MODIFY, now);
+    }
+
+    private void recordProcessing(final int exchangeId, final int action, final long now) {
+        if (processing != null && handlingSince != 0) {
+            processing.record(exchangeId, action, cause.triggerKind().value(), now - handlingSince, now);
+        }
     }
 
     @Override

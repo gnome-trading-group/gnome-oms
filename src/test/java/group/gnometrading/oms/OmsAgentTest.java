@@ -5,6 +5,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.when;
 
+import group.gnometrading.latency.LatencyGrid;
+import group.gnometrading.latency.LatencyKey;
+import group.gnometrading.latency.MinuteHistograms;
+import group.gnometrading.latency.MinuteSummary;
 import group.gnometrading.logging.NullLogger;
 import group.gnometrading.md.StreamDirectory;
 import group.gnometrading.oms.ledger.LedgerSink;
@@ -76,12 +80,16 @@ class OmsAgentTest {
     private final List<DrainedExecReport> strategyExecReports = new ArrayList<>();
 
     private GlobalSequence globalSequence;
+    // Every ring's stamp and the agent's clock: what the latency is measured on.
+    private long nowNanos = 1_700_000_040_000_000_000L;
 
     @BeforeEach
     void setUp() {
         globalSequence = new GlobalSequence();
-        intentBuffer = new SequencedRingBuffer<>(Intent::new, globalSequence);
-        execReportBuffer = new SequencedRingBuffer<>(OrderExecutionReport::new, globalSequence);
+        intentBuffer = new SequencedRingBuffer<>(
+                Intent::new, globalSequence, SequencedRingBuffer.DEFAULT_SIZE, () -> nowNanos);
+        execReportBuffer = new SequencedRingBuffer<>(
+                OrderExecutionReport::new, globalSequence, SequencedRingBuffer.DEFAULT_SIZE, () -> nowNanos);
         orderOutboundBuffer = new SequencedRingBuffer<>(Intent::new, globalSequence, 64);
         strategyExecReportBuffer = new SequencedRingBuffer<>(OrderExecutionReport::new, globalSequence, 64);
 
@@ -113,7 +121,7 @@ class OmsAgentTest {
                 orderOutboundBuffer,
                 strategyExecReportBuffer,
                 new PriceWriter(priceBuffer, priceSlots, new StreamDirectory(), marketDataBuffer),
-                () -> 0L);
+                () -> nowNanos);
 
         Listing listing = new Listing(
                 LISTING_ID,
@@ -206,6 +214,43 @@ class OmsAgentTest {
         assertEquals(TriggerKind.EXEC_REPORT, modify.decoder.triggerKind());
         assertEquals(2_000L, modify.decoder.triggerTimestamp());
         assertEquals(1_900L, modify.decoder.triggerOriginTimestamp());
+    }
+
+    @Test
+    void processingIsMeasuredFromTheArrivalOfWhatTheOmsWasHandling() throws Exception {
+        final MinuteHistograms histograms = new MinuteHistograms(LatencyGrid.size(1, 3, KINDS.length));
+        omsAgent.measureProcessing(new LatencyGrid(
+                histograms,
+                3,
+                "oms.process",
+                new int[] {EXCHANGE_ID},
+                new String[] {"KALSHI"},
+                OmsAgent.LATENCY_ACTIONS,
+                KINDS));
+        publishIntent(100L, 10L, 55L, TriggerKind.MARKET_DATA, 1_000L, 900L);
+        nowNanos += 3_000;
+        omsAgent.doWork();
+        outboundPoller.poll();
+        publishExecReport(decodeFirstOutboundOrder().getClientOidCounter(), ExecType.NEW);
+        omsAgent.doWork();
+        // A kill's cancel is the OMS's own: nothing it was handling, so nothing to measure.
+        RiskSnapshots.publishKills(riskEngine, true, new int[] {}, new int[] {});
+        omsAgent.doWork();
+        nowNanos += MinuteHistograms.MINUTE_NANOS;
+        omsAgent.doWork();
+
+        final MinuteSummary summary = new MinuteSummary(histograms.capacity());
+        assertTrue(histograms.summarize(summary));
+        long measured = 0;
+        for (int key = 0; key < histograms.keys(); key++) {
+            if (summary.count(key) > 0) {
+                final LatencyKey label = histograms.label(key);
+                assertEquals("KALSHI/NEW/MARKET_DATA", label.exchange() + "/" + label.action() + "/" + label.kind());
+                assertEquals(3_000, summary.max(key));
+                measured += summary.count(key);
+            }
+        }
+        assertEquals(1, measured);
     }
 
     @Test
@@ -338,6 +383,18 @@ class OmsAgentTest {
     }
 
     // --- helpers ---
+
+    private static final String[] KINDS = kindLabels();
+
+    private static String[] kindLabels() {
+        final String[] labels = new String[TriggerKind.values().length - 1];
+        for (TriggerKind kind : TriggerKind.values()) {
+            if (kind != TriggerKind.NULL_VAL) {
+                labels[kind.value()] = kind.name();
+            }
+        }
+        return labels;
+    }
 
     private void publishIntent(long bidPrice, long bidSize) {
         publishIntent(bidPrice, bidSize, 0L, TriggerKind.NONE, 0L, 0L);
