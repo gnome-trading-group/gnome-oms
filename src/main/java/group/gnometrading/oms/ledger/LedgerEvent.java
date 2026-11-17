@@ -4,8 +4,10 @@ import group.gnometrading.oms.position.Position;
 import group.gnometrading.oms.state.OrderState;
 import group.gnometrading.schemas.Liquidity;
 import group.gnometrading.schemas.OrderExecutionReportDecoder;
+import group.gnometrading.schemas.OrderRole;
 import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.schemas.Side;
+import group.gnometrading.schemas.TimeInForce;
 
 /** One ledger event, preallocated in the ring and overwritten in place. Fields a type doesn't use are left stale. */
 public final class LedgerEvent {
@@ -20,6 +22,11 @@ public final class LedgerEvent {
     public long price;
     public long size;
     public long eventTimeNs;
+
+    public TimeInForce timeInForce;
+    public OrderRole role;
+    public long episodeId;
+    public long intentSequence;
 
     public long cumQtyAfter;
     public long fee;
@@ -54,6 +61,10 @@ public final class LedgerEvent {
         this.price = src.price;
         this.size = src.size;
         this.eventTimeNs = src.eventTimeNs;
+        this.timeInForce = src.timeInForce;
+        this.role = src.role;
+        this.episodeId = src.episodeId;
+        this.intentSequence = src.intentSequence;
         this.cumQtyAfter = src.cumQtyAfter;
         this.fee = src.fee;
         this.netQuantityAfter = src.netQuantityAfter;

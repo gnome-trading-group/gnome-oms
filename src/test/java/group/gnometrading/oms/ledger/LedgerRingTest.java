@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import group.gnometrading.oms.position.DefaultPositionTracker;
 import group.gnometrading.oms.position.SharedPositionBuffer;
+import group.gnometrading.schemas.Order;
 import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.schemas.Side;
@@ -22,7 +23,7 @@ class LedgerRingTest {
     @Test
     void anEventWaitingTooLongToBeConfirmedFailsTheLedger() {
         final LedgerRing ring = new LedgerRing(8, 4, MAX_LAG_NS, positions);
-        ring.orderOpened(7, 100, 1, 1L, Side.Bid, 50, 10, 1_000L);
+        ring.orderOpened(7, 100, opened(1, 1L, Side.Bid, 50, 10), 1_000L);
 
         assertFalse(ring.isFailing(1_000L + MAX_LAG_NS));
         assertTrue(ring.isFailing(1_000L + MAX_LAG_NS + 1));
@@ -35,8 +36,8 @@ class LedgerRingTest {
     @Test
     void lagIsMeasuredFromTheOldestUnconfirmedEvent() {
         final LedgerRing ring = new LedgerRing(8, 4, MAX_LAG_NS, positions);
-        ring.orderOpened(7, 100, 1, 1L, Side.Bid, 50, 10, 1_000L);
-        ring.orderOpened(7, 100, 1, 2L, Side.Bid, 50, 10, 5_000_000_000L);
+        ring.orderOpened(7, 100, opened(1, 1L, Side.Bid, 50, 10), 1_000L);
+        ring.orderOpened(7, 100, opened(1, 2L, Side.Bid, 50, 10), 5_000_000_000L);
         drain(ring);
         ring.acknowledge(1);
 
@@ -55,10 +56,10 @@ class LedgerRingTest {
     void aLostEventFailsTheLedgerAndRecordsAGapWithThePositionOnceThereIsRoom() {
         positions.seedStrategyPosition(7, 100, 3_000_000, 1_500_000_000L, 4);
         final LedgerRing ring = new LedgerRing(2, 4, MAX_LAG_NS, positions);
-        ring.orderOpened(7, 100, 1, 1L, Side.Bid, 50, 10, 1L);
-        ring.orderOpened(7, 100, 1, 2L, Side.Bid, 50, 10, 2L);
-        ring.orderOpened(7, 100, 1, 3L, Side.Bid, 50, 10, 3L);
-        ring.orderOpened(7, 100, 1, 4L, Side.Bid, 50, 10, 4L);
+        ring.orderOpened(7, 100, opened(1, 1L, Side.Bid, 50, 10), 1L);
+        ring.orderOpened(7, 100, opened(1, 2L, Side.Bid, 50, 10), 2L);
+        ring.orderOpened(7, 100, opened(1, 3L, Side.Bid, 50, 10), 3L);
+        ring.orderOpened(7, 100, opened(1, 4L, Side.Bid, 50, 10), 4L);
 
         assertTrue(ring.isFailing(5L), "the third and fourth events were lost");
         assertEquals(List.of(LedgerEventType.ORDER_OPENED, LedgerEventType.ORDER_OPENED), types(drain(ring)));
@@ -107,8 +108,8 @@ class LedgerRingTest {
     @Test
     void refusalCountsWaitForRoomInsteadOfFailingTheLedger() {
         final LedgerRing ring = new LedgerRing(2, 4, MAX_LAG_NS, positions);
-        ring.orderOpened(7, 100, 1, 1L, Side.Bid, 50, 10, 1L);
-        ring.orderOpened(7, 100, 1, 2L, Side.Bid, 50, 10, 1L);
+        ring.orderOpened(7, 100, opened(1, 1L, Side.Bid, 50, 10), 1L);
+        ring.orderOpened(7, 100, opened(1, 2L, Side.Bid, 50, 10), 1L);
         for (int i = 0; i < 1_000; i++) {
             ring.orderRefused(100, RejectReason.RISK_LIMIT_EXCEEDED);
         }
@@ -138,5 +139,13 @@ class LedgerRingTest {
 
     private static List<LedgerEventType> types(final List<LedgerEvent> events) {
         return events.stream().map(event -> event.type).toList();
+    }
+
+    private static Order opened(
+            final int exchangeId, final long counter, final Side side, final long price, final long size) {
+        final Order order = new Order();
+        order.encodeClientOid(counter, 7);
+        order.encoder.exchangeId(exchangeId).side(side).price(price).size(size);
+        return order;
     }
 }

@@ -3,6 +3,7 @@ package group.gnometrading.oms.ledger;
 import group.gnometrading.oms.position.Position;
 import group.gnometrading.oms.state.OrderState;
 import group.gnometrading.schemas.Liquidity;
+import group.gnometrading.schemas.Order;
 import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.schemas.Side;
@@ -17,15 +18,7 @@ public interface LedgerSink {
     /** Records nothing, for runs with no ledger: backtests and local runs without a session. */
     LedgerSink NONE = new LedgerSink() {
         @Override
-        public void orderOpened(
-                int strategyId,
-                int listingId,
-                int exchangeId,
-                long clientOidCounter,
-                Side side,
-                long price,
-                long size,
-                long timeNs) {}
+        public void orderOpened(int strategyId, int listingId, Order order, long timeNs) {}
 
         @Override
         public void orderAcked(
@@ -75,16 +68,8 @@ public interface LedgerSink {
         }
     };
 
-    /** The OMS accepted an order and is about to send it. */
-    void orderOpened(
-            int strategyId,
-            int listingId,
-            int exchangeId,
-            long clientOidCounter,
-            Side side,
-            long price,
-            long size,
-            long timeNs);
+    /** The OMS accepted an order and is about to send it, stamped with its cause. */
+    void orderOpened(int strategyId, int listingId, Order order, long timeNs);
 
     /** The venue acknowledged an order; the report carries the id the venue knows it by. */
     void orderAcked(int strategyId, int listingId, int exchangeId, long clientOidCounter, OrderExecutionReport report);

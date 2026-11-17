@@ -19,9 +19,13 @@ import group.gnometrading.oms.position.Position;
 import group.gnometrading.oms.position.SharedPositionBuffer;
 import group.gnometrading.oms.state.OrderState;
 import group.gnometrading.schemas.Liquidity;
+import group.gnometrading.schemas.Order;
+import group.gnometrading.schemas.OrderEncoder;
 import group.gnometrading.schemas.OrderExecutionReport;
+import group.gnometrading.schemas.OrderRole;
 import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.schemas.Side;
+import group.gnometrading.schemas.TimeInForce;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -66,11 +70,39 @@ class LedgerAgentTest {
     }
 
     @Test
+    void anOpenedOrderSaysWhatItIsForItsEpisodeAndItsIntent() throws Exception {
+        final Order hedge = opened(1, 3L, Side.Ask, 480_000_000L, 5_000_000);
+        hedge.encoder
+                .timeInForce(TimeInForce.IMMEDIATE_OR_CANCELED)
+                .role(OrderRole.HEDGE)
+                .episodeId(812L)
+                .intentSequence(55L);
+        ring.orderOpened(7, 100, hedge, 1L);
+        final Order unsaid = opened(1, 4L, Side.Bid, 1, 1);
+        unsaid.encoder
+                .role(OrderRole.NONE)
+                .episodeId(OrderEncoder.episodeIdNullValue())
+                .intentSequence(OrderEncoder.intentSequenceNullValue());
+        ring.orderOpened(7, 100, unsaid, 1L);
+
+        agent.doWork();
+
+        final JsonNode opens = mapper.readTree(posted.get(0)).get("orderOpens");
+        assertEquals("IMMEDIATE_OR_CANCELED", opens.get(0).get("timeInForce").asText());
+        assertEquals("HEDGE", opens.get(0).get("role").asText());
+        assertEquals(812L, opens.get(0).get("episodeId").asLong());
+        assertEquals(55L, opens.get(0).get("intentSequence").asLong());
+        assertTrue(opens.get(1).get("role").isNull());
+        assertTrue(opens.get(1).get("episodeId").isNull());
+        assertTrue(opens.get(1).get("intentSequence").isNull());
+    }
+
+    @Test
     void postsEachKindOfEventAndConfirmsTheBatch() throws Exception {
         final Position after = new Position();
         after.init(100);
         after.applyFill(Side.Bid, 4_000_000, 500_000_000L, 1_000_000);
-        ring.orderOpened(7, 100, 1, 3L, Side.Bid, 500_000_000L, 10_000_000, 1L);
+        ring.orderOpened(7, 100, opened(1, 3L, Side.Bid, 500_000_000L, 10_000_000), 1L);
         final OrderExecutionReport ack = new OrderExecutionReport();
         ack.encoder.exchangeOrderId("0x" + "ab".repeat(32)).timestampRecv(2L);
         ring.orderAcked(7, 100, 1, 3L, ack);
@@ -154,7 +186,7 @@ class LedgerAgentTest {
     @Test
     void reportsItsHealthForTheSessionHeartbeat() {
         assertEquals(0, agent.lastAcceptedMs());
-        ring.orderOpened(7, 100, 1, 3L, Side.Bid, 1, 1, 1L);
+        ring.orderOpened(7, 100, opened(1, 3L, Side.Bid, 1, 1), 1L);
         statuses.add(503);
 
         agent.doWork();
@@ -186,7 +218,7 @@ class LedgerAgentTest {
 
     @Test
     void retriesTheSameBatchAfterAFailureAndConfirmsOnlyOnSuccess() throws Exception {
-        ring.orderOpened(7, 100, 1, 3L, Side.Bid, 1, 1, 1L);
+        ring.orderOpened(7, 100, opened(1, 3L, Side.Bid, 1, 1), 1L);
         statuses.add(503);
         statuses.add(-1);
 
@@ -207,12 +239,12 @@ class LedgerAgentTest {
 
     @Test
     void aFencedSessionStopsWriting() {
-        ring.orderOpened(7, 100, 1, 3L, Side.Bid, 1, 1, 1L);
+        ring.orderOpened(7, 100, opened(1, 3L, Side.Bid, 1, 1), 1L);
         statuses.add(409);
 
         agent.doWork();
         now[0] += 10_000;
-        ring.orderOpened(7, 100, 1, 4L, Side.Bid, 1, 1, 2L);
+        ring.orderOpened(7, 100, opened(1, 4L, Side.Bid, 1, 1), 2L);
         agent.doWork();
 
         assertEquals(1, posted.size());
@@ -296,7 +328,7 @@ class LedgerAgentTest {
     @Test
     void drainsABacklogWithoutWaitingAFlushInterval() {
         for (int i = 0; i < LedgerAgent.MAX_EVENTS_PER_BATCH + 5; i++) {
-            ring.orderOpened(7, 100, 1, i, Side.Bid, 1, 1, 1L);
+            ring.orderOpened(7, 100, opened(1, i, Side.Bid, 1, 1), 1L);
         }
         agent.doWork();
         agent.doWork();
@@ -305,9 +337,17 @@ class LedgerAgentTest {
 
     @Test
     void closingWritesWhatIsStillWaiting() {
-        ring.orderOpened(7, 100, 1, 3L, Side.Bid, 1, 1, 1L);
+        ring.orderOpened(7, 100, opened(1, 3L, Side.Bid, 1, 1), 1L);
         agent.onClose();
         assertEquals(1, posted.size());
         assertFalse(ring.isFailing(1L + MAX_LAG_NS + 1));
+    }
+
+    private static Order opened(
+            final int exchangeId, final long counter, final Side side, final long price, final long size) {
+        final Order order = new Order();
+        order.encodeClientOid(counter, 7);
+        order.encoder.exchangeId(exchangeId).side(side).price(price).size(size);
+        return order;
     }
 }

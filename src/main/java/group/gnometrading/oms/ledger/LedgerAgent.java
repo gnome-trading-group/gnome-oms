@@ -8,6 +8,8 @@ import group.gnometrading.logging.Logger;
 import group.gnometrading.metrics.MetricCounters;
 import group.gnometrading.oms.pnl.PriceSlotRegistry;
 import group.gnometrading.oms.pnl.SharedPriceBuffer;
+import group.gnometrading.schemas.OrderDecoder;
+import group.gnometrading.schemas.OrderRole;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.strings.GnomeString;
 import group.gnometrading.strings.MutableString;
@@ -317,7 +319,15 @@ public final class LedgerAgent implements GnomeAgent {
                 writeOrderKey(event);
                 json.writeComma().writeObjectEntry("side", sideOf(event.side)).writeComma();
                 json.writeObjectEntry("price", event.price);
-                json.writeComma().writeObjectEntry("size", event.size).writeObjectEnd();
+                json.writeComma().writeObjectEntry("size", event.size).writeComma();
+                writeNullableName("timeInForce", event.timeInForce);
+                json.writeComma();
+                writeNullableName("role", event.role == OrderRole.NONE ? null : event.role);
+                json.writeComma();
+                writeNullableLong("episodeId", event.episodeId, OrderDecoder.episodeIdNullValue());
+                json.writeComma();
+                writeNullableLong("intentSequence", event.intentSequence, OrderDecoder.intentSequenceNullValue());
+                json.writeObjectEnd();
             }
         }
         json.writeArrayEnd();
@@ -396,6 +406,15 @@ public final class LedgerAgent implements GnomeAgent {
             }
         }
         json.writeArrayEnd();
+    }
+
+    private void writeNullableLong(final String key, final long value, final long nullValue) {
+        json.writeString(key).writeColon();
+        if (value == nullValue) {
+            json.writeNull();
+        } else {
+            json.writeNumber(value);
+        }
     }
 
     private void writeNullableName(final String key, final Enum<?> value) {

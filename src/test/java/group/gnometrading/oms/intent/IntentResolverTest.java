@@ -11,6 +11,7 @@ import group.gnometrading.schemas.IntentDecoder;
 import group.gnometrading.schemas.ModifyOrder;
 import group.gnometrading.schemas.Order;
 import group.gnometrading.schemas.OrderExecutionReport;
+import group.gnometrading.schemas.OrderRole;
 import group.gnometrading.schemas.OrderType;
 import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.schemas.Side;
@@ -595,6 +596,53 @@ class IntentResolverTest {
         assertEquals(OrderType.LIMIT, o.orderType);
         assertEquals(102L, o.price);
         assertEquals(TimeInForce.IMMEDIATE_OR_CANCELED, o.timeInForce);
+    }
+
+    @Test
+    void aQuoteIsAQuoteAndATakeSaysWhatItIsFor() {
+        resolve(100L, 10L, nullPrice(), 0L);
+        Intent take = new Intent();
+        take.encoder
+                .strategyId(STRATEGY_ID)
+                .exchangeId(EXCHANGE_ID)
+                .securityId(SECURITY_ID)
+                .bidPrice(IntentDecoder.bidPriceNullValue())
+                .bidSize(IntentDecoder.bidSizeNullValue())
+                .askPrice(IntentDecoder.askPriceNullValue())
+                .askSize(IntentDecoder.askSizeNullValue())
+                .takeSize(5L)
+                .takeSide(Side.Ask)
+                .takeOrderType(OrderType.LIMIT)
+                .takeLimitPrice(98L)
+                .takeRole(OrderRole.HEDGE);
+
+        resolver.resolve(take, LISTING_ID + 1, sink);
+
+        NewOrderCapture quote = sink.newOrders.get(0);
+        assertEquals(OrderRole.QUOTE, quote.role());
+        NewOrderCapture hedge = sink.newOrders.get(1);
+        assertEquals(OrderRole.HEDGE, hedge.role());
+    }
+
+    @Test
+    void aTakeThatSaysNothingIsRoleNone() {
+        Intent intent = new Intent();
+        intent.encoder
+                .strategyId(STRATEGY_ID)
+                .exchangeId(EXCHANGE_ID)
+                .securityId(SECURITY_ID)
+                .bidPrice(IntentDecoder.bidPriceNullValue())
+                .bidSize(IntentDecoder.bidSizeNullValue())
+                .askPrice(IntentDecoder.askPriceNullValue())
+                .askSize(IntentDecoder.askSizeNullValue())
+                .takeSize(5L)
+                .takeSide(Side.Bid)
+                .takeOrderType(OrderType.NULL_VAL)
+                .takeRole(OrderRole.NULL_VAL);
+
+        resolver.resolve(intent, LISTING_ID, sink);
+
+        assertEquals(OrderRole.NONE, sink.newOrders.get(0).role());
     }
 
     // --- multi-instrument ---
@@ -1273,7 +1321,8 @@ class IntentResolverTest {
                     order.decoder.side(),
                     order.decoder.orderType(),
                     order.decoder.timeInForce(),
-                    order.decoder.flags().getRaw()));
+                    order.decoder.flags().getRaw(),
+                    order.decoder.role()));
         }
 
         @Override
@@ -1297,7 +1346,8 @@ class IntentResolverTest {
             Side side,
             OrderType orderType,
             TimeInForce timeInForce,
-            short flags) {}
+            short flags,
+            OrderRole role) {}
 
     private record ModifyCapture(long price, long size, short flags) {}
 

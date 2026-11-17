@@ -12,6 +12,7 @@ import group.gnometrading.schemas.Order;
 import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.schemas.OrderExecutionReportDecoder;
 import group.gnometrading.schemas.OrderFlagsDecoder;
+import group.gnometrading.schemas.OrderRole;
 import group.gnometrading.schemas.OrderType;
 import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.schemas.Side;
@@ -348,7 +349,8 @@ public final class IntentResolver {
                 .size(size)
                 .side(side)
                 .orderType(OrderType.LIMIT)
-                .timeInForce(TimeInForce.GOOD_TILL_CANCELED);
+                .timeInForce(TimeInForce.GOOD_TILL_CANCELED)
+                .role(OrderRole.QUOTE);
         pendingOrder.encoder.flags().clear();
         pendingOrder.encoder.flags().postOnly(OrderFlagsDecoder.postOnly((byte) flags));
         slot.onNewSubmitted(oid, price, size, flags);
@@ -374,6 +376,9 @@ public final class IntentResolver {
                 ? IntentDecoder.takeLimitPriceNullValue()
                 : intent.decoder.takeLimitPrice();
 
+        // A take says what it's for; a quote is always a quote, so only takes read the intent's role.
+        OrderRole role = intent.decoder.takeRole() == OrderRole.NULL_VAL ? OrderRole.NONE : intent.decoder.takeRole();
+
         long oid = oidSupplier.getAsLong();
         pendingOrder.encodeClientOid(oid, strategyId);
         pendingOrder
@@ -384,7 +389,8 @@ public final class IntentResolver {
                 .size(takeSize)
                 .side(takeSide)
                 .orderType(orderType)
-                .timeInForce(TimeInForce.IMMEDIATE_OR_CANCELED);
+                .timeInForce(TimeInForce.IMMEDIATE_OR_CANCELED)
+                .role(role);
         pendingOrder.encoder.flags().clear();
         handler.onNewOrder(pendingOrder);
     }

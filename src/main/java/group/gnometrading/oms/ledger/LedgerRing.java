@@ -6,6 +6,8 @@ import group.gnometrading.oms.position.Position;
 import group.gnometrading.oms.position.PositionTracker;
 import group.gnometrading.oms.state.OrderState;
 import group.gnometrading.schemas.Liquidity;
+import group.gnometrading.schemas.Order;
+import group.gnometrading.schemas.OrderDecoder;
 import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.schemas.Side;
@@ -66,24 +68,21 @@ public final class LedgerRing implements LedgerSink {
     }
 
     @Override
-    public void orderOpened(
-            final int strategyId,
-            final int listingId,
-            final int exchangeId,
-            final long clientOidCounter,
-            final Side side,
-            final long price,
-            final long size,
-            final long timeNs) {
-        final LedgerEvent event = claim(strategyId, listingId, clientOidCounter, timeNs);
+    public void orderOpened(final int strategyId, final int listingId, final Order order, final long timeNs) {
+        final LedgerEvent event = claim(strategyId, listingId, order.getClientOidCounter(), timeNs);
         if (event == null) {
             return;
         }
+        final OrderDecoder decoder = order.decoder;
         event.type = LedgerEventType.ORDER_OPENED;
-        event.exchangeId = exchangeId;
-        event.side = side;
-        event.price = price;
-        event.size = size;
+        event.exchangeId = decoder.exchangeId();
+        event.side = decoder.side();
+        event.price = decoder.price();
+        event.size = decoder.size();
+        event.timeInForce = decoder.timeInForce();
+        event.role = decoder.role();
+        event.episodeId = decoder.episodeId();
+        event.intentSequence = decoder.intentSequence();
         commit();
     }
 

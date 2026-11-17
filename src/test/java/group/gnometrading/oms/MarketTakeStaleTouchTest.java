@@ -217,15 +217,7 @@ class MarketTakeStaleTouchTest {
     /** Runs {@link #onFill} when the OMS books a fill, standing in for a strategy thread publishing mid-pass. */
     private final class FillHook implements LedgerSink {
         @Override
-        public void orderOpened(
-                int strategyId,
-                int listingId,
-                int exchangeId,
-                long clientOidCounter,
-                Side side,
-                long price,
-                long size,
-                long timeNs) {}
+        public void orderOpened(int strategyId, int listingId, Order order, long timeNs) {}
 
         @Override
         public void orderAcked(

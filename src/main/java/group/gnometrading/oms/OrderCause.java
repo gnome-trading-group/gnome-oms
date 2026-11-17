@@ -10,8 +10,9 @@ import group.gnometrading.schemas.TriggerKind;
  * Why the OMS is sending what it sends: the intent it is acting on and that intent's trigger, the execution report
  * it is reacting to, or its own risk handling. {@link OmsAgent} sets it around each event and stamps it on every order,
  * modify and cancel it publishes, so each traces back to what caused it. An intent queued behind an order in flight
- * keeps its own cause, put back when it is finally sent. One per OMS, on the OMS thread; mutable, never allocated per
- * event.
+ * keeps its own cause, put back when it is finally sent. A new order also carries its intent's episode, the strategy's
+ * id for orders that belong together, so a queued one keeps that too. One per OMS, on the OMS thread; mutable, never
+ * allocated per event.
  */
 public final class OrderCause {
 
@@ -20,6 +21,7 @@ public final class OrderCause {
     private TriggerKind triggerKind = TriggerKind.RISK;
     private long triggerTimestamp;
     private long triggerOriginTimestamp;
+    private long episodeId;
 
     /** Acting on the intent at {@code sequence}: its trigger is the one the strategy stamped on it. */
     public void ofIntent(final long sequence, final IntentDecoder intent) {
@@ -28,6 +30,7 @@ public final class OrderCause {
         this.triggerKind = intent.triggerKind();
         this.triggerTimestamp = intent.triggerTimestamp();
         this.triggerOriginTimestamp = intent.triggerOriginTimestamp();
+        this.episodeId = intent.episodeId();
     }
 
     /** Reacting to the execution report at {@code sequence}, with no intent of its own behind it. */
@@ -37,6 +40,7 @@ public final class OrderCause {
         this.triggerKind = TriggerKind.EXEC_REPORT;
         this.triggerTimestamp = arrivedAt;
         this.triggerOriginTimestamp = receivedAt;
+        this.episodeId = 0;
     }
 
     /** The OMS acting on its own: a kill or halt sweep, a market-risk latch, shutdown. */
@@ -46,6 +50,7 @@ public final class OrderCause {
         this.triggerKind = TriggerKind.RISK;
         this.triggerTimestamp = 0;
         this.triggerOriginTimestamp = 0;
+        this.episodeId = 0;
     }
 
     public void copyFrom(final OrderCause other) {
@@ -54,6 +59,7 @@ public final class OrderCause {
         this.triggerKind = other.triggerKind;
         this.triggerTimestamp = other.triggerTimestamp;
         this.triggerOriginTimestamp = other.triggerOriginTimestamp;
+        this.episodeId = other.episodeId;
     }
 
     public void stamp(final OrderEncoder order) {
@@ -61,7 +67,8 @@ public final class OrderCause {
                 .triggerSequence(triggerSequence)
                 .triggerKind(triggerKind)
                 .triggerTimestamp(triggerTimestamp)
-                .triggerOriginTimestamp(triggerOriginTimestamp);
+                .triggerOriginTimestamp(triggerOriginTimestamp)
+                .episodeId(episodeId);
     }
 
     public void stamp(final ModifyOrderEncoder modify) {
@@ -98,5 +105,9 @@ public final class OrderCause {
 
     public long triggerOriginTimestamp() {
         return triggerOriginTimestamp;
+    }
+
+    public long episodeId() {
+        return episodeId;
     }
 }

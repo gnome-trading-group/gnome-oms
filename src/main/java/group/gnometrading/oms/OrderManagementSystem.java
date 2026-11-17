@@ -368,16 +368,10 @@ public final class OrderManagementSystem {
         final TrackedOrder tracked = orderStateManager.trackOrder(order);
         int listingId = resolveListingId(order.decoder.exchangeId(), order.decoder.securityId());
         // Recorded before the order is sent, so a later session can recognise it on the venue even if this process
-        // dies before the venue answers.
-        ledger.orderOpened(
-                order.getClientOidStrategyId(),
-                listingId,
-                order.decoder.exchangeId(),
-                order.getClientOidCounter(),
-                order.decoder.side(),
-                order.decoder.price(),
-                order.decoder.size(),
-                clock.nanoTime());
+        // dies before the venue answers. Stamped first, so the ledger has the intent and episode the order went out
+        // with (OmsAgent stamps it again on send, from the same cause).
+        orderCause.stamp(order.encoder);
+        ledger.orderOpened(order.getClientOidStrategyId(), listingId, order, clock.nanoTime());
         positionTracker.adjustStrategyLeaves(
                 order.getClientOidStrategyId(),
                 listingId,
