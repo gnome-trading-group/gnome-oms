@@ -22,8 +22,8 @@ import org.agrona.concurrent.EpochClock;
  *
  * <p>Runs on its own thread. It posts only when there is something to write, at most every flush interval, with one
  * request in flight: a failed request is retried, unchanged, with growing backoff, and the batch is acknowledged to
- * the {@link LedgerRing} only once the registry has stored it. Marks ride along only when a listing's top of book or
- * last trade changed, at most every mark interval.
+ * the {@link LedgerRing} only once the registry has stored it. Marks ride along when a listing's top of book or last
+ * trade changed, at most every mark interval, and an unchanged one is sent again every {@link #MARK_HEARTBEAT_MS}.
  *
  * <p>Nothing here may stop the process: every failure is logged and retried, and the OMS, which watches the ring,
  * decides when the ledger has fallen too far behind to keep trading.
@@ -47,6 +47,9 @@ public final class LedgerAgent implements GnomeAgent {
     private static final long MAX_BACKOFF_MS = 5_000;
     private static final long MAX_PARK_MS = 50;
     private static final int CLOSE_ATTEMPTS = 3;
+    // A quiet book still has a price: the registry reads a listing with no recent mark as one nobody can price
+    // (NO_PRICE), so a held book that hasn't moved is re-marked as often as the registry's mark poller does it.
+    static final long MARK_HEARTBEAT_MS = 300_000;
     private static final int HTTP_OK = 200;
     private static final int HTTP_CLIENT_ERROR = 400;
     private static final int HTTP_SERVER_ERROR = 500;
@@ -69,6 +72,7 @@ public final class LedgerAgent implements GnomeAgent {
     private final long[] top = new long[3];
     // Per price slot: the top of book and last trade last stored, and any newer one waiting to be.
     private final long[][] sentMarks;
+    private final long[] sentMarkTimes;
     private final long[][] pendingMarks;
     private final long[] pendingMarkTimes;
     private final boolean[] markPending;
@@ -111,6 +115,7 @@ public final class LedgerAgent implements GnomeAgent {
         }
         final int slots = prices.capacity();
         this.sentMarks = new long[slots][3];
+        this.sentMarkTimes = new long[slots];
         this.pendingMarks = new long[slots][3];
         this.pendingMarkTimes = new long[slots];
         this.markPending = new boolean[slots];
@@ -194,7 +199,7 @@ public final class LedgerAgent implements GnomeAgent {
         for (int slot = 0; slot < priceSlots.count(); slot++) {
             prices.readTop(slot, top);
             final long[] sent = sentMarks[slot];
-            if (top[0] == sent[0] && top[1] == sent[1] && top[2] == sent[2]) {
+            if (top[0] == sent[0] && top[1] == sent[1] && top[2] == sent[2] && !heartbeatDue(slot, now)) {
                 markPending[slot] = false;
                 continue;
             }
@@ -202,6 +207,14 @@ public final class LedgerAgent implements GnomeAgent {
             pendingMarkTimes[slot] = now;
             markPending[slot] = true;
         }
+    }
+
+    // Never for a slot with no price yet, nor while its book is flagged bad: that would vouch for a price the feed
+    // can no longer confirm.
+    private boolean heartbeatDue(final int slot, final long now) {
+        return (top[0] != 0 || top[1] != 0 || top[2] != 0)
+                && prices.badSince(slot) == 0
+                && now - sentMarkTimes[slot] >= MARK_HEARTBEAT_MS;
     }
 
     private void prepareBatch() {
@@ -237,6 +250,7 @@ public final class LedgerAgent implements GnomeAgent {
             for (int slot = 0; slot < priceSlots.count(); slot++) {
                 if (markPending[slot]) {
                     System.arraycopy(pendingMarks[slot], 0, sentMarks[slot], 0, 3);
+                    sentMarkTimes[slot] = pendingMarkTimes[slot];
                     markPending[slot] = false;
                 }
             }

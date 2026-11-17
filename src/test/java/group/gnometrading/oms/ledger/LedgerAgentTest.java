@@ -247,6 +247,53 @@ class LedgerAgentTest {
     }
 
     @Test
+    void resendsAnUnchangedMarkOnceTheHeartbeatIsDue() throws Exception {
+        prices.writeQuote(0, 30, 32);
+        agent.doWork();
+        assertEquals(1, posted.size());
+
+        now[0] += LedgerAgent.MARK_HEARTBEAT_MS - MARK_MS;
+        agent.doWork();
+        assertEquals(1, posted.size(), "the heartbeat isn't due yet");
+
+        now[0] += MARK_MS;
+        agent.doWork();
+        assertEquals(2, posted.size());
+        final JsonNode mark = mapper.readTree(posted.get(1)).get("marks").get(0);
+        assertEquals(30, mark.get("bid").asLong());
+        assertEquals(32, mark.get("ask").asLong());
+        assertEquals(now[0], mark.get("tsMs").asLong());
+
+        now[0] += MARK_MS;
+        agent.doWork();
+        assertEquals(2, posted.size(), "the heartbeat restarts from the mark just sent");
+    }
+
+    @Test
+    void sendsNoHeartbeatWhileTheBookIsFlaggedBad() {
+        prices.writeQuote(0, 30, 32);
+        agent.doWork();
+        assertEquals(1, posted.size());
+
+        prices.markBad(0, 1L);
+        now[0] += LedgerAgent.MARK_HEARTBEAT_MS;
+        agent.doWork();
+        assertEquals(1, posted.size());
+
+        prices.markGood(0);
+        now[0] += MARK_MS;
+        agent.doWork();
+        assertEquals(2, posted.size());
+    }
+
+    @Test
+    void sendsNoHeartbeatForAListingWithNoPrice() {
+        now[0] += LedgerAgent.MARK_HEARTBEAT_MS;
+        agent.doWork();
+        assertEquals(0, posted.size());
+    }
+
+    @Test
     void drainsABacklogWithoutWaitingAFlushInterval() {
         for (int i = 0; i < LedgerAgent.MAX_EVENTS_PER_BATCH + 5; i++) {
             ring.orderOpened(7, 100, 1, i, Side.Bid, 1, 1, 1L);
