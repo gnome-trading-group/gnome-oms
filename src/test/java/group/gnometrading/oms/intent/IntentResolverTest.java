@@ -102,18 +102,108 @@ class IntentResolverTest {
     }
 
     @Test
-    void pendingNewQueuesCancelWithoutEmittingActions() {
+    void pendingNewPullCancelsAtOnceAndNotAgainOnAck() {
         resolve(100L, 10L, nullPrice(), 0L);
         long oid = sink.newOrders.get(0).clientOidCounter;
         sink.clear();
 
         resolve(nullPrice(), 0L, nullPrice(), 0L);
 
+        assertEquals(List.of(oid), sink.cancels, "the pull must not wait for the NEW");
+
+        ack(oid, Side.Bid);
+        assertEquals(List.of(oid), sink.cancels, "the NEW must not send the cancel again");
+
+        report(oid, ExecType.CANCEL, 0L);
+        assertEquals(0, sink.newOrders.size());
+        assertFalse(resolver.ownsOrder(LISTING_ID, Side.Bid, oid));
+    }
+
+    @Test
+    void pendingNewRepeatedPullsSendOneCancel() {
+        resolve(100L, 10L, nullPrice(), 0L);
+        long oid = sink.newOrders.get(0).clientOidCounter;
+        sink.clear();
+
+        resolve(nullPrice(), 0L, nullPrice(), 0L);
+        resolve(nullPrice(), 0L, nullPrice(), 0L);
+
+        assertEquals(List.of(oid), sink.cancels);
+    }
+
+    @Test
+    void pendingNewPullThenNewIntentPlacesItAfterTheCancel() {
+        resolve(100L, 10L, nullPrice(), 0L);
+        long oid = sink.newOrders.get(0).clientOidCounter;
+        resolve(nullPrice(), 0L, nullPrice(), 0L);
+        resolve(99L, 10L, nullPrice(), 0L);
+        sink.clear();
+
+        ack(oid, Side.Bid);
+        assertEquals(0, sink.newOrders.size());
+        assertEquals(0, sink.modifies.size());
+
+        report(oid, ExecType.CANCEL, 0L);
+        assertEquals(1, sink.newOrders.size());
+        assertEquals(99L, sink.newOrders.get(0).price);
+    }
+
+    @Test
+    void pendingNewCancelAnsweredBeforeTheNew() {
+        resolve(100L, 10L, nullPrice(), 0L);
+        long oid = sink.newOrders.get(0).clientOidCounter;
+        resolve(nullPrice(), 0L, nullPrice(), 0L);
+        sink.clear();
+
+        report(oid, ExecType.CANCEL, 0L);
+
+        assertEquals(0, sink.newOrders.size());
+        assertEquals(0, sink.cancels.size());
+        assertFalse(resolver.ownsOrder(LISTING_ID, Side.Bid, oid));
+    }
+
+    @Test
+    void pendingNewFillAfterTheEarlyCancelEndsTheSlot() {
+        resolve(100L, 10L, nullPrice(), 0L);
+        long oid = sink.newOrders.get(0).clientOidCounter;
+        resolve(nullPrice(), 0L, nullPrice(), 0L);
+        sink.clear();
+
+        report(oid, ExecType.FILL, 10L);
+
+        assertEquals(0, sink.newOrders.size());
+        assertEquals(0, sink.cancels.size());
+        assertFalse(resolver.ownsOrder(LISTING_ID, Side.Bid, oid));
+    }
+
+    @Test
+    void pendingNewEarlyCancelRefusedThenNewRetriesQueuedPullOnNativeModifyVenue() {
+        resolve(100L, 10L, nullPrice(), 0L);
+        long oid = sink.newOrders.get(0).clientOidCounter;
+        resolve(nullPrice(), 0L, nullPrice(), 0L);
+        sink.clear();
+
+        report(oid, ExecType.CANCEL_REJECT, 0L);
         assertEquals(0, sink.cancels.size());
 
-        // cancel fires after ack
+        // The order is still wanted gone, and only now acknowledged: the queued pull goes again.
         ack(oid, Side.Bid);
-        assertEquals(1, sink.cancels.size());
+        assertEquals(List.of(oid), sink.cancels);
+    }
+
+    @Test
+    void pendingNewRepriceOnNativeModifyVenueWaitsForTheNew() {
+        resolve(100L, 10L, nullPrice(), 0L);
+        long oid = sink.newOrders.get(0).clientOidCounter;
+        sink.clear();
+
+        resolve(101L, 10L, nullPrice(), 0L);
+        assertEquals(0, sink.cancels.size());
+
+        ack(oid, Side.Bid);
+        assertEquals(1, sink.modifies.size());
+        assertEquals(101L, sink.modifies.get(0).price);
+        assertEquals(0, sink.cancels.size());
     }
 
     // --- resolve — LIVE state ---
@@ -247,15 +337,15 @@ class IntentResolverTest {
     }
 
     @Test
-    void newAckWithQueuedCancelEmitsCancel() {
+    void newAckAfterAnEarlyPullSendsNothing() {
         resolve(100L, 10L, nullPrice(), 0L);
         long oid = sink.newOrders.get(0).clientOidCounter;
-        resolve(nullPrice(), 0L, nullPrice(), 0L); // queue cancel
+        resolve(nullPrice(), 0L, nullPrice(), 0L);
         sink.clear();
 
         ack(oid, Side.Bid);
 
-        assertEquals(1, sink.cancels.size());
+        assertEquals(0, sink.cancels.size(), "the pull's cancel already went out");
         assertEquals(0, sink.modifies.size());
     }
 
@@ -1006,17 +1096,244 @@ class IntentResolverTest {
     }
 
     @Test
-    void cancelReplace_queuedIntentOnAckCancels() {
+    void cancelReplace_repriceWhilePendingNewCancelsAtOnce() {
+        useCancelReplaceVenue();
+        resolve(100L, 10L, nullPrice(), 0L);
+        long oid = sink.newOrders.get(0).clientOidCounter;
+        sink.clear();
+
+        resolve(101L, 10L, nullPrice(), 0L);
+        assertEquals(List.of(oid), sink.cancels, "the reprice must not wait for the NEW");
+
+        ack(oid, Side.Bid);
+        assertEquals(List.of(oid), sink.cancels, "the NEW must not send the cancel again");
+        assertEquals(0, sink.modifies.size());
+        assertEquals(0, sink.newOrders.size());
+
+        report(oid, ExecType.CANCEL, 0L);
+        assertEquals(1, sink.newOrders.size());
+        assertEquals(101L, sink.newOrders.get(0).price);
+    }
+
+    @Test
+    void cancelReplace_latestRepriceWhilePendingNewIsTheReplacement() {
+        useCancelReplaceVenue();
+        resolve(100L, 10L, nullPrice(), 0L);
+        long oid = sink.newOrders.get(0).clientOidCounter;
+        resolve(101L, 10L, nullPrice(), 0L);
+        resolve(102L, 7L, nullPrice(), 0L);
+        sink.clear();
+
+        assertEquals(0, sink.cancels.size(), "one cancel for the order, however many reprices");
+
+        report(oid, ExecType.CANCEL, 0L);
+        assertEquals(1, sink.newOrders.size());
+        assertEquals(102L, sink.newOrders.get(0).price);
+        assertEquals(7L, sink.newOrders.get(0).size);
+    }
+
+    @Test
+    void cancelReplace_sameIntentWhilePendingNewSendsNothing() {
+        useCancelReplaceVenue();
+        resolve(100L, 10L, nullPrice(), 0L);
+        long oid = sink.newOrders.get(0).clientOidCounter;
+        sink.clear();
+
+        resolve(100L, 10L, nullPrice(), 0L);
+        ack(oid, Side.Bid);
+
+        assertEquals(0, sink.cancels.size());
+        assertEquals(0, sink.newOrders.size());
+        assertTrue(resolver.ownsOrder(LISTING_ID, Side.Bid, oid));
+    }
+
+    @Test
+    void cancelReplace_orderEndedBeforeItWasPlacedPlacesTheReplacement() {
         useCancelReplaceVenue();
         resolve(100L, 10L, nullPrice(), 0L);
         long oid = sink.newOrders.get(0).clientOidCounter;
         resolve(101L, 10L, nullPrice(), 0L);
         sink.clear();
 
+        // The venue refuses an order whose cancel reached it first, which the gateway reports as its CANCEL.
+        report(oid, ExecType.CANCEL, 0L);
+
+        assertEquals(1, sink.newOrders.size());
+        assertEquals(101L, sink.newOrders.get(0).price);
+    }
+
+    @Test
+    void cancelReplace_refusedEarlyPullIsSentAgainOnTheNew() {
+        useCancelReplaceVenue();
+        resolve(100L, 10L, nullPrice(), 0L);
+        long oid = sink.newOrders.get(0).clientOidCounter;
+        resolve(nullPrice(), 0L, nullPrice(), 0L);
+        sink.clear();
+
+        report(oid, ExecType.CANCEL_REJECT, 0L);
+        assertEquals(0, sink.cancels.size());
+
         ack(oid, Side.Bid);
+        assertEquals(List.of(oid), sink.cancels, "a pull is never dropped, only a replacement");
+        assertEquals(0, sink.newOrders.size());
+    }
+
+    @Test
+    void cancelReplace_partialFillBeforeTheNewIsRepricedAtOnceAndReplacedInFull() {
+        useCancelReplaceVenue();
+        resolve(100L, 10L, nullPrice(), 0L);
+        long oid = sink.newOrders.get(0).clientOidCounter;
+        report(oid, ExecType.PARTIAL_FILL, 4L);
+        sink.clear();
+
+        resolve(101L, 10L, nullPrice(), 0L);
+        assertEquals(List.of(oid), sink.cancels);
+
+        ack(oid, Side.Bid);
+        report(oid, ExecType.CANCEL, 4L);
+        assertEquals(1, sink.newOrders.size());
+        assertEquals(101L, sink.newOrders.get(0).price);
+        assertEquals(10L, sink.newOrders.get(0).size);
+    }
+
+    @Test
+    void earlyPullRefusedAfterTheNewLeavesTheOrderLiveForTheNextPull() {
+        resolve(100L, 10L, nullPrice(), 0L);
+        long oid = sink.newOrders.get(0).clientOidCounter;
+        resolve(nullPrice(), 0L, nullPrice(), 0L);
+        ack(oid, Side.Bid);
+        sink.clear();
+
+        report(oid, ExecType.CANCEL_REJECT, 0L);
+        assertEquals(0, sink.cancels.size());
+        assertTrue(resolver.ownsOrder(LISTING_ID, Side.Bid, oid));
+
+        resolve(nullPrice(), 0L, nullPrice(), 0L);
+        assertEquals(List.of(oid), sink.cancels);
+    }
+
+    @Test
+    void cancelReplace_earlyCancelRefusedIsSentAgainOnTheNewAndThenReplaced() {
+        useCancelReplaceVenue();
+        resolve(100L, 10L, nullPrice(), 0L);
+        long oid = sink.newOrders.get(0).clientOidCounter;
+        resolve(101L, 10L, nullPrice(), 0L);
+        sink.clear();
+
+        report(oid, ExecType.CANCEL_REJECT, 0L);
+        assertEquals(0, sink.cancels.size(), "nothing until the venue has the order");
+
+        ack(oid, Side.Bid);
+        assertEquals(List.of(oid), sink.cancels, "the replacement still stands once the order rests");
+
+        report(oid, ExecType.CANCEL, 0L);
+        assertEquals(1, sink.newOrders.size());
+        assertEquals(101L, sink.newOrders.get(0).price);
+    }
+
+    @Test
+    void cancelReplace_aRefusedRepriceIsRetriedAfterAPause() {
+        useCancelReplaceVenue();
+        long oid = goLiveReturningOid(100L, 10L);
+        resolve(101L, 10L, nullPrice(), 0L);
+        report(oid, ExecType.CANCEL_REJECT, 0L);
+        sink.clear();
+
+        resolver.retryRefusedCancels(sink);
+        assertEquals(0, sink.cancels.size());
+        clock.addAndGet(OrderSlot.CANCEL_RETRY_FIRST_NANOS);
+        resolver.retryRefusedCancels(sink);
+        assertEquals(List.of(oid), sink.cancels);
+
+        report(oid, ExecType.CANCEL, 0L);
+        assertEquals(1, sink.newOrders.size());
+        assertEquals(101L, sink.newOrders.get(0).price, "the strategy's latest price, not the old one");
+        assertEquals(0, resolver.cancelRetriesScheduled());
+    }
+
+    @Test
+    void cancelReplace_aRefusedRepriceIsDroppedOnceTheStrategyWantsTheRestingPriceAgain() {
+        useCancelReplaceVenue();
+        long oid = goLiveReturningOid(100L, 10L);
+        resolve(101L, 10L, nullPrice(), 0L);
+        report(oid, ExecType.CANCEL_REJECT, 0L);
+        resolve(100L, 10L, nullPrice(), 0L);
+        sink.clear();
+
+        clock.addAndGet(OrderSlot.CANCEL_RETRY_MAX_NANOS);
+        resolver.retryRefusedCancels(sink);
+        report(oid, ExecType.CANCEL, 0L);
+
+        assertEquals(0, sink.cancels.size(), "what rests is wanted");
+        assertEquals(0, sink.newOrders.size(), "and the stale replacement is gone");
+    }
+
+    @Test
+    void cancelReplace_aRefusedRepriceTheStrategyRevertedBeforeTheNewIsNotRetried() {
+        useCancelReplaceVenue();
+        resolve(100L, 10L, nullPrice(), 0L);
+        long oid = sink.newOrders.get(0).clientOidCounter;
+        resolve(101L, 10L, nullPrice(), 0L);
+        report(oid, ExecType.CANCEL_REJECT, 0L);
+        resolve(100L, 10L, nullPrice(), 0L);
+        sink.clear();
+
+        clock.addAndGet(OrderSlot.CANCEL_RETRY_FIRST_NANOS);
+        resolver.retryRefusedCancels(sink);
+
+        assertEquals(List.of(), sink.cancels, "what was sent is what is wanted");
+    }
+
+    @Test
+    void cancelReplace_aRetryForAReplacedOrderLeavesItsSuccessorAlone() {
+        useCancelReplaceVenue();
+        long oid = goLiveReturningOid(100L, 10L);
+        resolve(101L, 10L, nullPrice(), 0L);
+        report(oid, ExecType.CANCEL_REJECT, 0L);
+        resolve(102L, 10L, nullPrice(), 0L);
+        report(oid, ExecType.CANCEL, 0L);
+        assertEquals(102L, sink.newOrders.get(sink.newOrders.size() - 1).price);
+        resolve(102L, 10L, nullPrice(), 0L);
+        sink.clear();
+
+        clock.addAndGet(OrderSlot.CANCEL_RETRY_FIRST_NANOS);
+        resolver.retryRefusedCancels(sink);
+
+        assertEquals(List.of(), sink.cancels, "the new order at the wanted price must not be cancelled");
+        assertEquals(0, resolver.cancelRetriesScheduled());
+    }
+
+    @Test
+    void aPullRefusedBeforeTheNewIsRetriedEvenIfTheNewNeverComes() {
+        resolve(100L, 10L, nullPrice(), 0L);
+        long oid = sink.newOrders.get(0).clientOidCounter;
+        resolve(nullPrice(), 0L, nullPrice(), 0L);
+        report(oid, ExecType.CANCEL_REJECT, 0L);
+        sink.clear();
+
+        clock.addAndGet(OrderSlot.CANCEL_RETRY_FIRST_NANOS);
+        resolver.retryRefusedCancels(sink);
 
         assertEquals(List.of(oid), sink.cancels);
-        assertEquals(0, sink.modifies.size());
+        assertEquals(0, resolver.cancelRetriesScheduled());
+    }
+
+    @Test
+    void theRetryCountReturnsToZeroSoTheLoopStopsReadingTheClock() {
+        long oid = goLiveReturningOid(100L, 10L);
+        resolve(nullPrice(), 0L, nullPrice(), 0L);
+        report(oid, ExecType.CANCEL_REJECT, 0L);
+        assertEquals(1, resolver.cancelRetriesScheduled());
+        report(oid, ExecType.CANCEL_REJECT, 0L);
+        assertEquals(1, resolver.cancelRetriesScheduled(), "rescheduled, not counted twice");
+
+        clock.addAndGet(OrderSlot.CANCEL_RETRY_MAX_NANOS);
+        resolver.retryRefusedCancels(sink);
+        report(oid, ExecType.CANCEL, 0L);
+        clock.addAndGet(OrderSlot.CANCEL_RETRY_MAX_NANOS);
+        resolver.retryRefusedCancels(sink);
+
+        assertEquals(0, resolver.cancelRetriesScheduled());
     }
 
     @Test

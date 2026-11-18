@@ -44,6 +44,12 @@ public final class IntentResolver {
     private final LongHashMap<OrderSlot> bidSlots = new LongHashMap<>(4);
     private final LongHashMap<OrderSlot> askSlots = new LongHashMap<>(4);
     private final Consumer<OrderSlot> slotCanceller = this::cancelSlot;
+    private final Consumer<OrderSlot> cancelRetrier = this::retryCancelIfDue;
+    // Slots with a refused pull's cancel scheduled to go again, and the earliest time one is due.
+    private int cancelRetriesScheduled;
+    private long nextCancelRetryNanos = Long.MAX_VALUE;
+    private long cancelRetryNowNanos;
+    private ActionSink cancelRetryHandler;
     private int cancelListing;
     private int cancelExchange;
     private boolean cancelPendingToo;
@@ -133,6 +139,15 @@ public final class IntentResolver {
         ExecType exec = report.decoder.execType();
         switch (exec) {
             case NEW -> {
+                if (slot.isCancelSentBeforeAck()) {
+                    // Its cancel is already out: a queued pull has been sent, and a queued replacement waits for the
+                    // CANCEL, as after any cancel.
+                    slot.onNewAckedWhileCancelling();
+                    if (slot.hasQueuedIntent() && slot.getQueuedSize() == 0) {
+                        slot.clearQueuedIntent();
+                    }
+                    return;
+                }
                 if (slot.getState() == OrderSlot.State.PENDING_MODIFY) {
                     slot.onModifyConfirmed();
                 } else {
@@ -180,9 +195,18 @@ public final class IntentResolver {
                     slot.clearQueuedIntent();
                 }
             }
-            default -> {
-                // CANCEL_REJECT: order remains live, revert pending state
-                if (slot.getState() == OrderSlot.State.PENDING_MODIFY) {
+            case CANCEL_REJECT -> {
+                // The order remains live: revert the pending state. The cancel of an order wanted gone, or of one a
+                // cancel-replace is moving, goes again after a pause that doubles while refusals continue; at once
+                // would loop against a venue that keeps refusing (a rate limit, a minimum order age).
+                if (slot.isPullWanted() || slot.isReplacementWaiting()) {
+                    scheduleCancelRetry(slot);
+                }
+                if (slot.isCancelSentBeforeAck()) {
+                    // Refused before the order was even acknowledged: it stays PENDING_NEW, and what is queued (a
+                    // pull or a replacement) is acted on at its NEW, or by the retry if that comes first.
+                    slot.onCancelBeforeAckRejected();
+                } else if (slot.getState() == OrderSlot.State.PENDING_MODIFY) {
                     if (report.decoder.rejectReason() == RejectReason.RATE_LIMITED) {
                         slot.onRateLimited(nanoClock.getAsLong());
                     }
@@ -192,15 +216,14 @@ public final class IntentResolver {
                     }
                 } else if (slot.getState() == OrderSlot.State.PENDING_CANCEL) {
                     slot.onCancelRejected();
-                    if (!slot.supportsNativeModify()) {
-                        // Without native modify the queued intent is the replacement whose cancel was just
-                        // refused. Re-sending it would cancel again and loop against a venue that keeps
-                        // refusing (e.g. a minimum order age), so wait for the strategy's next intent.
-                        slot.clearQueuedIntent();
-                    } else if (slot.hasQueuedIntent()) {
+                    // Without native modify the queued replacement waits for the retry.
+                    if (slot.supportsNativeModify() && slot.hasQueuedIntent()) {
                         processQueuedIntentOnLive(exchangeId, securityId, slot, handler);
                     }
                 }
+            }
+            default -> {
+                // Not a report the slot acts on.
             }
         }
     }
@@ -215,6 +238,11 @@ public final class IntentResolver {
             OrderSlot slot,
             ActionSink handler) {
         boolean wantsOrder = desiredSize > 0;
+        if (wantsOrder) {
+            slot.clearPullWanted();
+        } else if (slot.getState() != OrderSlot.State.EMPTY) {
+            slot.markPullWanted();
+        }
 
         switch (slot.getState()) {
             case EMPTY -> {
@@ -222,7 +250,22 @@ public final class IntentResolver {
                     submitNew(exchangeId, securityId, side, snappedPrice, desiredSize, flags, slot, handler);
                 }
             }
-            case PENDING_NEW, PENDING_MODIFY, PENDING_CANCEL -> {
+            case PENDING_NEW -> {
+                if (wantsOrder) {
+                    slot.queueIntent(snappedPrice, desiredSize, flags, cause);
+                } else {
+                    slot.queueIntent(0, 0, (short) 0, cause);
+                }
+                // The NEW can trail the venue taking the order by hundreds of milliseconds, so a resting order that
+                // has to go is cancelled now. A native modify waits for the NEW, as only a live order can be amended.
+                final boolean differs =
+                        !wantsOrder || slot.getActivePrice() != snappedPrice || slot.getRestingQty() != desiredSize;
+                if (differs && !slot.isCancelSentBeforeAck() && (!wantsOrder || !slot.supportsNativeModify())) {
+                    emitCancel(exchangeId, securityId, slot, handler);
+                    slot.onCancelSentBeforeAck();
+                }
+            }
+            case PENDING_MODIFY, PENDING_CANCEL -> {
                 if (wantsOrder) {
                     slot.queueIntent(snappedPrice, desiredSize, flags, cause);
                 } else {
@@ -236,6 +279,9 @@ public final class IntentResolver {
                     slot.onCancelSubmitted();
                 } else if (slot.getActivePrice() != snappedPrice || slot.getRestingQty() != desiredSize) {
                     changeLiveOrder(exchangeId, securityId, slot, snappedPrice, desiredSize, flags, handler);
+                } else {
+                    // What rests is what is wanted: a replacement still waiting on a refused cancel no longer is.
+                    slot.clearQueuedIntent();
                 }
             }
         }
@@ -407,9 +453,10 @@ public final class IntentResolver {
     /**
      * Cancels every resting order on {@code exchangeId} (or on every exchange, for {@link #ALL_EXCHANGES}) and
      * {@code listingId} (or on every listing, for {@link #ALL_LISTINGS}) and drops whatever the slots had queued, so
-     * nothing is placed again once the cancels are acknowledged. An order not yet acknowledged, or mid-modify, is
-     * cancelled as soon as its ack arrives; with {@code cancelAwaitingAck} one never acknowledged is also cancelled
-     * now, for when that ack never comes.
+     * nothing is placed again once the cancels are acknowledged. An order not yet acknowledged is cancelled now, once;
+     * with {@code cancelAwaitingAck} (a re-sweep) its cancel is sent again even if one is out, for when neither its
+     * ack nor the cancel's answer ever comes. An order mid-modify is cancelled as soon as the modify is answered. A
+     * refused cancel is sent again after a pause (see {@link #retryRefusedCancels}).
      */
     public void cancelAll(int exchangeId, int listingId, ActionSink handler, boolean cancelAwaitingAck) {
         cancelExchange = exchangeId;
@@ -426,12 +473,86 @@ public final class IntentResolver {
         return slot != null && slot.getState() != OrderSlot.State.EMPTY && slot.getActiveClientOid() == clientOid;
     }
 
+    /**
+     * Sends again each refused cancel worth retrying, a pull's or a cancel-replace's, once its pause is over.
+     * Called on every pass of the OMS loop; with nothing refused it costs one comparison.
+     */
+    public void retryRefusedCancels(ActionSink handler) {
+        if (cancelRetriesScheduled == 0) {
+            return;
+        }
+        final long now = nanoClock.getAsLong();
+        if (now < nextCancelRetryNanos) {
+            return;
+        }
+        cancelRetryNowNanos = now;
+        cancelRetryHandler = handler;
+        nextCancelRetryNanos = Long.MAX_VALUE;
+        bidSlots.forEachValue(cancelRetrier);
+        askSlots.forEachValue(cancelRetrier);
+        cancelRetryHandler = null;
+    }
+
+    /** Slots with a refused cancel waiting to go again; while any are, the loop reads the clock every pass. */
+    int cancelRetriesScheduled() {
+        return cancelRetriesScheduled;
+    }
+
+    private void scheduleCancelRetry(OrderSlot slot) {
+        if (slot.scheduleCancelRetry(nanoClock.getAsLong())) {
+            cancelRetriesScheduled++;
+        }
+        nextCancelRetryNanos = Math.min(nextCancelRetryNanos, slot.getCancelRetryAtNanos());
+    }
+
+    private void retryCancelIfDue(OrderSlot slot) {
+        if (!slot.isCancelRetryScheduled()) {
+            return;
+        }
+        if (slot.getCancelRetryAtNanos() > cancelRetryNowNanos) {
+            nextCancelRetryNanos = Math.min(nextCancelRetryNanos, slot.getCancelRetryAtNanos());
+            return;
+        }
+        slot.onCancelRetryDue();
+        cancelRetriesScheduled--;
+        if (!slot.isCancelRetryForActiveOrder() || (!slot.isPullWanted() && !slot.isReplacementWaiting())) {
+            return;
+        }
+        if (slot.getState() == OrderSlot.State.LIVE) {
+            retryOnLive(slot);
+        } else if (slot.getState() == OrderSlot.State.PENDING_NEW && !slot.isCancelSentBeforeAck()) {
+            retryBeforeNew(slot);
+        }
+        // Otherwise a cancel or modify is already out, and a refusal of it schedules the next try.
+    }
+
+    private void retryBeforeNew(OrderSlot slot) {
+        if (slot.isPullWanted()) {
+            slot.queueIntent(0, 0, (short) 0, cause);
+        }
+        emitCancel(slot.getExchangeId(), slot.getSecurityId(), slot, cancelRetryHandler);
+        slot.onCancelSentBeforeAck();
+    }
+
+    private void retryOnLive(OrderSlot slot) {
+        if (slot.isPullWanted()) {
+            slot.clearQueuedIntent();
+            emitCancel(slot.getExchangeId(), slot.getSecurityId(), slot, cancelRetryHandler);
+            slot.onCancelSubmitted();
+        } else {
+            processQueuedIntentOnLive(slot.getExchangeId(), slot.getSecurityId(), slot, cancelRetryHandler);
+        }
+    }
+
     private void cancelSlot(OrderSlot slot) {
         if (cancelListing != ALL_LISTINGS && slot.getListingId() != cancelListing) {
             return;
         }
         if (cancelExchange != ALL_EXCHANGES && slot.getExchangeId() != cancelExchange) {
             return;
+        }
+        if (slot.getState() != OrderSlot.State.EMPTY) {
+            slot.markPullWanted();
         }
         switch (slot.getState()) {
             case LIVE -> {
@@ -440,9 +561,12 @@ public final class IntentResolver {
                 slot.onCancelSubmitted();
             }
             case PENDING_NEW -> {
+                // Cancelled at once, as a pull would be; a re-sweep sends it again even with one out, for when neither
+                // the order's NEW nor the cancel's answer ever comes.
                 slot.queueIntent(0, 0, (short) 0, cause);
-                if (cancelPendingToo) {
+                if (cancelPendingToo || !slot.isCancelSentBeforeAck()) {
                     emitCancel(slot.getExchangeId(), slot.getSecurityId(), slot, cancelHandler);
+                    slot.onCancelSentBeforeAck();
                 }
             }
                 // Already acknowledged, so it is cancelled when the modify is answered. A cancel sent now would be

@@ -17,6 +17,10 @@ import group.gnometrading.oms.OrderCause;
  * <p>On a venue without native modify a slot never enters PENDING_MODIFY: changing a live order
  * cancels it and submits the target as a new order once the cancel is confirmed.
  *
+ * <p>A pull, or a change on a venue without native modify, cancels a PENDING_NEW order at once rather
+ * than waiting for its NEW, which can trail the venue's acceptance by hundreds of milliseconds; its NEW
+ * then moves the slot to PENDING_CANCEL.
+ *
  * <p>An order or amend refused for the venue's rate limit starts a cooldown, doubling with each
  * refusal in a row, during which the slot sends nothing new; resending on every intent would only
  * be refused again. Cancels are never held back.
@@ -25,6 +29,8 @@ public final class OrderSlot {
 
     static final long INITIAL_COOLDOWN_NANOS = 100_000_000L;
     static final long MAX_COOLDOWN_NANOS = 2_000_000_000L;
+    static final long CANCEL_RETRY_FIRST_NANOS = 100_000_000L;
+    static final long CANCEL_RETRY_MAX_NANOS = 2_000_000_000L;
 
     public enum State {
         EMPTY,
@@ -60,6 +66,16 @@ public final class OrderSlot {
 
     private long cooldownStepNanos;
     private long cooldownUntilNanos;
+    // A cancel already went out for the order while its NEW was unanswered, so its ack must not make it LIVE.
+    private boolean cancelSentBeforeAck;
+    // The strategy's latest intent, or a kill, wants the order gone. A refused cancel of it, or of one a cancel-replace
+    // is moving, is sent again after a pause, doubling while refusals continue.
+    private boolean pullWanted;
+    private boolean cancelRetryScheduled;
+    // The order the scheduled retry is for: a retry that comes due after the slot moved to another order is dropped.
+    private long cancelRetryOid;
+    private long cancelRetryAtNanos;
+    private long cancelRetryStepNanos;
 
     public OrderSlot(boolean nativeModify, int listingId, int exchangeId, long securityId) {
         this.nativeModify = nativeModify;
@@ -111,11 +127,100 @@ public final class OrderSlot {
         this.activeOrderQty = orderQty;
         this.filledQty = 0;
         this.activeFlags = flags;
+        this.cancelSentBeforeAck = false;
+        clearPull();
     }
 
     public void onNewAcked() {
         this.state = State.LIVE;
         this.cooldownStepNanos = 0;
+    }
+
+    /** A cancel went out for the order while it is still PENDING_NEW. */
+    public void onCancelSentBeforeAck() {
+        this.cancelSentBeforeAck = true;
+    }
+
+    public boolean isCancelSentBeforeAck() {
+        return cancelSentBeforeAck;
+    }
+
+    /** The order is wanted gone, by a pull or a kill. */
+    public void markPullWanted() {
+        this.pullWanted = true;
+    }
+
+    /** An intent wants an order again: no longer a pull, and the next refusal's pause starts over. */
+    public void clearPullWanted() {
+        this.pullWanted = false;
+        this.cancelRetryStepNanos = 0;
+    }
+
+    public boolean isPullWanted() {
+        return pullWanted;
+    }
+
+    /**
+     * The venue refused a cancel worth retrying: schedules it to be sent again, after 100 ms and doubling
+     * up to 2 s while refusals continue. Returns whether a retry was newly scheduled, false if one already was.
+     */
+    public boolean scheduleCancelRetry(long nowNanos) {
+        this.cancelRetryStepNanos = this.cancelRetryStepNanos == 0
+                ? CANCEL_RETRY_FIRST_NANOS
+                : Math.min(2 * this.cancelRetryStepNanos, CANCEL_RETRY_MAX_NANOS);
+        this.cancelRetryAtNanos = nowNanos + this.cancelRetryStepNanos;
+        this.cancelRetryOid = this.activeClientOid;
+        if (this.cancelRetryScheduled) {
+            return false;
+        }
+        this.cancelRetryScheduled = true;
+        return true;
+    }
+
+    /** Whether the retry that came due is still for the order the slot works. */
+    public boolean isCancelRetryForActiveOrder() {
+        return cancelRetryOid == activeClientOid;
+    }
+
+    /**
+     * A replacement waits behind a refused cancel: on a venue without native modify, a queued order that differs
+     * from what the slot works.
+     */
+    public boolean isReplacementWaiting() {
+        return !nativeModify
+                && hasQueuedIntent
+                && queuedSize > 0
+                && (queuedPrice != activePrice || queuedSize != getRestingQty());
+    }
+
+    public boolean isCancelRetryScheduled() {
+        return cancelRetryScheduled;
+    }
+
+    public long getCancelRetryAtNanos() {
+        return cancelRetryAtNanos;
+    }
+
+    /** The scheduled retry has come due and is being dealt with. */
+    public void onCancelRetryDue() {
+        this.cancelRetryScheduled = false;
+    }
+
+    private void clearPull() {
+        this.pullWanted = false;
+        this.cancelRetryStepNanos = 0;
+    }
+
+    /** The NEW of an order already being cancelled: the venue took it, and the cancel sent before is now pending. */
+    public void onNewAckedWhileCancelling() {
+        this.state = State.PENDING_CANCEL;
+        this.cooldownStepNanos = 0;
+        this.cancelSentBeforeAck = false;
+    }
+
+    /** The venue refused the cancel sent before the NEW: the order stays PENDING_NEW, with no cancel out. */
+    public void onCancelBeforeAckRejected() {
+        this.cancelSentBeforeAck = false;
     }
 
     public void onCancelSubmitted() {
@@ -191,6 +296,8 @@ public final class OrderSlot {
         this.activeFlags = 0;
         this.pendingModifyPrice = 0;
         this.pendingModifyOrderQty = 0;
+        this.cancelSentBeforeAck = false;
+        clearPull();
     }
 
     /** The venue refused this slot's order or amend for its rate limit. */

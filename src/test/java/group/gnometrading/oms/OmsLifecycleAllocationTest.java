@@ -86,6 +86,7 @@ class OmsLifecycleAllocationTest {
         final LedgerRing ledger = new LedgerRing(1024, LedgerAgent.MAX_EVENTS_PER_BATCH, Long.MAX_VALUE / 4, positions);
         final int[] drained = {0};
         final MessageConsumer<LedgerEvent> drain = event -> drained[0]++;
+        final long[] nowNanos = {1L};
         final OrderManagementSystem oms = new OrderManagementSystem(
                 new NullLogger(),
                 new PooledOrderStateManager(64),
@@ -96,7 +97,7 @@ class OmsLifecycleAllocationTest {
                 prices,
                 slots,
                 ledger,
-                () -> 1L);
+                () -> nowNanos[0]);
         final LastOrderSink sink = new LastOrderSink();
         final Reports reports = new Reports(oms, sink);
         final Intent bid = bidIntent(price, 10 * unit);
@@ -135,6 +136,28 @@ class OmsLifecycleAllocationTest {
             oms.processIntent(pull, sink);
             oms.processIntent(bid, sink);
             reports.reject(sink.lastOrderCounter, RejectReason.EXCHANGE_REJECTED);
+            // A quote pulled before its NEW: the cancel goes at once, and the NEW and CANCEL then close it.
+            oms.processIntent(bid, sink);
+            final long pulledEarly = sink.lastOrderCounter;
+            oms.processIntent(pull, sink);
+            reports.send(pulledEarly, ExecType.NEW, 0, 0, 0, 10 * unit);
+            reports.send(pulledEarly, ExecType.CANCEL, 0, 0, 0, 0);
+            // One whose early cancel is refused: the pull stands, and the NEW sends the cancel again.
+            oms.processIntent(bid, sink);
+            final long refusedEarly = sink.lastOrderCounter;
+            oms.processIntent(pull, sink);
+            reports.send(refusedEarly, ExecType.CANCEL_REJECT, 0, 0, 0, 0);
+            reports.send(refusedEarly, ExecType.NEW, 0, 0, 0, 10 * unit);
+            reports.send(refusedEarly, ExecType.CANCEL, 0, 0, 0, 0);
+            // A pull refused once the order rests: its cancel goes again after a pause.
+            oms.processIntent(bid, sink);
+            final long refusedPull = sink.lastOrderCounter;
+            reports.send(refusedPull, ExecType.NEW, 0, 0, 0, 10 * unit);
+            oms.processIntent(pull, sink);
+            reports.send(refusedPull, ExecType.CANCEL_REJECT, 0, 0, 0, 0);
+            nowNanos[0] += 3_000_000_000L;
+            oms.retryRefusedCancels(sink);
+            reports.send(refusedPull, ExecType.CANCEL, 0, 0, 0, 0);
             // A new bad-data spell each cycle: the bid is refused and the refusal logged, then a good book clears it.
             prices.markBad(slot, tick[0]);
             oms.processIntent(bid, sink);

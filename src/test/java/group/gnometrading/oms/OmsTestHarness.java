@@ -82,6 +82,17 @@ public final class OmsTestHarness {
     }
 
     OmsTestHarness(RiskEngine riskEngine, SharedPriceBuffer priceBuffer, PriceSlotRegistry priceSlots) {
+        this(riskEngine, priceBuffer, priceSlots, LedgerSink.NONE);
+    }
+
+    /** With the ledger the OMS records its orders and fills in. */
+    OmsTestHarness(LedgerSink ledger) {
+        this(new RiskEngine(), new SharedPriceBuffer(4), new PriceSlotRegistry(4), ledger);
+        quote(LISTING_ID, TOUCH_BID, TOUCH_ASK);
+    }
+
+    OmsTestHarness(
+            RiskEngine riskEngine, SharedPriceBuffer priceBuffer, PriceSlotRegistry priceSlots, LedgerSink ledger) {
         this.riskEngine = riskEngine;
         this.priceBuffer = priceBuffer;
         this.priceSlots = priceSlots;
@@ -96,7 +107,7 @@ public final class OmsTestHarness {
                 securityMaster,
                 priceBuffer,
                 priceSlots,
-                LedgerSink.NONE,
+                ledger,
                 clock);
         this.sink = new RecordingSink();
         stubDefaultListing();
@@ -116,6 +127,11 @@ public final class OmsTestHarness {
         for (int pass = 0; pass < OrderManagementSystem.RESWEEP_CHECK_PASSES; pass++) {
             oms.applyRiskChanges(sink);
         }
+    }
+
+    /** What the OMS agent does each pass to send refused pulls' cancels again. */
+    void retryRefusedCancels() {
+        oms.retryRefusedCancels(sink);
     }
 
     /** What the OMS agent does at the end of its loop. */
@@ -250,6 +266,22 @@ public final class OmsTestHarness {
     void injectCancelReject(long clientOidCounter) {
         injectExecReport(
                 clientOidCounter, ExecType.CANCEL_REJECT, 0, 0, 0, 0, OrderExecutionReportDecoder.feeNullValue());
+    }
+
+    void injectCancelReject(long clientOidCounter, RejectReason reason) {
+        OrderExecutionReport report = buildExecReport(
+                STRATEGY_ID,
+                clientOidCounter,
+                EXCHANGE_ID,
+                SECURITY_ID,
+                ExecType.CANCEL_REJECT,
+                0,
+                0,
+                0,
+                0,
+                OrderExecutionReportDecoder.feeNullValue());
+        report.encoder.rejectReason(reason);
+        oms.processExecutionReport(report, sink);
     }
 
     void injectExpire(long clientOidCounter) {

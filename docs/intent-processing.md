@@ -72,12 +72,16 @@ exists at a time, and to buffer incoming intents that arrive while an action is 
        │   │                                              │
        └───┴──────────────────────────────────────────────┘
             terminal (FILL / REJECT / EXPIRE from PENDING_NEW)
+
+     PENDING_NEW ──── NEW ack, cancel already sent ────► PENDING_CANCEL
 ```
 
 States:
 
 - **EMPTY** — no active order; slot is ready to accept a new submission.
 - **PENDING_NEW** — a new order has been sent to the exchange; awaiting the first exec report.
+  A pull, or a change on a venue without native modify, cancels it at once (see *Cancelling
+  before the NEW*).
 - **LIVE** — the exchange has acknowledged the order (`ExecType.NEW`). Modifies and cancels
   can now be sent.
 - **PENDING_MODIFY** — a modify has been sent; awaiting the exchange's confirmation
@@ -102,6 +106,53 @@ The queued intent fires as soon as the slot transitions back to LIVE:
 
 If nothing is queued when the slot becomes LIVE, no action is taken.
 
+### Cancelling before the NEW
+
+A venue's NEW can trail its acceptance of the order by hundreds of milliseconds (Polymarket
+International reports it from its account websocket, which was measured lagging the HTTP answer by
+up to 420 ms), and a quote the strategy wants gone must not keep resting through that. So in
+`PENDING_NEW`:
+
+- a pull (size 0), on any venue, or
+- a different price or size on a venue without native modify
+
+sends the cancel at once and marks the slot (`cancelSentBeforeAck`). The intent is still queued:
+a pull as `(0, 0)`, a change as the replacement to place once the order is cancelled. Later intents
+only replace what is queued; no second cancel goes out. A change on a venue with native modify still
+waits for the NEW, since only a live order can be amended.
+
+The cancel may reach the venue before the order does. A gateway that cancels by the venue's own
+order id (Kalshi, Polymarket US) holds it until the submit is answered. Polymarket International's
+order id is known before sending, so its gateway sends the cancel at once; if the cancel overtakes
+the order there, the venue refuses the order as already cancelled and the gateway reports that as a
+CANCEL, not a REJECT. Then:
+
+- **NEW**: the slot moves to `PENDING_CANCEL`, not LIVE. A queued pull is dropped (its cancel is
+  out); a queued replacement waits for the CANCEL.
+- **CANCEL / REJECT / EXPIRE** (before or after the NEW): terminal as usual; a queued replacement is
+  submitted.
+- **FILL**: terminal; the queued intent is dropped.
+- **CANCEL_REJECT** before the NEW: the mark is cleared and the slot stays `PENDING_NEW`. A queued
+  pull stays, so the NEW sends its cancel again. A queued replacement is dropped on a venue without
+  native modify, and the strategy's next intent retries, as after any refused cancel there; with
+  native modify it fires on the NEW.
+
+A kill cancels an order still awaiting its NEW at once, the same way: marked, and not again while one
+is out. Its re-sweep, every second while the scope stays killed, sends that cancel again even with one
+out, in case neither the NEW nor the cancel's answer ever comes (a gateway restart).
+
+### Refused cancels are retried
+
+An order the strategy pulled, or a kill wants gone, stays wanted gone until it ends or a later intent
+wants an order on that side again. On a venue without native modify, a reprice is a cancel with the
+new price queued behind it. If the venue refuses either cancel (a rate limit, a stall the gateway gave
+up on, a market pause), the queued replacement is kept and the cancel is sent again from the OMS loop
+(`retryRefusedCancels`) after 100 ms, the pause doubling up to 2 s while refusals continue, or at the
+order's NEW if it was refused before one. A later intent that wants what already rests drops the
+waiting replacement. Strategies send an intent once and only again when it changes, so without this a
+refused cancel would leave a pulled quote, or one at an abandoned price, resting until the strategy
+next changed its mind.
+
 A queued intent keeps the `OrderCause` it arrived with (its intent sequence and trigger), and whatever it fires is
 sent under that cause rather than the report that freed the slot: the order is still the strategy's reaction to the
 event it was handling then, only delayed, so tick-to-trade measured from that event includes the wait.
@@ -119,7 +170,7 @@ Decision table by current slot state and desired outcome:
 | Slot State      | Wants order (`size > 0`)                                  | No order (`size == 0`)               |
 |-----------------|-----------------------------------------------------------|--------------------------------------|
 | EMPTY           | Submit new order → PENDING_NEW                            | Nothing                              |
-| PENDING_NEW     | Queue intent (price, size)                                | Queue cancel intent (0, 0)           |
+| PENDING_NEW     | Queue intent (price, size). Without native modify, a different one also cancels now (once) | Queue (0, 0) and cancel now (once) |
 | LIVE            | Same price and resting size as what is working → nothing. Different → modify (order qty = size + filled) → PENDING_MODIFY; on a venue without native modify, queue (price, size) and cancel → PENDING_CANCEL. | Cancel → PENDING_CANCEL |
 | PENDING_MODIFY  | Queue intent (price, size)                                | Queue cancel intent (0, 0)           |
 | PENDING_CANCEL  | Queue intent (price, size)                                | Queue cancel intent (0, 0)           |
@@ -214,7 +265,9 @@ A take intent is expressed with null bid/ask fields. The null sentinel maps to s
 
 - If the make slot is **LIVE**: a cancel is emitted immediately → slot moves to
   `PENDING_CANCEL`.
-- If the make slot is **PENDING_NEW/MODIFY/CANCEL**: a cancel intent `(0, 0)` is queued,
+- If the make slot is **PENDING_NEW**: the cancel is emitted at once and `(0, 0)` is queued
+  (see *Cancelling before the NEW*).
+- If the make slot is **PENDING_MODIFY/CANCEL**: a cancel intent `(0, 0)` is queued,
   overwriting any previously queued make intent. When the slot next becomes LIVE, it will
   cancel instead of modify.
 
@@ -300,9 +353,11 @@ so it reflects the quantity that was live just before this report arrived.
 - **CANCEL / REJECT / EXPIRE**: remove `leavesQtyBefore` from leaves. Slot → EMPTY. If a
   queued intent exists with `size > 0`, a new order is submitted immediately (resubmit).
   If the queued intent is `(0, 0)` or absent, the slot stays EMPTY.
-- **NEW ack**: no position change. Slot → LIVE. Queued intent fires if present.
+- **NEW ack**: no position change. Slot → LIVE. Queued intent fires if present. If a cancel
+  was already sent before the NEW, slot → `PENDING_CANCEL` instead.
 - **CANCEL_REJECT**: no position change. Slot reverts from `PENDING_MODIFY` or
-  `PENDING_CANCEL` to LIVE. Queued intent fires if present.
+  `PENDING_CANCEL` to LIVE. Queued intent fires if present. A refusal of a cancel sent
+  before the NEW leaves the slot `PENDING_NEW`.
 
 ### `leavesQty` Accounting Through a Modify
 

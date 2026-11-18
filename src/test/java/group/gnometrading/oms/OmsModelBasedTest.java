@@ -21,6 +21,8 @@ import org.junit.jupiter.api.Test;
  */
 class OmsModelBasedTest {
 
+    private static final int TAIL_EVENTS = 6;
+
     // =========================================================================
     // ModelPosition — Position.applyFill's rules, with money computed independently in BigInteger
     // =========================================================================
@@ -146,13 +148,21 @@ class OmsModelBasedTest {
                 case EMPTY -> {
                     if (wants) submitNew(side, securityId, listingId, price, size, slot);
                 }
-                case PENDING_NEW -> slot.queue(price, size);
+                case PENDING_NEW -> {
+                    slot.queue(price, size);
+                    boolean differs = !wants || price != slot.activePrice || size != slot.restingQty();
+                    if (differs && !slot.cancelSentBeforeAck && (!wants || !nativeModify)) {
+                        slot.cancelSentBeforeAck = true;
+                    }
+                }
                 case LIVE -> {
                     if (!wants) {
                         slot.clearQueue();
                         slot.state = ModelSlot.State.PENDING_CANCEL;
                     } else if (price != slot.activePrice || size != slot.restingQty()) {
                         doModify(side, price, size, slot);
+                    } else {
+                        slot.clearQueue();
                     }
                 }
                 case PENDING_MODIFY, PENDING_CANCEL -> slot.queue(price, size);
@@ -166,6 +176,7 @@ class OmsModelBasedTest {
             slot.activePrice = price;
             slot.activeOrderQty = size;
             slot.filledQty = 0;
+            slot.cancelSentBeforeAck = false;
             orders.put(oid, new ModelOrder(side, securityId, listingId, size));
             getOrCreatePosition(listingId).addLeaves(side, size);
         }
@@ -255,6 +266,12 @@ class OmsModelBasedTest {
             switch (type) {
                 case NEW -> {
                     order.leavesQty = leavesQty;
+                    if (slot.cancelSentBeforeAck) {
+                        slot.cancelSentBeforeAck = false;
+                        slot.state = ModelSlot.State.PENDING_CANCEL;
+                        if (slot.hasQueued && slot.queuedSize == 0) slot.clearQueue();
+                        return;
+                    }
                     if (slot.state == ModelSlot.State.PENDING_MODIFY) {
                         slot.state = ModelSlot.State.LIVE;
                         slot.activePrice = slot.pendingPrice;
@@ -290,16 +307,16 @@ class OmsModelBasedTest {
                     }
                 }
                 case CANCEL_REJECT -> {
-                    if (slot.state == ModelSlot.State.PENDING_MODIFY) {
+                    if (slot.cancelSentBeforeAck) {
+                        slot.cancelSentBeforeAck = false;
+                    } else if (slot.state == ModelSlot.State.PENDING_MODIFY) {
                         slot.state = ModelSlot.State.LIVE;
                         slot.pendingPrice = 0;
                         slot.pendingOrderQty = 0;
                         if (slot.hasQueued) fireQueuedOnLive(side, slot, order);
                     } else if (slot.state == ModelSlot.State.PENDING_CANCEL) {
                         slot.state = ModelSlot.State.LIVE;
-                        if (!nativeModify) {
-                            slot.clearQueue();
-                        } else if (slot.hasQueued) {
+                        if (nativeModify && slot.hasQueued) {
                             fireQueuedOnLive(side, slot, order);
                         }
                     }
@@ -357,6 +374,7 @@ class OmsModelBasedTest {
         long queuedPrice;
         long queuedSize;
         boolean hasQueued;
+        boolean cancelSentBeforeAck;
 
         void queue(long price, long size) {
             queuedPrice = price;
@@ -382,6 +400,7 @@ class OmsModelBasedTest {
             filledQty = 0;
             pendingPrice = 0;
             pendingOrderQty = 0;
+            cancelSentBeforeAck = false;
         }
     }
 
@@ -427,6 +446,12 @@ class OmsModelBasedTest {
         boolean acked;
         long leavesQty;
         long cumQty;
+        // The OMS sent a cancel for it, so the venue may answer that cancel even before the order's NEW.
+        boolean cancelRequested;
+        // Cancels the OMS sent for it that the venue has neither done nor refused.
+        int cancelsPending;
+        // The price it works at, as last sent.
+        long price;
 
         OutstandingOrder(long oid, Side side, int strategyId, long securityId, int listingId, long size) {
             this(oid, side, strategyId, securityId, listingId, size, false);
@@ -532,25 +557,36 @@ class OmsModelBasedTest {
         ReferenceModel model = new ReferenceModel(nativeModify);
         List<OutstandingOrder> outstanding = new ArrayList<>();
         Map<Long, OutstandingOrder> byOid = new HashMap<>();
+        PullTracker pulls = new PullTracker();
+        int[] prevCancels = {0};
 
         for (int ev = 0; ev < events; ev++) {
             String evCtx = ctx + " ev=" + ev;
             int prevNew = h.sink.newOrders.size();
             int prevMod = h.sink.modifies.size();
 
-            boolean sendIntent = outstanding.isEmpty() || rng.nextInt(3) < 2;
+            // The trial ends on the venue's answers alone, often to a pull, so a pull the OMS drops on some answer
+            // shows when everything settles.
+            final boolean lastIntent = ev == events - TAIL_EVENTS;
+            if (ev > events - TAIL_EVENTS && outstanding.isEmpty()) {
+                continue;
+            }
+            boolean sendIntent =
+                    lastIntent || (ev < events - TAIL_EVENTS && (outstanding.isEmpty() || rng.nextInt(3) < 2));
             if (sendIntent) {
+                final boolean pull = lastIntent && rng.nextBoolean();
                 long bidPrice = 0, bidSize = 0, askPrice = 0, askSize = 0;
-                if (useBid && rng.nextInt(4) > 0) {
+                if (!pull && useBid && rng.nextInt(4) > 0) {
                     bidPrice = (100L + rng.nextInt(5)) * PRICE_STEP;
                     bidSize = (1L + rng.nextInt(4)) * SIZE_STEP;
                 }
-                if (useAsk && rng.nextInt(4) > 0) {
+                if (!pull && useAsk && rng.nextInt(4) > 0) {
                     askPrice = (110L + rng.nextInt(5)) * PRICE_STEP;
                     askSize = (1L + rng.nextInt(4)) * SIZE_STEP;
                 }
                 h.submitBothIntent(bidPrice, bidSize, askPrice, askSize);
                 model.processIntent(bidPrice, bidSize, askPrice, askSize);
+                pulls.onIntent(bidPrice, bidSize, askPrice, askSize);
             } else {
                 int idx = rng.nextInt(outstanding.size());
                 OutstandingOrder o = outstanding.get(idx);
@@ -584,6 +620,9 @@ class OmsModelBasedTest {
                     }
                     case CANCEL, REJECT, EXPIRE -> terminal = true;
                     case CANCEL_REJECT -> {
+                        if (!o.modifyPending && o.cancelsPending > 0) {
+                            o.cancelsPending--;
+                        }
                         o.modifyRefused();
                         leavesQty = o.leavesQty;
                     }
@@ -618,6 +657,8 @@ class OmsModelBasedTest {
                     OmsTestHarness.STRATEGY_ID,
                     OmsTestHarness.SECURITY_ID,
                     OmsTestHarness.LISTING_ID);
+            countCancels(h, byOid, prevCancels);
+            assertAtMostOneQuotePerSide(outstanding, evCtx);
             assertPositionMatches(
                     model.getOrCreatePosition(OmsTestHarness.LISTING_ID),
                     h.getPosition(OmsTestHarness.LISTING_ID),
@@ -626,6 +667,135 @@ class OmsModelBasedTest {
                     outstanding, OmsTestHarness.LISTING_ID, h.getPosition(OmsTestHarness.LISTING_ID), evCtx);
             if (!nativeModify) {
                 assertEquals(0, h.sink.modifies.size(), evCtx + " — modify sent to a venue without native modify");
+            }
+        }
+        settleAndAssertPullsHold(h, outstanding, byOid, prevCancels, pulls, !nativeModify, ctx);
+    }
+
+    /**
+     * Each side's last intent. A pull must end with nothing resting on that side; on a venue without native modify, a
+     * quote left resting must be at the last price wanted, whatever cancels were refused on the way.
+     */
+    static final class PullTracker {
+        boolean bidPulled;
+        boolean askPulled;
+        long bidPrice;
+        long askPrice;
+
+        void onIntent(long bidPrice, long bidSize, long askPrice, long askSize) {
+            bidPulled = bidSize == 0;
+            askPulled = askSize == 0;
+            this.bidPrice = bidPrice;
+            this.askPrice = askPrice;
+        }
+
+        boolean mustBeFlat(Side side) {
+            return side == Side.Bid ? bidPulled : askPulled;
+        }
+
+        long wantedPrice(Side side) {
+            return side == Side.Bid ? bidPrice : askPrice;
+        }
+    }
+
+    /** A replacement goes only once the order it replaces is gone, so a side never has two quotes working. */
+    private static void assertAtMostOneQuotePerSide(List<OutstandingOrder> outstanding, String ctx) {
+        int bids = 0;
+        int asks = 0;
+        for (OutstandingOrder o : outstanding) {
+            if (o.isTake) continue;
+            if (o.side == Side.Bid) bids++;
+            else asks++;
+        }
+        if (bids > 1 || asks > 1) {
+            throw new AssertionError(ctx + " — two quotes working on one side: " + bids + " bids, " + asks + " asks");
+        }
+    }
+
+    private void countCancels(OmsTestHarness h, Map<Long, OutstandingOrder> byOid, int[] prevCancels) {
+        for (int j = prevCancels[0]; j < h.sink.cancels.size(); j++) {
+            OutstandingOrder o = byOid.get(h.sink.cancels.get(j));
+            if (o != null) o.cancelsPending++;
+        }
+        prevCancels[0] = h.sink.cancels.size();
+    }
+
+    /**
+     * Lets the venue answer everything without refusing, and the OMS retry what was refused: each order and amend
+     * acknowledged, each cancel done. A side whose last intent was a pull must then have nothing resting, which catches
+     * a pull the OMS dropped, refused or not.
+     */
+    private void settleAndAssertPullsHold(
+            OmsTestHarness h,
+            List<OutstandingOrder> outstanding,
+            Map<Long, OutstandingOrder> byOid,
+            int[] prevCancels,
+            PullTracker pulls,
+            boolean pricesMustConverge,
+            String ctx) {
+        for (int step = 0; step < 100; step++) {
+            OutstandingOrder next = null;
+            ExecType type = null;
+            for (OutstandingOrder o : outstanding) {
+                if (!o.acked || o.modifyPending) {
+                    next = o;
+                    type = ExecType.NEW;
+                    break;
+                }
+                if (o.cancelsPending > 0) {
+                    next = o;
+                    type = ExecType.CANCEL;
+                    break;
+                }
+            }
+            if (next == null) {
+                // Nothing for the venue to answer: let the OMS send refused pulls' cancels again, after their pause.
+                h.advanceNanos(2_100_000_000L);
+                h.retryRefusedCancels();
+                countCancels(h, byOid, prevCancels);
+                if (outstanding.stream().noneMatch(o -> o.cancelsPending > 0)) {
+                    break;
+                }
+                continue;
+            }
+            int prevNew = h.sink.newOrders.size();
+            int prevMod = h.sink.modifies.size();
+            if (type == ExecType.NEW) {
+                next.acked = true;
+                next.modifyPending = false;
+            } else {
+                outstanding.remove(next);
+                byOid.remove(next.oid);
+            }
+            h.injectExecReport(
+                    next.strategyId,
+                    next.oid,
+                    OmsTestHarness.EXCHANGE_ID,
+                    (int) next.securityId,
+                    type,
+                    0,
+                    0,
+                    next.cumQty,
+                    type == ExecType.NEW ? next.leavesQty : 0,
+                    0);
+            captureNewOrders(
+                    h,
+                    prevNew,
+                    prevMod,
+                    outstanding,
+                    byOid,
+                    OmsTestHarness.STRATEGY_ID,
+                    OmsTestHarness.SECURITY_ID,
+                    OmsTestHarness.LISTING_ID);
+            countCancels(h, byOid, prevCancels);
+        }
+        for (OutstandingOrder o : outstanding) {
+            if (!o.isTake && pulls.mustBeFlat(o.side)) {
+                throw new AssertionError(ctx + " — " + o.side + " order " + o.oid + " still rests after a pull");
+            }
+            if (!o.isTake && pricesMustConverge && o.price != pulls.wantedPrice(o.side)) {
+                throw new AssertionError(ctx + " — " + o.side + " order " + o.oid + " rests at " + o.price
+                        + ", not the price last wanted, " + pulls.wantedPrice(o.side));
             }
         }
     }
@@ -1049,13 +1219,21 @@ class OmsModelBasedTest {
             OmsTestHarness.NewOrderCapture cap = h.sink.newOrders.get(j);
             OutstandingOrder o = new OutstandingOrder(
                     cap.clientOidCounter(), cap.side(), strategyId, securityId, listingId, cap.size());
+            o.price = cap.price();
             outstanding.add(o);
             byOid.put(o.oid, o);
         }
         for (int j = prevMod; j < h.sink.modifies.size(); j++) {
             OmsTestHarness.ModifyCapture mod = h.sink.modifies.get(j);
             OutstandingOrder o = byOid.get(mod.clientOidCounter());
-            if (o != null) o.modifySent(mod.size()); // FIX: leaves = order qty - cum qty
+            if (o != null) {
+                o.modifySent(mod.size()); // FIX: leaves = order qty - cum qty
+                o.price = mod.price();
+            }
+        }
+        for (long cancelled : h.sink.cancels) {
+            OutstandingOrder o = byOid.get(cancelled);
+            if (o != null && !o.acked) o.cancelRequested = true;
         }
     }
 
@@ -1092,6 +1270,18 @@ class OmsModelBasedTest {
     }
 
     private ExecType pickExecType(Random rng, OutstandingOrder o) {
+        if (!o.acked && o.cancelRequested) {
+            // The cancel sent before the NEW can be answered first, or refused.
+            int roll = rng.nextInt(10);
+            if (roll < 4) return ExecType.NEW;
+            if (roll < 6) return ExecType.CANCEL;
+            if (roll < 7) {
+                o.cancelRequested = false;
+                return ExecType.CANCEL_REJECT;
+            }
+            if (roll < 9) return ExecType.REJECT;
+            return ExecType.FILL;
+        }
         if (!o.acked) {
             int roll = rng.nextInt(10);
             if (roll < 6) return ExecType.NEW;

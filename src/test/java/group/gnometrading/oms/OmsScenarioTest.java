@@ -5,8 +5,13 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
+import group.gnometrading.oms.ledger.LedgerEventType;
+import group.gnometrading.oms.ledger.LedgerRing;
+import group.gnometrading.oms.position.DefaultPositionTracker;
 import group.gnometrading.oms.position.Position;
+import group.gnometrading.oms.position.SharedPositionBuffer;
 import group.gnometrading.oms.risk.RiskEngine;
+import group.gnometrading.oms.risk.RiskSnapshots;
 import group.gnometrading.oms.risk.policy.MaxOrderSizePolicy;
 import group.gnometrading.oms.risk.policy.MaxPositionPolicy;
 import group.gnometrading.schemas.ExecType;
@@ -14,6 +19,7 @@ import group.gnometrading.schemas.OrderExecutionReportDecoder;
 import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.Statics;
+import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -534,5 +540,195 @@ class OmsScenarioTest {
         assertEquals(10L, pos.netQuantity, "the closing report books no second fill");
         assertEquals(0L, pos.leavesBuyQty);
         assertNull(h.getTrackedOrder(counter), "the order is finished");
+    }
+
+    @Test
+    void scenario_pullBeforeTheNewCancelsOnceAndClearsLeaves() {
+        long counter = h.submitBidIntent(100L, 10L);
+        h.sink.clear();
+
+        h.submitCancelIntent();
+        assertEquals(List.of(counter), h.sink.cancels, "the pull must not wait for the NEW");
+
+        h.injectAck(counter, 10);
+        assertEquals(List.of(counter), h.sink.cancels, "the NEW must not send the cancel again");
+        assertEquals(10L, h.getPosition(OmsTestHarness.LISTING_ID).leavesBuyQty, "still working until cancelled");
+
+        h.injectCancel(counter);
+        assertNull(h.getTrackedOrder(counter));
+        assertEquals(0L, h.getPosition(OmsTestHarness.LISTING_ID).leavesBuyQty);
+        assertEquals(0, h.sink.newOrders.size());
+    }
+
+    @Test
+    void scenario_cancelReplaceRepriceBeforeTheNewReplacesAfterTheCancel() {
+        h.stubListing(
+                OmsTestHarness.EXCHANGE_ID,
+                OmsTestHarness.SECURITY_ID,
+                OmsTestHarness.LISTING_ID,
+                0,
+                0,
+                OmsTestHarness.CANCEL_REPLACE_EXCHANGE_CODE);
+        long counter = h.submitBidIntent(100L, 10L);
+        h.sink.clear();
+
+        h.submitBidIntent(99L, 10L);
+        assertEquals(List.of(counter), h.sink.cancels);
+        assertEquals(0, h.sink.modifies.size());
+
+        h.injectAck(counter, 10);
+        h.injectCancel(counter);
+
+        assertEquals(1, h.sink.newOrders.size());
+        assertEquals(99L, h.sink.newOrders.get(0).price());
+        assertEquals(10L, h.getPosition(OmsTestHarness.LISTING_ID).leavesBuyQty, "only the replacement works");
+    }
+
+    @Test
+    void scenario_orderRefusedBecauseItsCancelArrivedFirst() {
+        h.stubListing(
+                OmsTestHarness.EXCHANGE_ID,
+                OmsTestHarness.SECURITY_ID,
+                OmsTestHarness.LISTING_ID,
+                0,
+                0,
+                OmsTestHarness.CANCEL_REPLACE_EXCHANGE_CODE);
+        long counter = h.submitBidIntent(100L, 10L);
+        h.submitCancelIntent();
+        h.sink.clear();
+
+        // The venue refuses an order whose cancel reached it first, which the gateway reports as its CANCEL.
+        h.injectCancel(counter);
+
+        assertNull(h.getTrackedOrder(counter));
+        assertEquals(0L, h.getPosition(OmsTestHarness.LISTING_ID).leavesBuyQty);
+        assertEquals(0, h.sink.newOrders.size());
+        assertEquals(0, h.sink.cancels.size());
+    }
+
+    @Test
+    void scenario_aRefusedEarlyPullIsCancelledAgainOnTheNew() {
+        h.stubListing(
+                OmsTestHarness.EXCHANGE_ID,
+                OmsTestHarness.SECURITY_ID,
+                OmsTestHarness.LISTING_ID,
+                0,
+                0,
+                OmsTestHarness.CANCEL_REPLACE_EXCHANGE_CODE);
+        long counter = h.submitBidIntent(100L, 10L);
+        h.submitCancelIntent();
+        h.sink.clear();
+
+        h.injectCancelReject(counter);
+        assertEquals(0, h.sink.cancels.size(), "nothing to cancel again until the venue has the order");
+
+        h.injectAck(counter, 10);
+        assertEquals(List.of(counter), h.sink.cancels, "the pull still stands once the order rests");
+
+        h.injectCancel(counter);
+        assertNull(h.getTrackedOrder(counter));
+        assertEquals(0, h.sink.newOrders.size());
+    }
+
+    @Test
+    void scenario_aRefusedPullIsCancelledAgainAfterAPauseThatDoubles() {
+        long counter = h.submitBidIntent(100L, 10L);
+        h.injectAck(counter, 10);
+        h.submitCancelIntent();
+        h.injectCancelReject(counter);
+        h.sink.clear();
+
+        h.retryRefusedCancels();
+        assertEquals(0, h.sink.cancels.size(), "not straight back at a venue that just refused");
+        h.advanceNanos(100_000_000L);
+        h.retryRefusedCancels();
+        assertEquals(List.of(counter), h.sink.cancels);
+
+        h.injectCancelReject(counter);
+        h.advanceNanos(100_000_000L);
+        h.retryRefusedCancels();
+        assertEquals(List.of(counter), h.sink.cancels, "the pause doubles while refusals continue");
+        h.advanceNanos(100_000_000L);
+        h.retryRefusedCancels();
+        assertEquals(List.of(counter, counter), h.sink.cancels);
+
+        h.injectCancel(counter);
+        h.advanceNanos(5_000_000_000L);
+        h.retryRefusedCancels();
+        assertEquals(List.of(counter, counter), h.sink.cancels, "nothing more once it is gone");
+        assertNull(h.getTrackedOrder(counter));
+    }
+
+    @Test
+    void scenario_aPullRefusedAfterItsEarlyCancelMetTheNewIsCancelledAgain() {
+        h.stubListing(
+                OmsTestHarness.EXCHANGE_ID,
+                OmsTestHarness.SECURITY_ID,
+                OmsTestHarness.LISTING_ID,
+                0,
+                0,
+                OmsTestHarness.CANCEL_REPLACE_EXCHANGE_CODE);
+        long counter = h.submitBidIntent(100L, 10L);
+        h.submitCancelIntent();
+        h.injectAck(counter, 10);
+        h.injectCancelReject(counter, RejectReason.RATE_LIMITED);
+        h.sink.clear();
+
+        h.advanceNanos(100_000_000L);
+        h.retryRefusedCancels();
+
+        assertEquals(List.of(counter), h.sink.cancels);
+    }
+
+    @Test
+    void scenario_aRefusedPullIsNotRetriedOnceTheStrategyQuotesAgain() {
+        long counter = h.submitBidIntent(100L, 10L);
+        h.injectAck(counter, 10);
+        h.submitCancelIntent();
+        h.injectCancelReject(counter);
+        h.submitBidIntent(100L, 10L); // the same quote: the order stays
+        h.sink.clear();
+
+        h.advanceNanos(1_000_000_000L);
+        h.retryRefusedCancels();
+
+        assertEquals(0, h.sink.cancels.size());
+        assertEquals(0, h.sink.newOrders.size());
+    }
+
+    @Test
+    void scenario_aKilledOrderWhoseCancelIsRefusedIsRetriedBeforeTheResweep() {
+        RiskEngine engine = new RiskEngine();
+        OmsTestHarness killed = new OmsTestHarness(engine);
+        long counter = killed.submitBidIntent(100L, 10L);
+        killed.injectAck(counter, 10);
+        RiskSnapshots.publishKills(engine, true, new int[0], new int[0]);
+        killed.applyRiskChanges();
+        killed.injectCancelReject(counter);
+        killed.sink.clear();
+
+        killed.advanceNanos(100_000_000L);
+        killed.retryRefusedCancels();
+
+        assertEquals(List.of(counter), killed.sink.cancels);
+    }
+
+    @Test
+    void scenario_aRefusedEarlyCancelRecordsOneAckInTheLedger() {
+        LedgerRing ledger =
+                new LedgerRing(16, 4, Long.MAX_VALUE, new DefaultPositionTracker(new SharedPositionBuffer(8)));
+        OmsTestHarness withLedger = new OmsTestHarness(ledger);
+        long counter = withLedger.submitBidIntent(100L, 10L);
+        withLedger.submitCancelIntent();
+
+        withLedger.injectCancelReject(counter);
+        withLedger.injectAck(counter, 10);
+
+        List<LedgerEventType> types = new ArrayList<>();
+        ledger.read(event -> types.add(event.type), 16);
+        assertEquals(
+                List.of(LedgerEventType.ORDER_OPENED, LedgerEventType.ORDER_ACKED),
+                types,
+                "the refused cancel says nothing of the order being taken; only its NEW does");
     }
 }

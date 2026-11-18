@@ -77,6 +77,8 @@ public final class OrderManagementSystem {
     private final Order riskCheckOrder = new Order();
     private final OrderExecutionReport syntheticReject = new OrderExecutionReport();
     private final RiskCheckingSink riskCheckingSink = new RiskCheckingSink();
+    private final Consumer<IntentResolver> cancelRetryVisitor =
+            resolver -> resolver.retryRefusedCancels(riskCheckingSink);
     private final ScopeCanceller scopeCanceller = new ScopeCanceller();
     private final CancelOrder directCancel = new CancelOrder();
     private final long[] seenSlotVersions;
@@ -163,6 +165,16 @@ public final class OrderManagementSystem {
             riskEngine.forEachKilledScope(scopeCanceller);
             scopeCanceller.resweep = false;
         }
+    }
+
+    /**
+     * Sends again cancels the venue refused, of orders wanted gone (a pull or a kill) or being replaced at a new price
+     * on a venue without native modify, each after a pause.
+     * Called on every pass of the OMS loop; with nothing refused it costs a check per strategy.
+     */
+    public void retryRefusedCancels(ActionSink sink) {
+        riskCheckingSink.delegate = sink;
+        resolvers.forEachValue(cancelRetryVisitor);
     }
 
     /**
@@ -323,7 +335,10 @@ public final class OrderManagementSystem {
             boolean modifyPending,
             boolean bookFill) {
         final long counter = tracked.getClientOidCounter();
-        if (awaitingAck && report.decoder.execType() != ExecType.REJECT) {
+        // A refused cancel says nothing of whether the venue has taken the order yet.
+        if (awaitingAck
+                && report.decoder.execType() != ExecType.REJECT
+                && report.decoder.execType() != ExecType.CANCEL_REJECT) {
             ledger.orderAcked(strategyId, listingId, tracked.getExchangeId(), counter, report);
         }
         if (modifyPending && report.decoder.execType() == ExecType.NEW) {

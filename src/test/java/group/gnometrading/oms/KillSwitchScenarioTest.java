@@ -81,16 +81,15 @@ class KillSwitchScenarioTest {
     }
 
     @Test
-    void anOrderNotYetAcknowledgedIsCancelledWhenItsAckArrives() {
+    void anOrderNotYetAcknowledgedIsCancelledAtOnceAndNotAgainOnItsAck() {
         long pending = h.submitBidIntent(100L * PX, 10L);
         RiskSnapshots.publishKills(engine, true, NONE, NONE);
         h.applyRiskChanges();
-        assertEquals(0, h.sink.cancels.size(), "nothing to address until the venue acknowledges it");
+        assertEquals(List.of(pending), h.sink.cancels, "a kill is no slower than a pull");
 
         h.injectAck(pending, 10);
 
-        assertEquals(1, h.sink.cancels.size());
-        assertEquals(pending, h.sink.cancels.get(0));
+        assertEquals(List.of(pending), h.sink.cancels, "its cancel is already out");
     }
 
     @Test
@@ -520,16 +519,69 @@ class KillSwitchScenarioTest {
     }
 
     @Test
-    void anOrderWhoseAckNeverArrivesIsCancelledDirectlyOnTheNextSweep() {
+    void anOrderWhoseAckNeverArrivesIsCancelledAgainOnEveryResweep() {
         long unacked = h.submitBidIntent(100L * PX, 10L);
         RiskSnapshots.publishKills(engine, true, NONE, NONE);
         h.applyRiskChanges();
-        assertEquals(0, h.sink.cancels.size(), "the first sweep waits for the ack");
+        assertEquals(List.of(unacked), h.sink.cancels);
 
-        h.advanceNanos(1_000_000_001L);
+        // Neither its NEW nor the cancel's answer comes, as across a gateway restart: the cancel may be lost.
+        for (int sweep = 0; sweep < 3; sweep++) {
+            h.advanceNanos(1_000_000_001L);
+            h.applyRiskChanges();
+        }
+
+        assertEquals(List.of(unacked, unacked, unacked, unacked), h.sink.cancels);
+    }
+
+    @Test
+    void anUnackedOrderAlreadyPulledIsNotCancelledAgainByTheKillsFirstSweep() {
+        long unacked = h.submitBidIntent(100L * PX, 10L);
+        h.submitCancelIntent();
+        RiskSnapshots.publishKills(engine, true, NONE, NONE);
         h.applyRiskChanges();
 
+        assertEquals(List.of(unacked), h.sink.cancels, "its cancel is already out");
+
+        h.injectAck(unacked, 10);
         assertEquals(List.of(unacked), h.sink.cancels);
+    }
+
+    @Test
+    void aKilledOrderWhoseResweepCancelIsRefusedIsCancelledOnItsNew() {
+        long unacked = h.submitBidIntent(100L * PX, 10L);
+        RiskSnapshots.publishKills(engine, true, NONE, NONE);
+        h.applyRiskChanges();
+        h.advanceNanos(1_000_000_001L);
+        h.applyRiskChanges();
+        h.injectCancelReject(unacked);
+        h.sink.clear();
+
+        h.injectAck(unacked, 10);
+
+        assertEquals(List.of(unacked), h.sink.cancels, "the kill's pull stands through the refusal");
+    }
+
+    @Test
+    void aKillAfterARefusedEarlyRepriceStillCancelsOnTheNew() {
+        h.stubListing(
+                OmsTestHarness.EXCHANGE_ID,
+                OmsTestHarness.SECURITY_ID,
+                OmsTestHarness.LISTING_ID,
+                0,
+                0,
+                OmsTestHarness.CANCEL_REPLACE_EXCHANGE_CODE);
+        long unacked = h.submitBidIntent(100L * PX, 10L);
+        h.submitBidIntent(101L * PX, 10L);
+        RiskSnapshots.publishKills(engine, true, NONE, NONE);
+        h.applyRiskChanges();
+        h.injectCancelReject(unacked);
+        h.sink.clear();
+
+        h.injectAck(unacked, 10);
+
+        assertEquals(List.of(unacked), h.sink.cancels);
+        assertEquals(0, h.sink.newOrders.size());
     }
 
     @Test

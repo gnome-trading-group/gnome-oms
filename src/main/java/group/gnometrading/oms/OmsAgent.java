@@ -179,6 +179,7 @@ public final class OmsAgent implements GnomeAgent, SequencedEventHandler, Action
         work += intentPoller.poll();
         // After order handling, so loss checks on a moved mark never delay an intent arriving with the tick.
         oms.checkMarkMoves(this);
+        oms.retryRefusedCancels(this);
         oms.checkLedger(this);
         if (processing != null) {
             processing.histograms().roll(nanoClock.nanoTime());
