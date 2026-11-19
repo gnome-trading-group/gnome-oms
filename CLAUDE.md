@@ -92,7 +92,8 @@ All code is under `src/main/java/group/gnometrading/oms/`; tests mirror it under
     e.g. the order book is full). Strategy gets a synthetic REJECT with `RISK_LIMIT_EXCEEDED`.
   - `ORDER_REJECTED_HALTED` - logged once per halt start, not per order. Cause: 0 stale risk data,
     1 kill switch, 2 strategy latched, 3 unguarded (live session missing a required policy).
-  - `ORDER_REJECTED_EXCHANGE_CONSTRAINTS` - listing spec rule broken (tick, min size), or a MARKET order with no price.
+  - `ORDER_REJECTED_EXCHANGE_CONSTRAINTS` - listing spec rule broken (off the price grid, lot, min size, min
+    notional), a MARKET order with no price, or a listing with no spec at all (refused, never sent unchecked).
   - `STRATEGY_LATCHED` - market-risk breach; cause 0 market limit (e.g. PnL loss), 1 consecutive venue rejects.
     Orders in that scope are cancelled and it stays halted until an operator resumes it; PnL recovery does not unlatch.
   - `RISK_UNGUARDED` - live session missing a required policy on a listing; nothing trades until it is added.

@@ -22,6 +22,7 @@ import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.schemas.Side;
 import group.gnometrading.schemas.Statics;
 import group.gnometrading.schemas.TimeInForce;
+import group.gnometrading.sm.PriceGrid;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -32,6 +33,15 @@ class OrderManagementSystemIntegrationTest {
     private static final long PX = Statics.SIZE_SCALING_FACTOR;
 
     private OmsTestHarness h;
+
+    private static final long DOLLAR = Statics.PRICE_SCALING_FACTOR;
+    private static final long CENT = DOLLAR / 100;
+    private static final long MILLI = DOLLAR / 1000;
+    // Kalshi's tapered_deci_cent: tenths of a cent below 10c and above 90c, cents between.
+    private static final PriceGrid TAPERED =
+            PriceGrid.of(new long[] {0, 10 * CENT, 90 * CENT}, new long[] {10 * CENT, 90 * CENT, DOLLAR}, new long[] {
+                MILLI, CENT, MILLI
+            });
 
     @BeforeEach
     void setUp() {
@@ -280,12 +290,60 @@ class OrderManagementSystemIntegrationTest {
     }
 
     @Test
-    void exchangeConstraint_zeroTick_isNotChecked() {
-        h.stubTickSize(OmsTestHarness.LISTING_ID, 0);
+    void exchangeConstraint_listingWithNoSpec_isRefused() {
+        h.stubNoSpec(OmsTestHarness.LISTING_ID);
 
         h.submitBidIntent(105L, 5L);
 
-        assertEquals(1, h.sink.newOrders.size());
+        assertEquals(0, h.sink.newOrders.size());
+        assertEquals(RejectReason.INVALID_PRICE, h.sink.execReports.get(0).rejectReason());
+    }
+
+    @Test
+    void exchangeConstraint_marketOrderOnAListingWithNoSpec_isRefused() {
+        h.stubNoSpec(OmsTestHarness.LISTING_ID);
+
+        h.submitTakeIntent(5L, Side.Bid);
+
+        assertEquals(0, h.sink.newOrders.size());
+        assertEquals(RejectReason.INVALID_PRICE, h.sink.execReports.get(0).rejectReason());
+    }
+
+    @Test
+    void exchangeConstraint_taperedGrid_takesTenthsOfACentOnlyInTheTails() {
+        h.stubGrid(OmsTestHarness.LISTING_ID, TAPERED);
+
+        h.submitBidIntent(47 * MILLI, 5L);
+        assertEquals(1, h.sink.newOrders.size(), "4.7c sits on the tenth-of-a-cent tail");
+
+        h.sink.clear();
+        h.submitAskIntent(475 * MILLI, 5L);
+        assertEquals(0, h.sink.newOrders.size(), "47.5c is between the middle band's cents");
+        assertEquals(RejectReason.INVALID_PRICE, h.sink.execReports.get(0).rejectReason());
+    }
+
+    @Test
+    void exchangeConstraint_taperedGrid_modifyIntoTheMiddleOffACent_isRefused() {
+        h.stubGrid(OmsTestHarness.LISTING_ID, TAPERED);
+        final long counter = h.submitBidIntent(47 * MILLI, 5L);
+        h.injectAck(counter, 5);
+        h.sink.clear();
+
+        h.submitBidIntent(475 * MILLI, 5L);
+
+        assertEquals(0, h.sink.modifies.size());
+        assertEquals(ExecType.CANCEL_REJECT, h.sink.execReports.get(0).execType());
+        assertEquals(RejectReason.INVALID_PRICE, h.sink.execReports.get(0).rejectReason());
+    }
+
+    @Test
+    void exchangeConstraint_linearCentGrid_refusesATenthOfACent() {
+        h.stubGrid(OmsTestHarness.LISTING_ID, PriceGrid.single(CENT, DOLLAR));
+
+        h.submitBidIntent(47 * MILLI, 5L);
+
+        assertEquals(0, h.sink.newOrders.size());
+        assertEquals(RejectReason.INVALID_PRICE, h.sink.execReports.get(0).rejectReason());
     }
 
     @Test
@@ -456,7 +514,6 @@ class OrderManagementSystemIntegrationTest {
 
     // --- reject streaks ---
 
-    private static final long CENT = Statics.PRICE_SCALING_FACTOR / 100;
     private static final int OTHER_SECURITY = 43;
     private static final int OTHER_LISTING = 101;
     private static final int OTHER_EXCHANGE = 2;

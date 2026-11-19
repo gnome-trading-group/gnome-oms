@@ -37,6 +37,7 @@ import group.gnometrading.schemas.TimeInForce;
 import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.ListingSpec;
+import group.gnometrading.sm.PriceGrid;
 import group.gnometrading.sm.Security;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -163,17 +164,27 @@ public final class OmsTestHarness {
         when(securityMaster.getListing(exchangeId, securityId)).thenReturn(listing);
         when(securityMaster.getListing(listingId)).thenReturn(listing);
         when(securityMaster.getListingSpec(eq(listingId), anyLong()))
-                .thenReturn(new ListingSpec(listingId, 1, lotSize, minNotional, 1, 0));
+                .thenReturn(
+                        new ListingSpec(listingId, PriceGrid.single(1, PriceGrid.OPEN), lotSize, minNotional, 1, 0));
     }
 
     void stubTickSize(int listingId, long tickSize) {
+        stubGrid(listingId, PriceGrid.single(tickSize, PriceGrid.OPEN));
+    }
+
+    void stubGrid(int listingId, PriceGrid grid) {
         when(securityMaster.getListingSpec(eq(listingId), anyLong()))
-                .thenReturn(new ListingSpec(listingId, tickSize, 0, 0, 1, 0));
+                .thenReturn(new ListingSpec(listingId, grid, 0, 0, 1, 0));
+    }
+
+    void stubNoSpec(int listingId) {
+        when(securityMaster.getListingSpec(eq(listingId), anyLong())).thenReturn(null);
     }
 
     void stubListingSpec(int listingId, long lotSize, long minNotional) {
         when(securityMaster.getListingSpec(eq(listingId), anyLong()))
-                .thenReturn(new ListingSpec(listingId, 1, lotSize, minNotional, 1, 0));
+                .thenReturn(
+                        new ListingSpec(listingId, PriceGrid.single(1, PriceGrid.OPEN), lotSize, minNotional, 1, 0));
     }
 
     long submitBidIntent(long price, long size) {
@@ -625,6 +636,10 @@ public final class OmsTestHarness {
                         + " \"region\": \"us-east-1\"}]";
             } else if (path.startsWith("/api/securities")) {
                 body = "[{\"security_id\": " + securityId + ", \"type\": 0, \"symbol\": \"S\"}]";
+            } else if (path.startsWith("/api/listing-specs")) {
+                body = "[{\"id\": 1, \"listing_id\": " + listingId
+                        + ", \"price_bands\": [{\"start\": 0, \"end\": null, \"step\": 1}],"
+                        + " \"effective_from\": \"1970-01-01T00:00:00Z\"}]";
             } else {
                 body = "[]";
             }

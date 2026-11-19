@@ -7,6 +7,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -48,6 +49,7 @@ import group.gnometrading.schemas.TimeInForce;
 import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.ListingSpec;
+import group.gnometrading.sm.PriceGrid;
 import group.gnometrading.sm.Security;
 import java.util.ArrayList;
 import java.util.List;
@@ -107,6 +109,9 @@ class OrderManagementSystemTest {
                 "SYM");
         lenient().when(securityMaster.getListing(EXCHANGE_ID, SECURITY_ID)).thenReturn(listing);
         lenient().when(securityMaster.getListing(LISTING_ID)).thenReturn(listing);
+        lenient()
+                .when(securityMaster.getListingSpec(eq(LISTING_ID), anyLong()))
+                .thenReturn(new ListingSpec(LISTING_ID, PriceGrid.single(1, PriceGrid.OPEN), 0, 0, 1, 0));
     }
 
     // --- rejection logging ---
@@ -114,7 +119,7 @@ class OrderManagementSystemTest {
     @Test
     void testAListingRuleRejectionNamesTheOrderAndTheRule() {
         when(securityMaster.getListingSpec(eq(LISTING_ID), anyLong()))
-                .thenReturn(new ListingSpec(LISTING_ID, 10, 0, 0, 1, 0));
+                .thenReturn(new ListingSpec(LISTING_ID, PriceGrid.single(10, PriceGrid.OPEN), 0, 0, 1, 0));
         submitIntent(105L, 10L);
         assertEquals(
                 List.of("ORDER_REJECTED_EXCHANGE_CONSTRAINTS 1 100 66 105 10 2"),
@@ -128,6 +133,43 @@ class OrderManagementSystemTest {
                         .get(1)
                         .endsWith(" 3"),
                 "min notional");
+    }
+
+    @Test
+    void testAListingWithNoSpecIsRefusedUnderItsOwnRule() {
+        when(securityMaster.getListingSpec(eq(LISTING_ID), anyLong())).thenReturn(null);
+        submitIntent(100L, 10L);
+        assertEquals(0, delegate.newOrders.size());
+        assertEquals(List.of(RejectReason.INVALID_PRICE), delegate.rejects);
+        assertTrue(logger.linesFor(LogMessage.ORDER_REJECTED_EXCHANGE_CONSTRAINTS)
+                .get(0)
+                .endsWith(" 5"));
+    }
+
+    @Test
+    void testAMarketOrderOnAListingWithNoSpecIsRefusedUnderItsOwnRuleNotForWantOfAPrice() {
+        when(securityMaster.getListingSpec(eq(LISTING_ID), anyLong())).thenReturn(null);
+        priceBuffer.writeQuote(priceSlot, 40 * CENT, 60 * CENT);
+        submitMarketIntent(Side.Bid, UNIT);
+        assertEquals(0, delegate.newOrders.size());
+        assertEquals(List.of(RejectReason.INVALID_PRICE), delegate.rejects);
+        assertTrue(logger.linesFor(LogMessage.ORDER_REJECTED_EXCHANGE_CONSTRAINTS)
+                .get(0)
+                .endsWith(" 5"));
+    }
+
+    @Test
+    void testAMarketOrderIsCheckedOnTheSpecItWasPricedOn() {
+        // The second read would see a cent grid, which the tenth-of-a-cent price is off.
+        when(securityMaster.getListingSpec(eq(LISTING_ID), anyLong()))
+                .thenReturn(new ListingSpec(LISTING_ID, PriceGrid.single(CENT / 10, PriceGrid.OPEN), 0, 0, 1, 0))
+                .thenReturn(new ListingSpec(LISTING_ID, PriceGrid.single(CENT, PriceGrid.OPEN), 0, 0, 1, 0));
+        priceBuffer.writeQuote(priceSlot, 40 * CENT, 605 * CENT / 10);
+        submitMarketIntent(Side.Bid, UNIT);
+
+        assertEquals(List.of(), delegate.rejects);
+        assertEquals(1, delegate.newOrders.size());
+        verify(securityMaster, times(1)).getListingSpec(eq(LISTING_ID), anyLong());
     }
 
     @Test
@@ -574,7 +616,8 @@ class OrderManagementSystemTest {
 
     private void stubSpec(long lotSize, long minNotional, long minSize) {
         when(securityMaster.getListingSpec(eq(LISTING_ID), anyLong()))
-                .thenReturn(new ListingSpec(LISTING_ID, 1, lotSize, minNotional, 1, minSize));
+                .thenReturn(new ListingSpec(
+                        LISTING_ID, PriceGrid.single(1, PriceGrid.OPEN), lotSize, minNotional, 1, minSize));
     }
 
     private void submitIntent(long price, long size) {

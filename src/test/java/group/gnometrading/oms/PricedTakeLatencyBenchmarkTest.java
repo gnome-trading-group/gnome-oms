@@ -34,6 +34,7 @@ import group.gnometrading.sequencer.SequencedRingBuffer;
 import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.ListingSpec;
+import group.gnometrading.sm.PriceGrid;
 import group.gnometrading.sm.Security;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -113,7 +114,7 @@ class PricedTakeLatencyBenchmarkTest {
         when(securityMaster.getListing(EXCHANGE_ID, SECURITY_ID)).thenReturn(listing);
         when(securityMaster.getListing(LISTING_ID)).thenReturn(listing);
         when(securityMaster.getListingSpec(eq(LISTING_ID), anyLong()))
-                .thenReturn(new ListingSpec(LISTING_ID, TICK, 0, 0, 1, 0));
+                .thenReturn(new ListingSpec(LISTING_ID, PriceGrid.single(TICK, PriceGrid.OPEN), 0, 0, 1, 0));
 
         final GlobalSequence sequence = new GlobalSequence();
         final SequencedRingBuffer<Mbp10Schema> marketData = new SequencedRingBuffer<>(Mbp10Schema::new, sequence);

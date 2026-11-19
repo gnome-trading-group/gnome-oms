@@ -52,6 +52,7 @@ public final class OrderManagementSystem {
     private static final int RULE_TICK = 2;
     private static final int RULE_MIN_NOTIONAL = 3;
     private static final int RULE_NO_MARKET_PRICE = 4;
+    private static final int RULE_NO_SPEC = 5;
     // Where SharedPriceBuffer.readTop puts the best bid and ask.
     private static final int TOP_BID = 0;
     private static final int TOP_ASK = 1;
@@ -694,10 +695,14 @@ public final class OrderManagementSystem {
                 emitNewOrderRejection(order, listingId, RejectReason.MARKET_DATA_BAD);
                 return;
             }
-            final int rule =
-                    order.decoder.orderType() == OrderType.MARKET && !priceMarketOrder(order, strategyId, listingId)
-                            ? RULE_NO_MARKET_PRICE
-                            : brokenListingRule(listingId, order.decoder.price(), order.decoder.size());
+            // Read once, so a market order is checked on the grid it was priced on.
+            final ListingSpec spec = currentSpec(listingId);
+            int rule = order.decoder.orderType() == OrderType.MARKET
+                    ? priceMarketOrder(order, strategyId, listingId, spec)
+                    : NO_RULE;
+            if (rule == NO_RULE) {
+                rule = brokenListingRule(spec, order.decoder.price(), order.decoder.size());
+            }
             if (rule != NO_RULE) {
                 logConstraintRejection(order, listingId, rule);
                 emitNewOrderRejection(order, listingId, rejectReasonFor(rule));
@@ -780,30 +785,29 @@ public final class OrderManagementSystem {
 
         /**
          * Turns a market order into an immediate-or-cancel limit at the worst price risk allows, so every check after
-         * this, and the venue, sees a real price. False when the listing has no price on the side it would take.
+         * this, and the venue, sees a real price. Returns the rule that stopped it, if any: no price on the side it would
+         * take, or no spec to put one on the listing's grid.
          */
-        private boolean priceMarketOrder(final Order order, final int strategyId, final int listingId) {
+        private int priceMarketOrder(
+                final Order order, final int strategyId, final int listingId, final ListingSpec spec) {
             final int slot = priceSlotRegistry.getSlot(listingId);
             if (slot == IntToIntHashMap.MISSING) {
-                return false;
+                return RULE_NO_MARKET_PRICE;
             }
             priceBuffer.readTop(slot, marketTop);
             final Side side = order.decoder.side();
             final long touch = side == Side.Bid ? marketTop[TOP_ASK] : marketTop[TOP_BID];
             if (touch <= 0) {
-                return false;
+                return RULE_NO_MARKET_PRICE;
             }
             final int exchangeId = order.decoder.exchangeId();
             final long slippage = riskEngine.marketSlippage(strategyId, listingId, exchangeId);
-            final ListingSpec spec = securityMaster.getListingSpec(listingId, clock.nanoTime());
-            final long price = MarketOrderPricing.worstPrice(
-                    side,
-                    touch,
-                    slippage,
-                    spec == null ? 0 : spec.tickSize(),
-                    riskEngine.directory().isBinary(listingId));
+            if (spec == null) {
+                return RULE_NO_SPEC;
+            }
+            final long price = MarketOrderPricing.worstPrice(side, touch, slippage, spec.grid());
             order.encoder.price(price).orderType(OrderType.LIMIT);
-            return true;
+            return NO_RULE;
         }
 
         private void logConstraintRejection(final Order order, final int listingId, final int rule) {
@@ -882,7 +886,7 @@ public final class OrderManagementSystem {
                 emitModifyRejection(modify, original, listingId, RejectReason.MARKET_DATA_BAD);
                 return;
             }
-            final int rule = brokenListingRule(listingId, modify.decoder.price(), newLeaves);
+            final int rule = brokenListingRule(currentSpec(listingId), modify.decoder.price(), newLeaves);
             if (rule != NO_RULE) {
                 logConstraintRejection(riskCheckOrder, listingId, rule);
                 emitModifyRejection(modify, original, listingId, rejectReasonFor(rule));
@@ -947,13 +951,12 @@ public final class OrderManagementSystem {
         }
 
         /**
-         * The listing rule an order breaks, or {@link #NO_RULE}. A listing without a spec, or with a zero field, is
-         * not checked on that field.
+         * The listing rule an order breaks, or {@link #NO_RULE}. Every listing gets a spec soon after it's created, so
+         * one without is refused rather than sent unchecked; a zero lot size or minimum notional isn't checked.
          */
-        private int brokenListingRule(int listingId, long price, long size) {
-            ListingSpec spec = securityMaster.getListingSpec(listingId, clock.nanoTime());
+        private int brokenListingRule(final ListingSpec spec, final long price, final long size) {
             if (spec == null) {
-                return NO_RULE;
+                return RULE_NO_SPEC;
             }
             if (spec.lotSize() > 0 && size % spec.lotSize() != 0) {
                 return RULE_LOT_SIZE;
@@ -961,20 +964,20 @@ public final class OrderManagementSystem {
             if (size < spec.minSize()) {
                 return RULE_MIN_SIZE;
             }
-            if (isOffTick(spec, price)) {
+            if (!spec.grid().valid(price)) {
                 return RULE_TICK;
             }
             return isBelowMinNotional(spec, price, size) ? RULE_MIN_NOTIONAL : NO_RULE;
         }
 
-        private RejectReason rejectReasonFor(int rule) {
-            return rule == RULE_TICK || rule == RULE_NO_MARKET_PRICE
-                    ? RejectReason.INVALID_PRICE
-                    : RejectReason.INVALID_SIZE;
+        private ListingSpec currentSpec(final int listingId) {
+            return securityMaster.getListingSpec(listingId, clock.nanoTime());
         }
 
-        private boolean isOffTick(ListingSpec spec, long price) {
-            return spec.tickSize() > 0 && price % spec.tickSize() != 0;
+        private RejectReason rejectReasonFor(int rule) {
+            return rule == RULE_TICK || rule == RULE_NO_MARKET_PRICE || rule == RULE_NO_SPEC
+                    ? RejectReason.INVALID_PRICE
+                    : RejectReason.INVALID_SIZE;
         }
 
         private boolean isBelowMinNotional(ListingSpec spec, long price, long size) {

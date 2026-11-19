@@ -40,6 +40,7 @@ import group.gnometrading.sequencer.SequencedRingBuffer;
 import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
 import group.gnometrading.sm.ListingSpec;
+import group.gnometrading.sm.PriceGrid;
 import group.gnometrading.sm.Security;
 import java.util.ArrayList;
 import java.util.List;
@@ -149,7 +150,7 @@ class MarketTakeStaleTouchTest {
         when(securityMaster.getListing(EXCHANGE_ID, SECURITY_ID)).thenReturn(listing);
         when(securityMaster.getListing(LISTING_ID)).thenReturn(listing);
         when(securityMaster.getListingSpec(eq(LISTING_ID), anyLong()))
-                .thenReturn(new ListingSpec(LISTING_ID, DOLLAR, 0, 0, 1, 0));
+                .thenReturn(new ListingSpec(LISTING_ID, PriceGrid.single(DOLLAR, PriceGrid.OPEN), 0, 0, 1, 0));
 
         OrderManagementSystem oms = new OrderManagementSystem(
                 new NullLogger(),

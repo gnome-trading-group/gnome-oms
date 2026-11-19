@@ -2,6 +2,8 @@ package group.gnometrading.oms;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.when;
 
@@ -42,6 +44,8 @@ import group.gnometrading.sequencer.SequencedPoller;
 import group.gnometrading.sequencer.SequencedRingBuffer;
 import group.gnometrading.sm.Exchange;
 import group.gnometrading.sm.Listing;
+import group.gnometrading.sm.ListingSpec;
+import group.gnometrading.sm.PriceGrid;
 import group.gnometrading.sm.Security;
 import java.util.ArrayList;
 import java.util.List;
@@ -133,6 +137,9 @@ class OmsAgentTest {
                 "SYM");
         when(securityMaster.getListing(EXCHANGE_ID, SECURITY_ID)).thenReturn(listing);
         lenient().when(securityMaster.getListing(LISTING_ID)).thenReturn(listing);
+        lenient()
+                .when(securityMaster.getListingSpec(eq(LISTING_ID), anyLong()))
+                .thenReturn(new ListingSpec(LISTING_ID, PriceGrid.single(1, PriceGrid.OPEN), 0, 0, 1, 0));
     }
 
     // --- doWork ---
