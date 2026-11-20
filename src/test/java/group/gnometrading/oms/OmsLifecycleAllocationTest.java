@@ -83,10 +83,11 @@ class OmsLifecycleAllocationTest {
                 directory,
                 streaks);
         final DefaultPositionTracker positions = new DefaultPositionTracker(new SharedPositionBuffer(16));
-        final LedgerRing ledger = new LedgerRing(1024, LedgerAgent.MAX_EVENTS_PER_BATCH, Long.MAX_VALUE / 4, positions);
+        final long[] nowNanos = {1L};
+        final LedgerRing ledger = new LedgerRing(
+                1024, LedgerAgent.MAX_EVENTS_PER_BATCH, Long.MAX_VALUE / 4, positions, () -> nowNanos[0]);
         final int[] drained = {0};
         final MessageConsumer<LedgerEvent> drain = event -> drained[0]++;
-        final long[] nowNanos = {1L};
         final OrderManagementSystem oms = new OrderManagementSystem(
                 new NullLogger(),
                 new PooledOrderStateManager(64),

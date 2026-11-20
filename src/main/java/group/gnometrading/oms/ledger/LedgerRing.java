@@ -12,13 +12,16 @@ import group.gnometrading.schemas.OrderExecutionReport;
 import group.gnometrading.schemas.RejectReason;
 import group.gnometrading.schemas.Side;
 import java.util.concurrent.TimeUnit;
+import org.agrona.concurrent.EpochNanoClock;
 
 /**
  * Hands the OMS's ledger events to the {@link LedgerAgent}, which writes them to the registry.
  *
  * <p>The OMS thread publishes; the agent thread reads, and once the registry has confirmed a batch, acknowledges it.
- * The OMS judges the ledger's health from its own side: it stamps each event as it publishes it, so the age of the
- * oldest unconfirmed event is known without trusting the agent's thread to be running at all.
+ * The OMS judges the ledger's health from its own side: it stamps each event with its own clock as it publishes it, so
+ * the age of the oldest unconfirmed event is known without trusting the agent's thread to be running at all. An
+ * event's own time (a venue's fill time, a gateway's receive time) is what the registry records, never what the age
+ * is measured from: a report can arrive long after the time it carries, as a fill caught up after a reconnect does.
  *
  * <p>An event that doesn't fit is lost. The OMS halts trading, and a GAP is recorded for that strategy and listing
  * as soon as there is room, so its position is reviewed before anything trusts it again.
@@ -36,8 +39,10 @@ public final class LedgerRing implements LedgerSink {
     private final OneToOneRingBuffer<LedgerEvent> ring;
     private final PositionTracker positions;
     private final long maxLagNs;
+    private final EpochNanoClock clock;
 
-    // Publish time of event n, at n % length. Unconfirmed events are those still in the ring plus the agent's one
+    // Publish time of event n on the OMS's clock, at n % length. Unconfirmed events are those still in the ring plus
+    // the agent's one
     // batch in flight, so this window always covers every one of them.
     private final long[] publishTimes;
     private long published;
@@ -59,12 +64,20 @@ public final class LedgerRing implements LedgerSink {
     private boolean rejectsChanged;
     private long nextRejectPublishNs;
 
+    /**
+     * @param clock the OMS's clock, the one {@link #isFailing} is given the time by
+     */
     public LedgerRing(
-            final int capacity, final int maxBatchEvents, final long maxLagNs, final PositionTracker positions) {
+            final int capacity,
+            final int maxBatchEvents,
+            final long maxLagNs,
+            final PositionTracker positions,
+            final EpochNanoClock clock) {
         this.ring = new OneToOneRingBuffer<>(LedgerEvent[]::new, LedgerEvent::new, capacity);
         this.publishTimes = new long[capacity + maxBatchEvents];
         this.maxLagNs = maxLagNs;
         this.positions = positions;
+        this.clock = clock;
     }
 
     @Override
@@ -248,7 +261,7 @@ public final class LedgerRing implements LedgerSink {
             recordGap(strategyId, listingId, clientOidCounter);
             return null;
         }
-        publishTimes[slotOf(published)] = timeNs;
+        publishTimes[slotOf(published)] = clock.nanoTime();
         final LedgerEvent event = ring.indexAt(index);
         event.listingId = listingId;
         event.clientOidCounter = clientOidCounter;

@@ -19,10 +19,12 @@ class LedgerRingTest {
     private static final long MAX_LAG_NS = 10_000_000_000L;
 
     private final DefaultPositionTracker positions = new DefaultPositionTracker(new SharedPositionBuffer(8));
+    private final long[] now = {1L};
 
     @Test
     void anEventWaitingTooLongToBeConfirmedFailsTheLedger() {
-        final LedgerRing ring = new LedgerRing(8, 4, MAX_LAG_NS, positions);
+        final LedgerRing ring = ring(8);
+        now[0] = 1_000L;
         ring.orderOpened(7, 100, opened(1, 1L, Side.Bid, 50, 10), 1_000L);
 
         assertFalse(ring.isFailing(1_000L + MAX_LAG_NS));
@@ -35,8 +37,10 @@ class LedgerRingTest {
 
     @Test
     void lagIsMeasuredFromTheOldestUnconfirmedEvent() {
-        final LedgerRing ring = new LedgerRing(8, 4, MAX_LAG_NS, positions);
+        final LedgerRing ring = ring(8);
+        now[0] = 1_000L;
         ring.orderOpened(7, 100, opened(1, 1L, Side.Bid, 50, 10), 1_000L);
+        now[0] = 5_000_000_000L;
         ring.orderOpened(7, 100, opened(1, 2L, Side.Bid, 50, 10), 5_000_000_000L);
         drain(ring);
         ring.acknowledge(1);
@@ -46,8 +50,23 @@ class LedgerRingTest {
     }
 
     @Test
+    void lagIsMeasuredFromWhenTheOmsPublishedAnEventNotFromTheTimeItCarries() {
+        final LedgerRing ring = ring(8);
+        now[0] = 20_000_000_000L;
+        final OrderExecutionReport report = new OrderExecutionReport();
+        report.encoder.exchangeOrderId("0xabc").timestampRecv(now[0] - MAX_LAG_NS - 1);
+
+        ring.orderAcked(7, 100, 1, 1L, report);
+
+        assertFalse(ring.isFailing(now[0]), "a report stamped long before it arrived is not a late ledger");
+        assertFalse(ring.isFailing(now[0] + MAX_LAG_NS));
+        assertTrue(ring.isFailing(now[0] + MAX_LAG_NS + 1), "it still fails once it waits too long itself");
+        assertEquals(now[0] - MAX_LAG_NS - 1, drain(ring).get(0).eventTimeNs, "the registry gets the report's time");
+    }
+
+    @Test
     void aFencedSessionFailsTheLedger() {
-        final LedgerRing ring = new LedgerRing(8, 4, MAX_LAG_NS, positions);
+        final LedgerRing ring = ring(8);
         ring.fence();
         assertTrue(ring.isFailing(0));
     }
@@ -55,7 +74,7 @@ class LedgerRingTest {
     @Test
     void aLostEventFailsTheLedgerAndRecordsAGapWithThePositionOnceThereIsRoom() {
         positions.seedStrategyPosition(7, 100, 3_000_000, 1_500_000_000L, 4);
-        final LedgerRing ring = new LedgerRing(2, 4, MAX_LAG_NS, positions);
+        final LedgerRing ring = ring(2);
         ring.orderOpened(7, 100, opened(1, 1L, Side.Bid, 50, 10), 1L);
         ring.orderOpened(7, 100, opened(1, 2L, Side.Bid, 50, 10), 2L);
         ring.orderOpened(7, 100, opened(1, 3L, Side.Bid, 50, 10), 3L);
@@ -78,7 +97,7 @@ class LedgerRingTest {
 
     @Test
     void anAckCarriesTheVenueIdWithoutItsPadding() {
-        final LedgerRing ring = new LedgerRing(8, 4, MAX_LAG_NS, positions);
+        final LedgerRing ring = ring(8);
         final OrderExecutionReport report = new OrderExecutionReport();
         report.encoder.exchangeOrderId("4071-100-1").timestampRecv(9L);
 
@@ -92,7 +111,7 @@ class LedgerRingTest {
 
     @Test
     void aConfirmedModifyCarriesTheOrdersNewPriceAndSize() {
-        final LedgerRing ring = new LedgerRing(8, 4, MAX_LAG_NS, positions);
+        final LedgerRing ring = ring(8);
         ring.orderModified(7, 100, 1, 5L, 450_000_000L, 20_000_000, 11L);
 
         final LedgerEvent modify = drain(ring).get(0);
@@ -107,7 +126,7 @@ class LedgerRingTest {
 
     @Test
     void refusalCountsWaitForRoomInsteadOfFailingTheLedger() {
-        final LedgerRing ring = new LedgerRing(2, 4, MAX_LAG_NS, positions);
+        final LedgerRing ring = ring(2);
         ring.orderOpened(7, 100, opened(1, 1L, Side.Bid, 50, 10), 1L);
         ring.orderOpened(7, 100, opened(1, 2L, Side.Bid, 50, 10), 1L);
         for (int i = 0; i < 1_000; i++) {
@@ -123,6 +142,10 @@ class LedgerRingTest {
         assertEquals(LedgerEventType.REJECT_COUNT, count.type);
         assertEquals(RejectReason.RISK_LIMIT_EXCEEDED, count.rejectReason);
         assertEquals(1_000, count.count);
+    }
+
+    private LedgerRing ring(final int capacity) {
+        return new LedgerRing(capacity, 4, MAX_LAG_NS, positions, () -> now[0]);
     }
 
     private static List<LedgerEvent> drain(final LedgerRing ring) {

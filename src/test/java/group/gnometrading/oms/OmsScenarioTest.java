@@ -715,8 +715,8 @@ class OmsScenarioTest {
 
     @Test
     void scenario_aRefusedEarlyCancelRecordsOneAckInTheLedger() {
-        LedgerRing ledger =
-                new LedgerRing(16, 4, Long.MAX_VALUE, new DefaultPositionTracker(new SharedPositionBuffer(8)));
+        LedgerRing ledger = new LedgerRing(
+                16, 4, Long.MAX_VALUE, new DefaultPositionTracker(new SharedPositionBuffer(8)), () -> 0L);
         OmsTestHarness withLedger = new OmsTestHarness(ledger);
         long counter = withLedger.submitBidIntent(100L, 10L);
         withLedger.submitCancelIntent();

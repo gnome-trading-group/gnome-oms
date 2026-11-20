@@ -46,7 +46,7 @@ class OmsLedgerTest {
     @BeforeEach
     void setUp() {
         positions = new DefaultPositionTracker(new SharedPositionBuffer(8));
-        ledger = new LedgerRing(64, LedgerAgent.MAX_EVENTS_PER_BATCH, MAX_LAG_NS, positions);
+        ledger = new LedgerRing(64, LedgerAgent.MAX_EVENTS_PER_BATCH, MAX_LAG_NS, positions, () -> now[0]);
         riskEngine = RiskEngine.withOrderPolicies(new OrderRiskPolicy[0]);
         oms = new OrderManagementSystem(
                 new NullLogger(),
@@ -204,6 +204,25 @@ class OmsLedgerTest {
     }
 
     @Test
+    void aReportStampedLongBeforeItArrivedLeavesTradingAlone() {
+        final long counter = placeBid(UNIT);
+        final long stamped = now[0];
+        ledger.acknowledge(drain().size());
+        now[0] += MAX_LAG_NS + 1;
+
+        // A gateway can stamp a cancel of an order it never placed with an old receive time; the OMS books the ack.
+        report(counter, ExecType.CANCEL, "0xabc", 0, 0, 0, stamped);
+        runLedgerChecks();
+
+        assertFalse(riskEngine.isStrategyHalted(OmsTestHarness.STRATEGY_ID));
+        final List<LedgerEvent> events = drain();
+        assertEquals(
+                List.of(LedgerEventType.ORDER_ACKED, LedgerEventType.ORDER_CLOSED),
+                events.stream().map(event -> event.type).toList());
+        assertEquals(stamped, events.get(0).eventTimeNs, "the registry still gets the report's own time");
+    }
+
+    @Test
     void anOrderRefusedWhileRiskIsStaleIsRejectedAsHalted() {
         final OrderManagementSystem staleOms = new OrderManagementSystem(
                 new NullLogger(),
@@ -257,6 +276,17 @@ class OmsLedgerTest {
             final long filled,
             final long cumulative,
             final long leaves) {
+        report(counter, type, exchangeOrderId, filled, cumulative, leaves, now[0]);
+    }
+
+    private void report(
+            final long counter,
+            final ExecType type,
+            final String exchangeOrderId,
+            final long filled,
+            final long cumulative,
+            final long leaves,
+            final long receivedNanos) {
         final OrderExecutionReport report = new OrderExecutionReport();
         report.encodeClientOid(counter, OmsTestHarness.STRATEGY_ID);
         report.encoder
@@ -270,7 +300,7 @@ class OmsLedgerTest {
                 .cumulativeQty(cumulative)
                 .leavesQty(leaves)
                 .fee(0)
-                .timestampRecv(now[0]);
+                .timestampRecv(receivedNanos);
         oms.processExecutionReport(report, sink);
     }
 

@@ -39,6 +39,8 @@ class LedgerAgentTest {
     private static final long FLUSH_MS = 250;
     private static final long MARK_MS = 1_000;
     private static final long MAX_LAG_NS = 10_000_000_000L;
+    // The OMS clock sits at the time these tests' events carry, so each lag check counts from it.
+    private static final long OMS_NANOS = 1L;
 
     private final ObjectMapper mapper = new ObjectMapper();
     private final long[] now = {1_000_000L};
@@ -54,7 +56,8 @@ class LedgerAgentTest {
                 64,
                 LedgerAgent.MAX_EVENTS_PER_BATCH,
                 MAX_LAG_NS,
-                new DefaultPositionTracker(new SharedPositionBuffer(8)));
+                new DefaultPositionTracker(new SharedPositionBuffer(8)),
+                () -> OMS_NANOS);
         prices = new SharedPriceBuffer(1);
         final PriceSlotRegistry slots = new PriceSlotRegistry(1);
         slots.register(100);

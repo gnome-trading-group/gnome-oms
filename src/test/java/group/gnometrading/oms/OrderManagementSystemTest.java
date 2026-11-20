@@ -534,8 +534,8 @@ class OrderManagementSystemTest {
 
     @Test
     void testARefusedOrderIsCountedInTheLedgerWithoutAnOrderRecord() {
-        LedgerRing ledger =
-                new LedgerRing(16, 4, Long.MAX_VALUE, new DefaultPositionTracker(new SharedPositionBuffer(8)));
+        LedgerRing ledger = new LedgerRing(
+                16, 4, Long.MAX_VALUE, new DefaultPositionTracker(new SharedPositionBuffer(8)), () -> 5_000L);
         OrderManagementSystem fullOms = new OrderManagementSystem(
                 new NullLogger(),
                 new PooledOrderStateManager(1),
